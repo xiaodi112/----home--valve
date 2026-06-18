@@ -1,0 +1,44 @@
+﻿# GD32 标准固件库 (第三方，无需上传)
+GD32L23x_Firmware_Library/
+
+# 编译产物
+*.o
+*.d
+*.crf
+*.lnp
+*.axf
+*.hex
+*.bin
+*.map
+*.htm
+*.dep
+*.iex
+*.tra
+*.uvguix.*
+*.uvoptx
+*.scvd
+JLinkLog.txt
+JLink*
+build_output.log
+RTE/
+Listings/
+Objects/
+DebugConfig/
+
+# IDE
+*.uvprojx
+*.uvoptx
+*.uvproj
+.vs/
+.idea/
+
+# PDF 文档 (太大)
+*.pdf
+
+# HTML 副本
+*.html
+
+# 临时文件
+*.tmp
+*.bak
+*.orig

@@ -1,0 +1,19 @@
+*** Using Compiler 'V6.24', folder: 'D:\keil\core\ARM\ARMCLANG\Bin'
+Build target 'GD32L233R_EVAL'
+my_Library/usart.c(133): error: too few arguments to function call, expected 2, have 1
+  133 |     nvic_irq_enable(LPUART_IRQn);
+      |     ~~~~~~~~~~~~~~~            ^
+../../../../GD32L23x_Firmware_Library/GD32L23x_standard_peripheral/Include\gd32l23x_misc.h(66): note: 'nvic_irq_enable' declared here
+   66 | void nvic_irq_enable(IRQn_Type nvic_irq, uint8_t nvic_irq_priority);
+      |      ^               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+my_Library/usart.c(157): error: too few arguments to function call, expected 2, have 1
+  157 |     nvic_irq_enable(LPUART_IRQn);
+      |     ~~~~~~~~~~~~~~~            ^
+../../../../GD32L23x_Firmware_Library/GD32L23x_standard_peripheral/Include\gd32l23x_misc.h(66): note: 'nvic_irq_enable' declared here
+   66 | void nvic_irq_enable(IRQn_Type nvic_irq, uint8_t nvic_irq_priority);
+      |      ^               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+2 errors generated.
+compiling usart.c...
+".\Objects\Project.axf" - 2 Error(s), 0 Warning(s).
+Target not created.
+Build Time Elapsed:  00:00:02
