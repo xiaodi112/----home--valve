@@ -447,6 +447,7 @@ void ble_ota_send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
 \\\c
 static uint16_t g_ota_sid = 0, g_ota_seq = 0;
 static uint32_t g_ota_size = 0, g_ota_crc32 = 0, g_ota_addr = 0, g_ota_rcvd = 0;
+static uint32_t g_ota_new_ver = 0;
 static uint32_t g_word_buf = 0xFFFFFFFFU; static uint8_t g_word_pos = 0;
 
 int ble_ota_download(void) {
@@ -475,7 +476,10 @@ int ble_ota_download(void) {
                 g_ota_sid = sid; g_ota_size = sz;
                 g_ota_crc32 = crc; g_ota_addr = OTA_CACHE_ADDR;
                 g_ota_rcvd = 0; g_ota_seq = 0;
+                g_ota_new_ver = ver;
                 g_word_buf = 0xFFFFFFFFU; g_word_pos = 0;
+                fmc_unlock();  // 握手中擦除后已lock，数据帧写Flash前需重新unlock
+                fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGERR);
             }
         } break;
 
@@ -524,8 +528,9 @@ int ble_ota_download(void) {
             info.magic = OTA_MAGIC_VALID;
             info.status = OTA_STATUS_PENDING;
             info.new_fw_size = g_ota_size;
-            info.new_fw_version = 0;  // 需从 START_REQ 保存
+            info.new_fw_version = g_ota_new_ver;
             info.retry_count = 0;
+            fmc_lock();  // 数据传输完成，锁定Flash
             ota_info_write(&info);
             NVIC_SystemReset();
         } break;
