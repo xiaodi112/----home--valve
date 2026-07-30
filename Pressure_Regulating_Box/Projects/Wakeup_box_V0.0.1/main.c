@@ -43,6 +43,7 @@
 #include "led.h"
 #include "buzzer.h"
 #include "ble_ota.h"
+#include "json_builder.h"
 
 // ==================== 状态定�?====================
 typedef enum {
@@ -61,6 +62,7 @@ SensorContext_t g_sensor = { .last_pressure_collect = -1.0f, .last_pressure_real
 
 #define SENSOR_OFFLINE_DEBOUNCE  3   // 连续N次离线才确认状态变�?
 #define SENSOR_ONLINE_DEBOUNCE   2   // 连续N次上线才确认状态变�?(防接触不良抖�?
+#define	one_by_one_delay		 900	//批量逐条延时
 
 static volatile uint16_t wakeup_count = 0;
 static AppState_t app_state = STATE_INIT;
@@ -68,11 +70,19 @@ static uint8_t dot_uploaded_this_hour = 0;  // dot模式: 防止同一小时重�
 // valve_alarm_closed / valve_pre_alarm_order 已移�?g_* 全局 (EEPROM 持久�? OTA 重启后可恢复), �?eeprom_config.h
 uint8_t voltage_low_power = 0;              // 低电压省电模�? �?:00/18:00上报
 uint8_t fourG_user_off = 0;                 // 用户主动关机4G标志(阻止do_wakeup盲目恢复PD9)
+static uint8_t fourG_init_failed = 0;       // 4G注网失败标志(阻止do_sleep保持4G供电, 下次上报周期重试)
+static uint8_t fourG_weak_signal = 0;       // 弱信号断电标志(long模式下CSQ过低, 暂时按需冷启动)
+#define CSQ_WEAK_THRESHOLD  8               // CSQ<此值触发断电省电(8≈-97dBm)
 static uint8_t vlp_uploaded_this_hour = 0;  // 低电压模�? 防止同一小时重复上报
 ThresholdResult_t last_realtime_alarm = THRESHOLD_OK;          // 实时模式防重复报�?
 static uint8_t g_is_minimal_wakeup = 0;            // 标志：是否为纯周期传感器采集的最简唤醒状�?
 uint8_t g_need_adc_sampling = 1;                   // 标志：当前周期是否需要进行电池电压采�?
 static uint16_t last_grid_collect_min = 0xFFFF;    // 标志：上一次执行周期采集的分钟戳，防止在同一采集整点多次触发
+
+// ==================== 定时开关阀 当日执行标志 ====================
+uint8_t timing_open_done_today  = 0;   // 今日已执行开阀
+uint8_t timing_close_done_today = 0;   // 今日已执行关阀
+static uint8_t timing_last_reset_hour  = 0xFF;// 上次重置标志的小时(防重复)
 
 // ==================== LCD 延时关闭 ====================
 uint8_t  g_lcd_active     = 0;      // LCD当前是否在显�?(运行�? 区别于产品开关g_lcd_enabled)
@@ -98,7 +108,7 @@ static void lcd_activate(void)
     g_lcd_on_hhmmss = rtc_get_hhmmss();
 }
 
-static void lcd_shutdown(void)
+void lcd_shutdown(void)
 {
     if(!g_lcd_active) return;
     slcd_disable();
@@ -179,25 +189,28 @@ static uint8_t sensor_debounce_update(uint8_t cur_online, uint8_t cur_online2)
         g_sensor.online_cnt  = cur_online ? g_sensor.online_cnt : 0;
     }
 
-    // --- 出气�?(raw2, PT304D #1) ---
-    if(cur_online2 && !g_sensor.prev_online2)
+    // --- 出气�?(raw2, PT304D #1) --- 仅双传感器时参与消抖
+    if(g_sensor_count >= 2)
     {
-        g_sensor.offline_cnt2 = 0;
-        g_sensor.online_cnt2++;
-        if(g_sensor.online_cnt2 >= SENSOR_ONLINE_DEBOUNCE)
-            state_changed = 1;
-    }
-    else if(!cur_online2 && g_sensor.prev_online2)
-    {
-        g_sensor.online_cnt2 = 0;
-        g_sensor.offline_cnt2++;
-        if(g_sensor.offline_cnt2 >= SENSOR_OFFLINE_DEBOUNCE)
-            state_changed = 1;
-    }
-    else
-    {
-        g_sensor.offline_cnt2 = cur_online2 ? 0 : g_sensor.offline_cnt2;
-        g_sensor.online_cnt2  = cur_online2 ? g_sensor.online_cnt2 : 0;
+        if(cur_online2 && !g_sensor.prev_online2)
+        {
+            g_sensor.offline_cnt2 = 0;
+            g_sensor.online_cnt2++;
+            if(g_sensor.online_cnt2 >= SENSOR_ONLINE_DEBOUNCE)
+                state_changed = 1;
+        }
+        else if(!cur_online2 && g_sensor.prev_online2)
+        {
+            g_sensor.online_cnt2 = 0;
+            g_sensor.offline_cnt2++;
+            if(g_sensor.offline_cnt2 >= SENSOR_OFFLINE_DEBOUNCE)
+                state_changed = 1;
+        }
+        else
+        {
+            g_sensor.offline_cnt2 = cur_online2 ? 0 : g_sensor.offline_cnt2;
+            g_sensor.online_cnt2  = cur_online2 ? g_sensor.online_cnt2 : 0;
+        }
     }
 
     if(state_changed)
@@ -211,7 +224,8 @@ static uint8_t sensor_debounce_update(uint8_t cur_online, uint8_t cur_online2)
             g_sensor.offline_cnt = 0;
             g_sensor.online_cnt  = 0;
         }
-        if(cur_online2 != g_sensor.prev_online2 &&
+        if(g_sensor_count >= 2 &&
+           cur_online2 != g_sensor.prev_online2 &&
            (cur_online2 ? (g_sensor.online_cnt2  >= SENSOR_ONLINE_DEBOUNCE)
                         : (g_sensor.offline_cnt2 >= SENSOR_OFFLINE_DEBOUNCE)))
         {
@@ -236,9 +250,10 @@ static void sys_init(void)
 
     gpio_init();
 
-    // PB5(V4G_EN 4G电源) 立即恢复: gpio_init �?ODR=0 �?PB5=LOW
-    // �?4G 唤醒前在�?long模式+窗口�?, 必须在此处第一时间拉高, 否则 1s+ 延时会导�?4G 复位
-    if(!voltage_low_power && !fourG_user_off &&
+    // PB5(V4G_EN 4G电源) 立即恢复: gpio_init 后 ODR=0 → PB5=LOW
+    // 若4G 唤醒前在线(long模式+窗口内), 必须在此处第一时间拉高, 否则 1s+ 延时会导致4G 复位
+    // 弱信号模式: 4G已断电, 不恢复PB5
+    if(!voltage_low_power && !fourG_user_off && !fourG_init_failed && !fourG_weak_signal &&
        strcmp(g_window.pattern, "long") == 0 &&
        (config_is_active_window() || g_window.end_result == 1))
         gpio_bit_set(GPIOB, GPIO_PIN_5);
@@ -274,6 +289,233 @@ static void lcd_update_csq(void)
     }
 }
 
+// ==================== 4G 公共模块: 唤醒/连接 + 恢复 ====================
+// 确保4G模块可通信: 已通电则唤醒, 未通电则开机连接
+// 返回: 1=连接成功, 0=失败; *p_was_online: 调用前4G是否在线(用于fourG_restore)
+static int fourG_ensure_ready(int *p_was_online)
+{
+    int was_online = (gpio_input_bit_get(GPIOB, GPIO_PIN_5) == SET);
+    *p_was_online = was_online;
+
+    com_lpuart_init();
+    trea_delay_ms(100);
+    gpio_init();
+
+    if(was_online)
+    {
+        EC801E_Wakeup();
+        return (EC801E_EnsureConnected() == EC_OK);
+    }
+    else
+    {
+        fourG_user_off = 0;
+        EC801E_PowerOn();
+        int ok = (EC801E_InitAndConnect() == EC_OK);
+        if(ok)
+        {
+            fourG_init_failed = 0;
+            EC801E_SetPSM(0);
+            trea_delay_ms(300);
+            report_4g_power_state(1);
+        }
+        return ok;
+    }
+}
+
+// 恢复4G到操作后状态:
+//   success=0 (连接失败): 无论之前是否在线, 统一断电 (下周期重新PowerOn)
+//   success=1 且之前在线: SetPSM(1) 恢复长连接休眠
+//   success=1 且之前离线: 上报下线后断电 (临时开机已完成任务)
+static void fourG_restore(int was_online, int success)
+{
+    if(!success)
+    {
+        EC801E_PowerOff();
+        return;
+    }
+    if(was_online)
+    {
+        // long模式: 检查信号强度决定是否保持在线
+        if(strcmp(g_window.pattern, "long") == 0)
+        {
+            char csq_buf[8] = {0};
+            if(EC801E_QueryCSQ(csq_buf, sizeof(csq_buf)) == EC_OK)
+            {
+                uint8_t csq_val = (uint8_t)atoi(csq_buf);
+                if(csq_val < CSQ_WEAK_THRESHOLD || csq_val == 99)
+                {
+                    printf_debug("[SM] CSQ=%d weak, power off 4G\r\n", csq_val);
+                    fourG_weak_signal = 1;
+                    report_4g_power_state(0);
+                    EC801E_PowerOff();
+                    return;
+                }
+                else if(fourG_weak_signal)
+                {
+                    printf_debug("[SM] CSQ=%d recovered, restoring long mode\r\n", csq_val);
+                    fourG_weak_signal = 0;
+                }
+            }
+        }
+        EC801E_SetPSM(1);
+    }
+    else
+    {
+        // 之前离线(冷启动): 检查是否为弱信号恢复场景
+        if(fourG_weak_signal && strcmp(g_window.pattern, "long") == 0)
+        {
+            // 弱信号冷启动后检查信号是否恢复
+            char csq_buf[8] = {0};
+            if(EC801E_QueryCSQ(csq_buf, sizeof(csq_buf)) == EC_OK)
+            {
+                uint8_t csq_val = (uint8_t)atoi(csq_buf);
+                if(csq_val >= CSQ_WEAK_THRESHOLD && csq_val != 99)
+                {
+                    printf_debug("[SM] CSQ=%d recovered (was weak), keep 4G online\r\n", csq_val);
+                    fourG_weak_signal = 0;
+                    EC801E_SetPSM(1);
+                    return;
+                }
+            }
+            // 仍弱: 断电
+            printf_debug("[SM] Still weak signal, power off\r\n");
+        }
+        report_4g_power_state(0);
+        EC801E_PowerOff();
+    }
+}
+
+// ==================== 弱信号检查+决策 (do_upload/do_downlink 收尾专用) ====================
+// 上报/下行处理完毕后调用, 决定4G去留
+// 返回: 1=信号OK(调用者应SetPSM), 0=信号弱(内部已断电)
+static int fourG_signal_check_and_decide(void)
+{
+    if(strcmp(g_window.pattern, "long") != 0)
+        return 1;  // 非long模式不参与此逻辑
+
+    char csq_buf[8] = {0};
+    if(EC801E_QueryCSQ(csq_buf, sizeof(csq_buf)) != EC_OK)
+    {
+        // 查询失败视为弱信号
+        printf_debug("[SM] CSQ query failed, power off 4G\r\n");
+        fourG_weak_signal = 1;
+        report_4g_power_state(0);
+        EC801E_PowerOff();
+        return 0;
+    }
+
+    uint8_t csq_val = (uint8_t)atoi(csq_buf);
+    if(csq_val < CSQ_WEAK_THRESHOLD || csq_val == 99)
+    {
+        printf_debug("[SM] CSQ=%d < %d, 4G power off (weak signal)\r\n", csq_val, CSQ_WEAK_THRESHOLD);
+        fourG_weak_signal = 1;
+        report_4g_power_state(0);
+        EC801E_PowerOff();
+        return 0;
+    }
+
+    // 信号恢复
+    if(fourG_weak_signal)
+    {
+        printf_debug("[SM] CSQ=%d, signal recovered, restoring long mode\r\n", csq_val);
+        fourG_weak_signal = 0;
+    }
+    return 1;
+}
+
+// ==================== 公共功能模块 ====================
+
+// 统一ADC电压采样: 读取→有效性判断→写入g_sensor.voltage
+// update_baseline: 1=同时更新last_normal_voltage(正常采集), 0=仅更新voltage(报警重采等)
+// fallback: ADC无效时的回退值 (通常为g_sensor.last_normal_voltage, 首次启动用3.6f)
+static void sensor_sample_voltage(uint8_t update_baseline, float fallback)
+{
+    float v_now = adc_bat_read_voltage();
+    if(v_now >= 0.0f)
+    {
+        g_sensor.voltage = v_now;
+        if(update_baseline)
+            g_sensor.last_normal_voltage = v_now;
+    }
+    else
+        g_sensor.voltage = fallback;
+}
+
+// 异常自动关阀: 根据策略决定是否关阀, 独立于4G通信状态
+// 返回: 阀门执行结果字符串(已关阀), NULL(未关阀)
+// 安全设计: 此函数内部初始化IIC/电机, 确保任何上下文均可安全调用
+const char* alarm_try_close_valve(ThresholdResult_t result)
+{
+    AbnormalClose_t policy = abnormal_from_str(g_abnormal_close);
+    if((abnormal_should_close_valve(policy, result) || result == THRESHOLD_VPROTECT) && !g_valve_alarm_closed)
+    {
+        g_valve_pre_alarm_order = g_valve_last_order;
+        printf_debug("[SM] Auto-close valve (policy=%s, result=%d, pre=%d)\r\n",
+                     g_abnormal_close, result, g_valve_pre_alarm_order);
+        IIC_Init();
+        motor_init();
+        const char *vr = valve_execute("close", 0);
+        g_valve_alarm_closed = 1;
+        config_save_ext();
+        return vr;
+    }
+    return NULL;
+}
+
+// 用户端MQTT上报 (id=1, LY格式双通道): 连接→发送→断开
+static void user_mqtt_try_publish(void)
+{
+    if(EC801E_UserMqtt_IsConfigured())
+    {
+        trea_delay_ms(500);
+        if(EC801E_UserMqtt_Connect() == EC_OK)
+        {
+            trea_delay_ms(300);
+            EC801E_UserMqtt_PublishSensorData(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
+            trea_delay_ms(500);
+            EC801E_UserMqtt_Disconnect();
+        }
+    }
+}
+
+// ==================== 状态上报公共模块 ====================
+// 上报进气端+出气端的 pressure_status / temp_status
+// last_p1/last_p2: 上次压力值(用于突变检测)
+static void publish_all_status(float last_p1, float last_p2)
+{
+    PressureStatus_t ps = threshold_get_pressure_status(g_sensor.raw.pressure, last_p1);
+    publish_status_field("pressure_status", threshold_pressure_status_str(ps));
+
+    TempStatus_t ts = threshold_get_temp_status(g_sensor.raw.temperature);
+    publish_status_field("temp_status", threshold_temp_status_str(ts));
+
+    if(g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
+    {
+        PressureStatus_t ps2 = threshold_get_pressure_status2(g_sensor.raw2.pressure, last_p2);
+        publish_status_field("pressure2_status", threshold_pressure_status_str(ps2));
+        TempStatus_t ts2 = threshold_get_temp_status2(g_sensor.raw2.temperature);
+        publish_status_field("temp2_status", threshold_temp_status_str(ts2));
+    }
+}
+
+// ==================== 定时阀门: 执行+上报(公共函数) ====================
+// action: "open" 或 "close"
+// 执行阀门动作, 唤醒4G上报 valve_control + valve_last_order, 恢复PSM
+static void vtiming_execute_and_report(const char *action)
+{
+    ensure_full_init();
+    IIC_Init();
+    motor_init();
+    const char *vr = valve_execute(action, 1);
+    printf_debug("[SM] VTIMING: %s result=%s\r\n", action, vr);
+
+    int was_online;
+    int ec_ok = fourG_ensure_ready(&was_online);
+    if(ec_ok)
+        EC801E_PublishValveStatus(vr, g_valve_last_order);
+    fourG_restore(was_online, ec_ok);
+}
+
 // ==================== 实时路径: 配置唤醒�?深休�?====================
 static void realtime_enter_sleep(void)
 {
@@ -283,8 +525,8 @@ static void realtime_enter_sleep(void)
     rtc_alarm_wakeup_init();
     rtc_set_next_alarm_sec(g_real_frequency);
 
-    // 4G在线时使能LPUART唤醒 (接收平台下发)
-    if(!voltage_low_power && !fourG_user_off &&
+    // 4G在线时使能LPUART唤醒 (接收平台下发, 弱信号断电时不启用)
+    if(!voltage_low_power && !fourG_user_off && !fourG_init_failed && !fourG_weak_signal &&
        strcmp(g_window.pattern, "long") == 0 &&
        (config_is_active_window() || g_window.end_result == 1))
     {
@@ -305,7 +547,6 @@ static void realtime_enter_sleep(void)
 static void do_realtime_check(void)
 {
     ThresholdResult_t result;
-    TempStatus_t ts;
     uint8_t sensor_err;
     uint8_t still_abnormal = 1;
     uint8_t i;
@@ -332,8 +573,6 @@ static void do_realtime_check(void)
 
         if(state_changed)
         {
-            const char *have   = (g_sensor.raw.err  != PT304D_ERR_I2C) ? "1" : "0";
-
             ensure_full_init();
             trea_uart_init();
             {
@@ -347,36 +586,14 @@ static void do_realtime_check(void)
 
             // 立即4G上报
             {
-                int was_online = (gpio_input_bit_get(GPIOB, GPIO_PIN_5) == SET);
-                com_lpuart_init();
-                trea_delay_ms(100);
-                if(!was_online)
+                int was_online;
+                int ec_ok = fourG_ensure_ready(&was_online);
+                if(ec_ok)
                 {
-                    EC801E_PowerOn();
-                    EC801E_InitAndConnect();
-                    EC801E_SetPSM(0);
-                    trea_delay_ms(300);
-                    report_4g_power_state(1);
+                    publish_sensor_status();
+                    printf_debug("[RT] Sensor state reported\r\n");
                 }
-                else
-                    EC801E_Wakeup();
-
-                if(EC801E_EnsureConnected() == EC_OK)
-                {
-                    const char *have2    = (g_sensor.raw2.err != PT304D_ERR_I2C) ? "1" : "0";
-                    const char *rstatus  = (g_sensor.raw.err  == PT304D_OK) ? "1" : "0";
-                    const char *rstatus2 = (g_sensor.raw2.err == PT304D_OK) ? "1" : "0";
-                    publish_sensor_status();   // rtu_have/status × 2 (�?do_collect/do_upload 共用)
-                    printf_debug("[RT] Sensor reported: have=%s/%s status=%s/%s\r\n", have, have2, rstatus, rstatus2);
-                }
-
-                if(was_online)
-                    EC801E_SetPSM(1);
-                else
-                {
-                    report_4g_power_state(0);
-                    EC801E_PowerOff();
-                }
+                fourG_restore(was_online, ec_ok);
             }
 
             // 进气端离线时跳过阈值检�? 直接回睡
@@ -398,88 +615,76 @@ static void do_realtime_check(void)
 
     // === 三重异常检�?===
     // 实时路径不采 ADC: 传哨�?-1.0f (配合 check_voltage=0 + threshold_check 守卫) 明确"未采集电�?
-    result     = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, -1.0f, g_sensor.last_pressure_realtime, 0);
-    // 第二路阈值检查 (仅在双传感器且第二路在线时)
+    // skip_mutation=1: 恢复判定时跳过突变检测, 避免压力回归正常时的变化量触发虚假突变报警
+    result     = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, -1.0f, g_sensor.last_pressure_realtime, 0, 1);
     if(result == THRESHOLD_OK && g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
-        result = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_realtime2);
-    ts         = threshold_get_temp_status(g_sensor.raw.temperature);
+        result = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_realtime2, 1);
     sensor_err = (g_sensor.raw.err != PT304D_OK);
 
     // === 正常 �?检查报警恢�?�?更新压力 �?直接回睡 ===
-    if(result == THRESHOLD_OK && ts == TEMP_NORMAL && !sensor_err)
+    if(result == THRESHOLD_OK && !sensor_err)
     {
         // 报警恢复: 之前自动关阀, 现传感器正常 �?恢复阀门到关阀前状�?
         // (�?do_collect 末尾恢复逻辑一�? 实时模式无需等待下一采集周期)
         if(g_valve_alarm_closed && !voltage_low_power)
         {
             const char *restore_action = (g_valve_pre_alarm_order == 1) ? "open" : "close";
-            int rt_was_online = (gpio_input_bit_get(GPIOB, GPIO_PIN_5) == SET);
-
             ensure_full_init();
             trea_uart_init();
             printf_debug("[RT] ALARM recovered, restoring valve to %s (pre=%d)\r\n",
                          restore_action, g_valve_pre_alarm_order);
 
-            IIC_Init();    // EEPROM I2C (valve_execute 保存 valve_last_order)
-            motor_init();  // 阀�?PWM+GPIO
+            IIC_Init();
+            motor_init();
             const char *vr = valve_execute(restore_action, 0);
             g_valve_alarm_closed = 0;
-            config_save_ext();   // 持久化清除恢复标�?
+            config_save_ext();
 
-            // 上报阀门恢�?
-            com_lpuart_init();
-            trea_delay_ms(100);
-            gpio_init();    // 恢复 PA0(DTR) �?OUTPUT (gpio_enter_low_power 将其置为 ANALOG)
-            int rt_ec_ok;
-            if(rt_was_online)
+            int was_online;
+            int ec_ok = fourG_ensure_ready(&was_online);
+            if(ec_ok)
             {
-                EC801E_Wakeup();
-                rt_ec_ok = (EC801E_EnsureConnected() == EC_OK);
-            }
-            else
-            {
-                EC801E_PowerOn();
-                rt_ec_ok = (EC801E_InitAndConnect() == EC_OK);
-                if(rt_ec_ok)
-                {
-                    EC801E_SetPSM(0);
-                    trea_delay_ms(300);
-                    report_4g_power_state(1);
-                }
-            }
-            if(rt_ec_ok)
-            {
-                EC801E_PublishResponse("valve_control", vr);
-                char v_order[4];
-                snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
-                EC801E_PublishResponse("valve_last_order", v_order);
-
+                EC801E_PublishValveStatus(vr, g_valve_last_order);
                 EC801E_PublishAlarmStatus(THRESHOLD_OK, g_sensor.last_normal_voltage);
-
-                {
-                    PressureStatus_t ps = threshold_get_pressure_status(g_sensor.raw.pressure, g_sensor.last_pressure_realtime);
-                    publish_status_field("pressure_status", threshold_pressure_status_str(ps));
-                }
-                publish_status_field("temp_status", threshold_temp_status_str(ts));
+                publish_all_status(g_sensor.last_pressure_realtime, g_sensor.last_pressure_realtime2);
             }
-            if(rt_was_online)
-                EC801E_SetPSM(1);
-            else
-            {
-                report_4g_power_state(0);
-                EC801E_PowerOff();
-            }
+            fourG_restore(was_online, ec_ok);
         }
+        else if(last_realtime_alarm != THRESHOLD_OK)
+        {
+            // 之前有报警但未关阀(策略为none等), 现恢复正常, 需上报恢复状态
+            ensure_full_init();
+            int was_online;
+            int ec_ok = fourG_ensure_ready(&was_online);
+            if(ec_ok)
+            {
+                EC801E_PublishAlarmStatus(THRESHOLD_OK, g_sensor.last_normal_voltage);
+                publish_all_status(g_sensor.last_pressure_realtime, g_sensor.last_pressure_realtime2);
+            }
+            fourG_restore(was_online, ec_ok);
+        }
+
+        if(last_realtime_alarm != THRESHOLD_OK)
+            last_realtime_alarm = THRESHOLD_OK;   // 恢复正常, 清除防重复标�?
+
+        // 静态限值正常后, 补充突变检测 (skip_mutation=0)
+        // 恢复上报已完成, 此处仅检测是否存在新的纯突变异常
+        result = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, -1.0f, g_sensor.last_pressure_realtime, 0, 0);
+        if(result == THRESHOLD_OK && g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
+            result = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_realtime2, 0);
 
         g_sensor.last_pressure_realtime = g_sensor.raw.pressure;
         g_sensor.last_pressure_realtime2 = g_sensor.raw2.pressure;
-        if(last_realtime_alarm != THRESHOLD_OK)
-            last_realtime_alarm = THRESHOLD_OK;   // 恢复正常, 清除防重复标�?
-        realtime_enter_sleep();
-        return;
+
+        if(result == THRESHOLD_OK)
+        {
+            realtime_enter_sleep();
+            return;
+        }
+        // 突变异常 → 继续往下走异常确认流程
     }
 
-    // === 异常 �?防重�? 同类异常不重复上�?===
+    // === 异常 → 防重复: 同类异常不重复上报 ===
     if(result == last_realtime_alarm && result != THRESHOLD_OK)
     {
         g_sensor.last_pressure_realtime = g_sensor.raw.pressure;
@@ -494,13 +699,12 @@ static void do_realtime_check(void)
         trea_delay_ms(APP_ALARM_RECHECK_DELAY_MS);
         PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
 
-        result     = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, -1.0f, g_sensor.last_pressure_realtime, 0);
+        result     = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, -1.0f, g_sensor.last_pressure_realtime, 0, 0);
         if(result == THRESHOLD_OK && g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
-            result = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_realtime2);
-        ts         = threshold_get_temp_status(g_sensor.raw.temperature);
+            result = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_realtime2, 0);
         sensor_err = (g_sensor.raw.err != PT304D_OK);
 
-        if(result == THRESHOLD_OK && ts == TEMP_NORMAL && !sensor_err)
+        if(result == THRESHOLD_OK && !sensor_err)
         {
             still_abnormal = 0;
             break;
@@ -519,111 +723,31 @@ static void do_realtime_check(void)
     // === 确认异常 �?记录防重复标�?===
     last_realtime_alarm = result;
 
-    // === 判断4G状�? 选择快�?冷启�?===
+    // === 异常关阀 (安全动作, 不依赖4G通信) ===
     {
-        int was_online = (gpio_input_bit_get(GPIOB, GPIO_PIN_5) == SET);
-        // 报警类型 (�?do_alarm/downlink 共用 threshold_alarm_type_str)
         const char *alarm_type = threshold_alarm_type_str(result);
-        // 传感器错误特殊处�?
         if(sensor_err && result == THRESHOLD_OK)
             alarm_type = "sensor_offline";
 
-        // 恢复 PA0(DTR) �?OUTPUT (gpio_enter_low_power 将其置为 ANALOG)
-        gpio_init();
-        // 初始化Debug串口用于日志
+        ensure_full_init();
         trea_uart_init();
-        {
-            rtc_get_time_str(s_status_ts, sizeof(s_status_ts));
-            printf_debug("[RT] %s ALARM: %s P=%.2f T=%.2f freq=%ds\r\n",
-                         s_status_ts, alarm_type, g_sensor.raw.pressure, g_sensor.raw.temperature, g_real_frequency);
-        }
+        printf_debug("[RT] ALARM: %s P=%.2f T=%.2f freq=%ds\r\n",
+                     alarm_type, g_sensor.raw.pressure, g_sensor.raw.temperature, g_real_frequency);
 
-        // 启动4G上报
-        com_lpuart_init();
-        trea_delay_ms(100);
-        int ec_ok;
-        if(was_online)
-        {
-            EC801E_Wakeup();
-            ec_ok = (EC801E_EnsureConnected() == EC_OK);
-        }
-        else
-        {
-            EC801E_PowerOn();
-            ec_ok = (EC801E_InitAndConnect() == EC_OK);
-            if(ec_ok)
-            {
-                EC801E_SetPSM(0);
-                trea_delay_ms(200);
-                report_4g_power_state(1);
-            }
-        }
+        const char *vr = alarm_try_close_valve(result);
 
+        // === 4G上报 (报警状态+关阀结果) ===
+        int was_online;
+        int ec_ok = fourG_ensure_ready(&was_online);
         if(ec_ok)
         {
-            // 上报报警
             EC801E_PublishAlarmStatus(result, g_sensor.last_normal_voltage);
-
-            // 上报压力状�?
-            {
-                PressureStatus_t ps = threshold_get_pressure_status(g_sensor.raw.pressure, g_sensor.last_pressure_realtime);
-                publish_status_field("pressure_status", threshold_pressure_status_str(ps));
-            }
-
-            // 上报温度状�?
-            publish_status_field("temp_status", threshold_temp_status_str(ts));
-
-            // 传感器离线上�?
             if(sensor_err)
-            {
-                const char *rt_have   = (g_sensor.raw.err != PT304D_ERR_I2C) ? "1" : "0";
-                const char *rt_have2  = (g_sensor.raw2.err != PT304D_ERR_I2C) ? "1" : "0";
-                const char *rt_stat2  = (g_sensor.raw2.err == PT304D_OK) ? "1" : "0";
-
-                rtc_get_time_str(s_status_ts, sizeof(s_status_ts));
-                snprintf(s_status_json, sizeof(s_status_json),
-                    "[{\"id\":\"rtu_have\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
-                    "{\"id\":\"rtu_status\",\"value\":\"1\",\"ts\":\"%s\",\"remark\":\"\"},"
-                    "{\"id\":\"rtu2_have\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
-                    "{\"id\":\"rtu2_status\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"}]",
-                    rt_have, s_status_ts, s_status_ts,
-                    rt_have2, s_status_ts, rt_stat2, s_status_ts);
-                EC801E_PublishRawJson(s_status_json);
-            }
-
-            // 异常关阀策略 (同do_alarm)
-            // 守卫: !g_valve_alarm_closed 避免二次/多次异常覆盖 pre_alarm_order, 防止恢复时阀门不还原
-            {
-                AbnormalClose_t policy = abnormal_from_str(g_abnormal_close);
-                // VPROTECT 电压保护: 强制关阀, 独立�?abnormal_close 策略
-                if((abnormal_should_close_valve(policy, result) || result == THRESHOLD_VPROTECT) && !g_valve_alarm_closed)
-                {
-                    g_valve_pre_alarm_order = g_valve_last_order;
-                    printf_debug("[RT] Auto-close valve (policy=%s, result=%d, pre=%d)\r\n",
-                                 g_abnormal_close, result, g_valve_pre_alarm_order);
-                    IIC_Init();    // EEPROM I2C (valve_execute保存valve_last_order)
-                    motor_init();  // 阀门需要PWM+GPIO
-                    const char *vr = valve_execute("close", 0);
-                    g_valve_alarm_closed = 1;
-                    config_save_ext();   // 持久化恢复标�?
-                    EC801E_PublishResponse("valve_control", vr);
-                    {
-                        char v_order[4];
-                        snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
-                        EC801E_PublishResponse("valve_last_order", v_order);
-                    }
-                }
-            }
+                publish_sensor_status();
+            if(vr)
+                EC801E_PublishValveStatus(vr, g_valve_last_order);
         }
-
-        // 恢复4G状�?
-        if(was_online)
-            EC801E_SetPSM(1);
-        else
-        {
-            report_4g_power_state(0);
-            EC801E_PowerOff();
-        }
+        fourG_restore(was_online, ec_ok);
     }
 
     // === 回睡 ===
@@ -637,10 +761,6 @@ static void do_sleep(void)
 {
     int fourG_keep_on = 0;
 
-    // 关闭外设降功�?(注意: 不关闭SLCD相关引脚, LCD需保持显示)
-    // 休眠�? �?G将断电则清除信号图标
-    if(g_lcd_active && (voltage_low_power || strcmp(g_window.pattern, "long") != 0 || fourG_user_off))
-//        lcd_ui_update_signal(99);  // 清除信号�?
 
     gpio_bit_reset(GPIOA, GPIO_PIN_5);
     gpio_bit_reset(GPIOD, GPIO_PIN_4);
@@ -651,8 +771,8 @@ static void do_sleep(void)
     gpio_bit_reset(GPIOC, GPIO_PIN_5);
     gpio_bit_reset(GPIOB, GPIO_PIN_8);
     // PB9 = SLCD COM3, 不关�?
-    gpio_bit_reset(GPIOB, GPIO_PIN_6);
-    gpio_bit_reset(GPIOB, GPIO_PIN_7);
+    // PB6/PB7(I2C总线2 SCL/SDA): 不主动拉低, 由 gpio_enter_low_power 切 Analog
+    // 避免在传感器断电过程中产生异常 I2C 信号导致下次上电后总线锁死
 
     gpio_bit_reset(GPIOA, GPIO_PIN_6);
     gpio_bit_reset(GPIOA, GPIO_PIN_7);
@@ -665,11 +785,11 @@ static void do_sleep(void)
     }
     else if(strcmp(g_window.pattern, "long") == 0)
     {
-        // long模式: 窗口内或end_result=1时保�?G (用户主动关机除外)
-        if(!fourG_user_off && (config_is_active_window() || g_window.end_result == 1))
+        // long模式: 窗口内或end_result=1时保�?G (用户主动关机/弱信号除外)
+        if(!fourG_user_off && !fourG_init_failed && !fourG_weak_signal && (config_is_active_window() || g_window.end_result == 1))
             fourG_keep_on = 1;
         else
-            gpio_bit_reset(GPIOB, GPIO_PIN_5);  // long+er=0+窗口�?user_off: 4G断电
+            gpio_bit_reset(GPIOB, GPIO_PIN_5);  // long+er=0+窗口�?user_off/weak_signal: 4G断电
     }
     else
     {
@@ -716,10 +836,63 @@ static void do_sleep(void)
 
     // 设置RTC闹钟（紧贴深休眠前，防止闹钟时间已过�?
     rtc_alarm_wakeup_init();
-    if(g_real_enabled)
-        rtc_set_next_alarm_sec(g_real_frequency);
-    else
-        rtc_set_next_alarm(g_interval.collect_interval_min);
+
+    // 定时阀门: 计算最近一个未执行的阀门事件距当前的秒数
+    {
+        uint8_t use_valve_alarm = 0;
+        uint32_t valve_wait_sec = 0xFFFFFFFF;
+
+        if(g_valve_timing.enabled && !g_real_enabled)
+        {
+            uint32_t now_sec = hhmmss_to_seconds(rtc_get_hhmmss());
+            if(!timing_open_done_today)
+            {
+                uint32_t t = hhmmss_to_seconds(g_valve_timing.open_time);
+                uint32_t w = (t > now_sec) ? (t - now_sec) : (86400 - now_sec + t);
+                if(w < valve_wait_sec) valve_wait_sec = w;
+            }
+            if(!timing_close_done_today)
+            {
+                uint32_t t = hhmmss_to_seconds(g_valve_timing.close_time);
+                uint32_t w = (t > now_sec) ? (t - now_sec) : (86400 - now_sec + t);
+                if(w < valve_wait_sec) valve_wait_sec = w;
+            }
+
+            // 与正常采集间隔比较, 取更早的
+            uint32_t collect_sec = (uint32_t)g_interval.collect_interval_min * 60;
+            if(valve_wait_sec < collect_sec && valve_wait_sec < 0xFFFFFFFF)
+            {
+                // 阀门事件更早: 直接设定绝对时间闹钟
+                uint32_t target;
+                if(!timing_open_done_today)
+                {
+                    uint32_t t_open = hhmmss_to_seconds(g_valve_timing.open_time);
+                    uint32_t w_open = (t_open > now_sec) ? (t_open - now_sec) : (86400 - now_sec + t_open);
+                    if(!timing_close_done_today)
+                    {
+                        uint32_t t_close = hhmmss_to_seconds(g_valve_timing.close_time);
+                        uint32_t w_close = (t_close > now_sec) ? (t_close - now_sec) : (86400 - now_sec + t_close);
+                        target = (w_open <= w_close) ? g_valve_timing.open_time : g_valve_timing.close_time;
+                    }
+                    else
+                        target = g_valve_timing.open_time;
+                }
+                else
+                    target = g_valve_timing.close_time;
+
+                rtc_set_alarm_at_hhmmss(target);
+                use_valve_alarm = 1;
+            }
+        }
+
+        if(!use_valve_alarm)
+        {
+            if(g_real_enabled)
+                rtc_set_next_alarm_sec(g_real_frequency);
+            else
+                rtc_set_next_alarm(g_interval.collect_interval_min);
+        }
+    }
 
     // LPUART唤醒: �?G有电时才有意�?可接收下发URC)
     if(fourG_keep_on)
@@ -765,6 +938,48 @@ static void do_sleep(void)
                cur_sec < 6 &&
                cur_min != last_grid_collect_min)
                 break;
+
+            // ---- 实时模式下的定时阀门检查 ----
+            if(g_valve_timing.enabled)
+            {
+                uint32_t now_sec = hhmmss_to_seconds(now_hhmmss);
+                uint8_t cur_hour = (uint8_t)(now_hhmmss / 10000);
+
+                // 午夜重置当日执行标志
+                if(cur_hour == 0 && timing_last_reset_hour != 0)
+                {
+                    timing_open_done_today  = 0;
+                    timing_close_done_today = 0;
+                    timing_last_reset_hour  = 0;
+                }
+                else if(cur_hour != 0)
+                    timing_last_reset_hour = cur_hour;
+
+                // 检查开阀 (容差±5秒, 实时模式频率高无需30s)
+                if(!timing_open_done_today && g_valve_timing.open_time > 0)
+                {
+                    uint32_t tgt = hhmmss_to_seconds(g_valve_timing.open_time);
+                    int32_t diff = (int32_t)now_sec - (int32_t)tgt;
+                    if(diff >= 0 && diff <= 5)
+                    {
+                        printf_debug("[SM] VTIMING-RT: OPEN at %06lu\r\n", now_hhmmss);
+                        vtiming_execute_and_report("open");
+                        timing_open_done_today = 1;
+                    }
+                }
+                // 检查关阀 (容差±5秒)
+                if(!timing_close_done_today && g_valve_timing.close_time > 0)
+                {
+                    uint32_t tgt = hhmmss_to_seconds(g_valve_timing.close_time);
+                    int32_t diff = (int32_t)now_sec - (int32_t)tgt;
+                    if(diff >= 0 && diff <= 5)
+                    {
+                        printf_debug("[SM] VTIMING-RT: CLOSE at %06lu\r\n", now_hhmmss);
+                        vtiming_execute_and_report("close");
+                        timing_close_done_today = 1;
+                    }
+                }
+            }
         }
 
         // 非采集网�?�?最小化实时采集 (内部: 采集→判断→[可能上报]→设闹钟→深休眠→唤醒后返回)
@@ -780,9 +995,6 @@ static void do_sleep(void)
 // 当用户短�?PA12（小�?秒释放）时调用。打印配置、当前实时传感器数据，并连接 4G 平台完整上报当时的状态�?
 static void do_button_short_press(void)
 {
-    static char s_short_json[384];
-    static char s_short_ts[32];
-
     printf_debug("\r\n==================================================\r\n");
     printf_debug("[SM] BUTTON SHORT PRESS: Starting manual report & config dump\r\n");
 
@@ -793,16 +1005,7 @@ static void do_button_short_press(void)
     printf_debug("[SM] Sampling live sensor data...\r\n");
     PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
     
-    {
-        float v_now = adc_bat_read_voltage();
-        if(v_now >= 0.0f)
-        {
-            g_sensor.voltage = v_now;
-            g_sensor.last_normal_voltage = v_now;
-        }
-        else
-            g_sensor.voltage = g_sensor.last_normal_voltage;
-    }
+    sensor_sample_voltage(1, g_sensor.last_normal_voltage);
     
     printf_debug("--- Live Data ---\r\n");
     printf_debug("  S2(inlet):  P=%.2f Pa  T=%.2f C  err=%d\r\n", g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.raw.err);
@@ -810,89 +1013,36 @@ static void do_button_short_press(void)
     printf_debug("  Voltage:    %.2f V\r\n", g_sensor.voltage);
     printf_debug("==================================================\r\n\r\n");
 
-    // 3. 4G 连接检查与自适应快速上�?
-    int was_online = (gpio_input_bit_get(GPIOB, GPIO_PIN_5) == SET);
-    
-    com_lpuart_init();
-    trea_delay_ms(100);
+    // 3. 4G连接 (复用公共模块)
+    int was_online;
+    int ec_ok = fourG_ensure_ready(&was_online);
 
-    if(was_online)
+    if(ec_ok)
     {
-        printf_debug("[SM] 4G module already powered ON, checking MQTT connection...\r\n");
-        // 如果原本已经通电，我们只需要快速确�?MQTT 已经就绪
-        if(EC801E_EnsureConnected() != EC_OK)
-        {
-            printf_debug("[SM] 4G was ON but MQTT offline, re-initializing connection...\r\n");
-            EC801E_InitAndConnect();
-        }
-    }
-    else
-    {
-        printf_debug("[SM] 4G module is OFF, performing full cold power-on & connection...\r\n");
-        fourG_user_off = 0;                  // 清除用户手动关机标志以允许开�?
-        EC801E_PowerOn();
-        EC801E_InitAndConnect();
-    }
-
-    if(EC801E_EnsureConnected() == EC_OK)
-    {
-        rtc_get_time_str(s_short_ts, sizeof(s_short_ts));
         lcd_update_csq();
-        
-        // A. 上报 4G 开机状�?
-        report_4g_power_state(1);
-        trea_delay_ms(700);
 
-        // B. 上报传感器数�?
+        // A. 上报传感器数据
         EC801E_PublishSensorData(&g_sensor.raw, g_sensor.voltage);
         trea_delay_ms(700);
 
-        // C. 上报传感器在线状�?
+        // B. 上报传感器在线状态
         publish_sensor_status();
         trea_delay_ms(700);
 
-        // D. 上报压力状�?(进气�?出气�?
-        PressureStatus_t ps = threshold_get_pressure_status(g_sensor.raw.pressure, g_sensor.last_pressure_collect);
-        const char *ps_str = threshold_pressure_status_str(ps);
-        PressureStatus_t ps2 = threshold_get_pressure_status2(g_sensor.raw2.pressure, -1.0f);
-        const char *ps2_str = threshold_pressure_status_str(ps2);
-        snprintf(s_short_json, sizeof(s_short_json),
-            "[{\"id\":\"pressure_status\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"pressure_status2\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"}]",
-            ps_str, s_short_ts, ps2_str, s_short_ts);
-        EC801E_PublishRawJson(s_short_json);
+        // C. 上报压力+温度状态 (复用公共模块)
+        publish_all_status(g_sensor.last_pressure_collect, g_sensor.last_pressure_collect2);
         trea_delay_ms(700);
 
-        // E. 上报温度状�?(进气�?出气�?
-        TempStatus_t t_s = threshold_get_temp_status(g_sensor.raw.temperature);
-        const char *t_str = threshold_temp_status_str(t_s);
-        TempStatus_t t_s2 = threshold_get_temp_status2(g_sensor.raw2.temperature);
-        const char *t2_str = threshold_temp_status_str(t_s2);
-        snprintf(s_short_json, sizeof(s_short_json),
-            "[{\"id\":\"temp_status\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"temp_status2\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"}]",
-            t_str, s_short_ts, t2_str, s_short_ts);
-        EC801E_PublishRawJson(s_short_json);
-        trea_delay_ms(700);
-
-        // F. 上报最后阀门指�?
-        char v_order[4];
-        snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
-        EC801E_PublishResponse("valve_last_order", v_order);
-        trea_delay_ms(700);
-
-        // G. 用户端MQTT上报 (id=1, LY格式双通道)
-        if(EC801E_UserMqtt_IsConfigured())
+        // D. 上报最后阀门指令
         {
-            trea_delay_ms(500);
-            if(EC801E_UserMqtt_Connect() == EC_OK)
-            {
-                trea_delay_ms(300);
-                EC801E_UserMqtt_PublishSensorData(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
-                trea_delay_ms(500);
-                EC801E_UserMqtt_Disconnect();
-            }
+            char v_order[4];
+            snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
+            EC801E_PublishResponse("valve_last_order", v_order);
         }
+        trea_delay_ms(700);
+
+        // E. 用户端MQTT上报
+        user_mqtt_try_publish();
 
         printf_debug("[SM] BUTTON SHORT PRESS: Manual status reporting success!\r\n");
     }
@@ -901,12 +1051,12 @@ static void do_button_short_press(void)
         printf_debug("[SM] BUTTON SHORT PRESS: manual report FAILED (MQTT connection failed)\r\n");
     }
 
-    // 4. 等待按键松手，防止释放抖动再次触�?
+    // 4. 等待按键松手，防止释放抖动再次触发
     while(button_is_pressed())
         trea_delay_ms(100);
     trea_delay_ms(50);
 
-    // 5. 收尾：等�?5s 接收平台下行指令
+    // 5. 收尾：等待5s 接收平台下行指令
     printf_debug("[SM] BUTTON: waiting 5s for downlink...\r\n");
     trea_delay_ms(5000);
     {
@@ -917,19 +1067,8 @@ static void do_button_short_press(void)
             printf_debug("[SM] BUTTON: no downlink within 5s\r\n");
     }
 
-    // 6. 按照原本状态关机回�?
-    if(was_online)
-    {
-        EC801E_SetPSM(1);
-        printf_debug("[SM] BUTTON: keep 4G online and enable PSM (was_online=1)\r\n");
-    }
-    else
-    {
-        report_4g_power_state(0);
-        EC801E_PowerOff();
-        fourG_user_off = 1; // 恢复手动关机状�?
-        printf_debug("[SM] BUTTON: restored 4G to powered off state (was_online=0)\r\n");
-    }
+    // 6. 恢复4G状态 (复用公共模块)
+    fourG_restore(was_online, ec_ok);
 }
 
 // ==================== 唤醒恢复 ====================
@@ -989,12 +1128,13 @@ static void do_wakeup(void)
         // PB5(V4G_EN 4G电源)恢复: gpio_init默认PB5=LOW
         // 低电压省电模�? 不恢�?G
         // 用户主动关机: 不恢�?G(等待按键重新开�?
+        // 弱信号模式: 不恢�?G(下次上报冷启动)
         // long模式: 窗口内或end_result=1时恢�?G供电
-        if(!voltage_low_power && !fourG_user_off &&
+        if(!voltage_low_power && !fourG_user_off && !fourG_init_failed && !fourG_weak_signal &&
            strcmp(g_window.pattern, "long") == 0 &&
            (config_is_active_window() || g_window.end_result == 1))
             gpio_bit_set(GPIOB, GPIO_PIN_5);
-        // 其余情况(VLP/user_off/short/dot/long+er=0+窗口�?: PB5保持LOW
+        // 其余情况(VLP/user_off/weak_signal/short/dot/long+er=0+窗口�?: PB5保持LOW
         
         rtc_show_time();
         printf_debug("\r\n");
@@ -1090,25 +1230,26 @@ static void do_wakeup(void)
             {
                 
                 case 1:
-                    // 1次短�? LCD页面切换 + 蜂鸣确认
+                    // 1次短按? LCD页面切换 + 蜂鸣确认
                     buzzer_beep(1, 200);
                     if(g_lcd_active) lcd_ui_next_page();
                     printf_debug("[SM] BUTTON: LCD page -> %d\r\n", g_lcd_page);
                     break;
 
                 case 2:
-                    // 2次短�? 数据上报 (需完整外设)
+                    // 2次短按? 数据上报 (需完整外设)
                     ensure_full_init();
                     do_button_short_press();
                     break;
 
                 case 3:
-                    // 3次短�? 蓝牙开�?
+                    // 3次短按? 蓝牙开�?
                     if(g_lcd_active) lcd_ui_toggle_bluetooth();
                     printf_debug("[SM] BUTTON: Bluetooth %s\r\n", g_bt_on ? "ON" : "OFF");
                     if(g_bt_on)
                     {
                         ble_link_gpio_init();  /* PD2输入+上拉, 检测BLE连接状态 */
+                        ble_set_name_from_device_id(); /* AT指令设置BLE名称: YLY_<设备ID后3位> */
                         ble_ota_init();        /* 状态=WAIT_CONNECT, 启动60s超时 */
                         app_state = STATE_BLE_OTA;
                         printf_debug("[SM] Entering BLE_OTA mode (waiting PD2=LOW)\r\n");
@@ -1121,8 +1262,9 @@ static void do_wakeup(void)
                     }
                     break;
 				case 4:
-                    // 3次短�? 蓝牙开�?
+                    // 4次短按，4G开
                     fourG_user_off = 0;
+                    fourG_weak_signal = 0;  // 清除弱信号标志
 					printf_debug("4G_user_on,Press the button twice in quick succession");
                     break;
 
@@ -1138,6 +1280,7 @@ static void do_wakeup(void)
         ensure_full_init();
         printf_debug("[SM] BUTTON: 4s confirmed, powering on 4G\r\n");
         fourG_user_off = 0;  // 清除用户关机标志
+        fourG_weak_signal = 0;  // 手动开机清除弱信号标志
         com_lpuart_init();
         trea_delay_ms(100);
         EC801E_PowerOn();         // PD9 拉高 (idempotent, �?HIGH 时不影响)
@@ -1146,6 +1289,7 @@ static void do_wakeup(void)
         // 验证4G模块AT响应 + 上报开机状�?
         if(EC801E_EnsureConnected() == EC_OK)
         {
+            fourG_init_failed = 0;  // 手动开机成功, 清除失败标志
             report_4g_power_state(1);
             lcd_update_csq();
             buzzer_beep(2, 200);
@@ -1211,7 +1355,7 @@ static void do_wakeup(void)
     }
 }
 
-// ==================== 确保完整初始�?====================
+// ==================== 确保完整初始化?====================
 static void ensure_full_init(void)
 {
     if(g_is_minimal_wakeup)
@@ -1305,6 +1449,51 @@ static void do_collect(void)
     ThresholdResult_t result;
     uint8_t vlp_just_exited = 0;
 
+    // ========== 定时开关阀检查 ==========
+    if(g_valve_timing.enabled)
+    {
+        uint32_t now_hhmmss = rtc_get_hhmmss();
+        uint32_t now_sec = hhmmss_to_seconds(now_hhmmss);
+        uint8_t cur_hour = (uint8_t)(now_hhmmss / 10000);
+
+        // 午夜重置当日执行标志 (00:00~00:59, 且未重置过)
+        if(cur_hour == 0 && timing_last_reset_hour != 0)
+        {
+            timing_open_done_today  = 0;
+            timing_close_done_today = 0;
+            timing_last_reset_hour  = 0;
+            printf_debug("[SM] VTIMING: daily flags reset\r\n");
+        }
+        else if(cur_hour != 0)
+            timing_last_reset_hour = cur_hour;
+
+        // 检查开阀时间 (容差±30秒)
+        if(!timing_open_done_today && g_valve_timing.open_time > 0)
+        {
+            uint32_t tgt_sec = hhmmss_to_seconds(g_valve_timing.open_time);
+            int32_t diff = (int32_t)now_sec - (int32_t)tgt_sec;
+            if(diff >= 0 && diff <= 30)
+            {
+                printf_debug("[SM] VTIMING: OPEN triggered at %06lu\r\n", now_hhmmss);
+                vtiming_execute_and_report("open");
+                timing_open_done_today = 1;
+            }
+        }
+
+        // 检查关阀时间 (容差±30秒)
+        if(!timing_close_done_today && g_valve_timing.close_time > 0)
+        {
+            uint32_t tgt_sec = hhmmss_to_seconds(g_valve_timing.close_time);
+            int32_t diff = (int32_t)now_sec - (int32_t)tgt_sec;
+            if(diff >= 0 && diff <= 30)
+            {
+                printf_debug("[SM] VTIMING: CLOSE triggered at %06lu\r\n", now_hhmmss);
+                vtiming_execute_and_report("close");
+                timing_close_done_today = 1;
+            }
+        }
+    }
+
     // 记录本次正常周期采集的分钟戳，防止秒级高频实时监测循环在同一分钟内多次唤醒采�?
     {
         uint32_t now_hhmmss = rtc_get_hhmmss();
@@ -1315,20 +1504,7 @@ static void do_collect(void)
     PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
     
     if(g_need_adc_sampling)
-    {
-        float v_now = adc_bat_read_voltage();
-        if(v_now >= 0.0f)
-        {
-            g_sensor.voltage = v_now;
-            g_sensor.last_normal_voltage = v_now;
-        }
-        else
-        {
-            // ADC 超时返回 -1.0: 沿用上次有效电压, 不污染阈值判�?
-            printf_debug("[SM] ADC read FAILED, reuse last V=%.2f\r\n", g_sensor.last_normal_voltage);
-            g_sensor.voltage = g_sensor.last_normal_voltage;
-        }
-    }
+        sensor_sample_voltage(1, g_sensor.last_normal_voltage);
     else
     {
         g_sensor.voltage = g_sensor.last_normal_voltage;
@@ -1354,9 +1530,6 @@ static void do_collect(void)
         {
             ensure_full_init();
 
-            const char *have   = (g_sensor.raw.err  != PT304D_ERR_I2C) ? "1" : "0";
-            const char *status = (g_sensor.raw.err  == PT304D_OK) ? "1" : "0";
-
             printf_debug("[SM] SENSOR STATE CHANGED: S2=%s(err=%d) S1=%s(err=%d) debounce=%d\r\n",
                          cur_online  ? "ON" : "OFF", g_sensor.raw.err,
                          cur_online2 ? "ON" : "OFF", g_sensor.raw2.err,
@@ -1364,36 +1537,14 @@ static void do_collect(void)
 
             // 立即4G上报
             {
-                int sensor_coldstart = 0;
-                com_lpuart_init();
-                trea_delay_ms(100);
-
-                if(voltage_low_power ||
-                   strcmp(g_window.pattern, "short") == 0 || strcmp(g_window.pattern, "dot") == 0)
+                int was_online;
+                int ec_ok = fourG_ensure_ready(&was_online);
+                if(ec_ok)
                 {
-                    sensor_coldstart = 1;
-                    EC801E_PowerOn();
-                    EC801E_InitAndConnect();
-                    EC801E_SetPSM(0);
-                    trea_delay_ms(300);
-                    report_4g_power_state(1);
+                    publish_sensor_status();
+                    printf_debug("[SM] Sensor state reported\r\n");
                 }
-
-                if(EC801E_EnsureConnected() == EC_OK)
-                {
-                    const char *have2    = (g_sensor.raw2.err != PT304D_ERR_I2C) ? "1" : "0";
-                    const char *status2  = (g_sensor.raw2.err == PT304D_OK) ? "1" : "0";
-                    publish_sensor_status();   // rtu_have/status × 2 (�?do_realtime_check/do_upload 共用)
-                    printf_debug("[SM] Sensor reported: have=%s/%s status=%s/%s\r\n", have, have2, status, status2);
-                }
-
-                if(sensor_coldstart)
-                {
-                    report_4g_power_state(0);
-                    EC801E_PowerOff();
-                }
-                else
-                    EC801E_SetPSM(1);
+                fourG_restore(was_online, ec_ok);
             }
 
             // 进气端离线时跳过阈值检查和数据缓存, 直接回休�?
@@ -1415,10 +1566,10 @@ static void do_collect(void)
     }
 
     // 阈值检�?
-    result = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, g_need_adc_sampling);
+    result = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, g_need_adc_sampling, 0);
     // 第二路阈值检查 (仅在双传感器且第二路在线时)
     if(result == THRESHOLD_OK && g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
-        result = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_collect2);
+        result = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_collect2, 0);
 
     if(result != THRESHOLD_OK)
     {
@@ -1484,53 +1635,20 @@ static void do_collect(void)
             printf_debug("[SM] VLP recovered, publishing normal status\r\n");
         }
 
-        // 4G 启停 + 对称恢复上报 (alarm:normal + pressure_status + temp_status)
+        // 4G 启停 + 对称恢复上报
         {
-            int recovery_coldstart = 0;
-            com_lpuart_init();
-            trea_delay_ms(100);
-            if(strcmp(g_window.pattern, "short") == 0 || strcmp(g_window.pattern, "dot") == 0)
+            int was_online;
+            int ec_ok = fourG_ensure_ready(&was_online);
+            if(ec_ok)
             {
-                recovery_coldstart = 1;
-                EC801E_PowerOn();
-                EC801E_InitAndConnect();
-                EC801E_SetPSM(0);
-                trea_delay_ms(300);
-                report_4g_power_state(1);
-            }
-            if(EC801E_EnsureConnected() == EC_OK)
-            {
-                // 阀门字�?(条件)
                 if(vr != NULL)
                 {
-                    EC801E_PublishResponse("valve_control", vr);
-                    char v_order[4];
-                    snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
-                    EC801E_PublishResponse("valve_last_order", v_order);
+                    EC801E_PublishValveStatus(vr, g_valve_last_order);
                 }
-
-                // 报警恢复正常
                 EC801E_PublishAlarmStatus(THRESHOLD_OK, g_sensor.voltage);
-
-                // pressure_status
-                {
-                    PressureStatus_t ps = threshold_get_pressure_status(g_sensor.raw.pressure, g_sensor.last_pressure_collect);
-                    publish_status_field("pressure_status", threshold_pressure_status_str(ps));
-                }
-
-                // temp_status
-                {
-                    TempStatus_t tps = threshold_get_temp_status(g_sensor.raw.temperature);
-                    publish_status_field("temp_status", threshold_temp_status_str(tps));
-                }
+                publish_all_status(g_sensor.last_pressure_collect, g_sensor.last_pressure_collect2);
             }
-            if(recovery_coldstart)
-            {
-                report_4g_power_state(0);
-                EC801E_PowerOff();
-            }
-            else
-                EC801E_SetPSM(1);
+            fourG_restore(was_online, ec_ok);
         }
     }
 
@@ -1571,14 +1689,11 @@ static void do_alarm(void)
         trea_delay_ms(APP_ALARM_RECHECK_DELAY_MS);
 
         PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
-        {
-            float v_now = adc_bat_read_voltage();
-            g_sensor.voltage = (v_now >= 0.0f) ? v_now : g_sensor.last_normal_voltage;
-        }
+        sensor_sample_voltage(0, g_sensor.last_normal_voltage);
 
-        result = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, 1);
+        result = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, 1, 0);
         if(result == THRESHOLD_OK && g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
-            result = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_collect2);
+            result = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_collect2, 0);
         printf_debug("[SM] ALARM recheck %d/%d: P=%.2f T=%.2f V=%.2f P2=%.2f T2=%.2f result=%d\r\n",
                      i + 1, APP_ALARM_RECHECK_COUNT, g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage,
                      g_sensor.raw2.pressure, g_sensor.raw2.temperature, result);
@@ -1615,83 +1730,20 @@ static void do_alarm(void)
         printf_debug("[SM] ALARM: P=%.2f T=%.2f V=%.2f @%s\r\n",
                      g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, record.timestamp);
 
-        // 立即4G上报报警 + 压力状�?+ 主动关阀
+        // 异常关阀 (安全动作, 不依赖4G通信)
+        const char *vr = alarm_try_close_valve(result);
+
+        // 4G上报 (报警状态+关阀结果)
         {
-            int alarm_coldstart = 0;
-            int ec_ok;
-            com_lpuart_init();
-            trea_delay_ms(100);
-
-            // short/dot/VLP模式: 4G断电状�? 需冷启�?
-            if(voltage_low_power ||
-               strcmp(g_window.pattern, "short") == 0 || strcmp(g_window.pattern, "dot") == 0)
-            {
-                alarm_coldstart = 1;
-                EC801E_PowerOn();
-                ec_ok = (EC801E_InitAndConnect() == EC_OK);
-                if(ec_ok)
-                {
-                    EC801E_SetPSM(0);
-                    trea_delay_ms(300);
-                    report_4g_power_state(1);
-                }
-            }
-            else
-            {
-                ec_ok = (EC801E_EnsureConnected() == EC_OK);
-            }
-
+            int was_online;
+            int ec_ok = fourG_ensure_ready(&was_online);
             if(ec_ok)
             {
-                // 上报报警
                 EC801E_PublishAlarmStatus(result, g_sensor.voltage);
-
-                // 上报压力状�?(主动判断, 不依赖查�?
-                {
-                    PressureStatus_t ps = threshold_get_pressure_status(g_sensor.raw.pressure, g_sensor.last_pressure_collect);
-                    publish_status_field("pressure_status", threshold_pressure_status_str(ps));
-                }
-
-                // 上报温度状�?(异常时立即上�? 不等待查�?
-                {
-                    TempStatus_t ts = threshold_get_temp_status(g_sensor.raw.temperature);
-                    publish_status_field("temp_status", threshold_temp_status_str(ts));
-                }
-
-                // 主动异常关阀 (根据策略自动执行, 不依赖平台查�?
-                // 守卫: !g_valve_alarm_closed 避免二次/多次异常覆盖 pre_alarm_order 与重�?PWM 耗电
-                {
-                    AbnormalClose_t policy = abnormal_from_str(g_abnormal_close);
-                    // VPROTECT 电压保护: 强制关阀, 独立�?abnormal_close 策略
-                    if((abnormal_should_close_valve(policy, result) || result == THRESHOLD_VPROTECT) && !g_valve_alarm_closed)
-                    {
-                        // 首次异常: 保存关阀前状�? 后续重复异常跳过整段
-                        g_valve_pre_alarm_order = g_valve_last_order;
-                        printf_debug("[SM] ALARM auto-close valve (policy=%s, result=%d, pre=%d)\r\n",
-                                     g_abnormal_close, result, g_valve_pre_alarm_order);
-                        const char *vr = valve_execute("close", 0);
-                        g_valve_alarm_closed = 1;
-                        config_save_ext();   // 持久化恢复标�?
-                        EC801E_PublishResponse("valve_control", vr);
-                        {
-                            char v_order[4];
-                            snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
-                            EC801E_PublishResponse("valve_last_order", v_order);
-                        }
-                    }
-                }
+                if(vr)
+                    EC801E_PublishValveStatus(vr, g_valve_last_order);
             }
-
-            if(alarm_coldstart)
-            {
-                report_4g_power_state(0);
-                EC801E_PowerOff();
-            }
-            else
-            {
-                trea_delay_ms(500);
-                EC801E_SetPSM(1);
-            }
+            fourG_restore(was_online, ec_ok);
         }
     }
     else
@@ -1736,10 +1788,10 @@ static void do_upload(void)
     com_lpuart_init();
     trea_delay_ms(100);
 
-    // 低电压省电模�? 强制走冷启动路径
-    if(voltage_low_power || strcmp(g_window.pattern, "long") != 0)
+    // 低电压省电模式 / 弱信号模式: 强制走冷启动路径
+    if(voltage_low_power || strcmp(g_window.pattern, "long") != 0 || fourG_weak_signal)
     {
-        // short/dot/VLP: 4G断电状�? 需完整开�?
+        // short/dot/VLP/weak_signal: 4G断电状态, 需完整开机
         is_coldstart = 1;
         EC801E_PowerOn();
         if(EC801E_InitAndConnect() != EC_OK)
@@ -1749,73 +1801,77 @@ static void do_upload(void)
             app_state = STATE_SLEEP;
             return;
         }
+        fourG_init_failed = 0;  // 连接成功, 清除失败标志
         EC801E_SetPSM(0);
         trea_delay_ms(300);
         report_4g_power_state(1);
     }
     else
     {
-        // long模式(非VLP): 4G应已连接(QSCLK), 直接确认
+        // long模式(非VLP, 非弱信号): 4G应已连接(QSCLK), 直接确认
         if(EC801E_EnsureConnected() != EC_OK)
         {
-            printf_debug("[SM] UPLOAD: connect failed, skip\r\n");
-            trea_delay_ms(500);
-            EC801E_SetPSM(1);
+            printf_debug("[SM] UPLOAD: connect failed, power off\r\n");
+            EC801E_PowerOff();
             app_state = STATE_SLEEP;
             return;
         }
+        fourG_init_failed = 0;  // EnsureConnected 成功, 清除失败标志
     }
 
     // 4G连接成功后更新LCD信号强度
     lcd_update_csq();
 
-    // === 逐条上传并确认弹�?(方案 B) ===
+    // === 用户端MQTT: 预连接 (历史数据同步上报) ===
+    uint8_t user_mqtt_on = 0;
+    if(EC801E_UserMqtt_IsConfigured())
+    {
+        trea_delay_ms(500);
+        user_mqtt_on = (EC801E_UserMqtt_Connect() == EC_OK);
+    }
+
+    // === 逐条上传 (双通道: 主平台id=0 + 用户端id=1) ===
     while(sensor_buf_count() > 0)
     {
-        swdt_feed();  // 逐条上传可能耗时较长, 每条喂狗一�?
-        rec = sensor_buf_get(0);  // 永远获取当前最老的一条记�?
+        swdt_feed();
+        rec = sensor_buf_get(0);
         if(rec)
         {
             if(EC801E_PublishSingleRecord(rec) == EC_OK)
             {
-                // 发送成功，从缓冲区弹出该条记录
+                if(user_mqtt_on)
+                {
+                    trea_delay_ms(300);
+                    EC801E_UserMqtt_PublishRecord(rec);
+                }
                 sensor_buf_pop();
 
-                // 若还有后续数据，延时 400ms 隔离
                 if(sensor_buf_count() > 0)
-                    trea_delay_ms(800);
+                    trea_delay_ms(one_by_one_delay);
             }
             else
             {
-                // 物理发送失败，立刻终止循环，保护未发送的数据
                 printf_debug("[SM] UPLOAD: Publish record failed, stop remaining uploads\r\n");
                 break;
             }
         }
         else
         {
-            // 防御保护，防止空指针卡死
             sensor_buf_pop();
         }
+    }
+
+    // === 用户端MQTT: 断开 ===
+    if(user_mqtt_on)
+    {
+        trea_delay_ms(500);
+        EC801E_UserMqtt_Disconnect();
     }
 
     // 上报传感器在线状�?
     trea_delay_ms(500);
     publish_sensor_status();
     printf_debug("[SM] sensor status published\r\n");
-
-    // === 用户端MQTT上报 (id=1, LY格式双通道) ===
-    if(EC801E_UserMqtt_IsConfigured())
-    {
-        trea_delay_ms(500);
-        if(EC801E_UserMqtt_Connect() == EC_OK)
-        {
-            trea_delay_ms(300);
-            EC801E_UserMqtt_PublishSensorData(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
-            trea_delay_ms(500);
-            EC801E_UserMqtt_Disconnect();
-        }
-    }
 
     // 上传流程结束，复位唤醒周期统计计�?
     wakeup_count = 0;
@@ -1834,7 +1890,7 @@ static void do_upload(void)
     // === 模式特定收尾 ===
     if(is_coldstart)
     {
-        // 冷启动模�?VLP/short/dot): 等待30s接收平台下发指令
+        // 冷启动模式(VLP/short/dot/weak_signal): 等待20s接收平台下发指令
         printf_debug("[SM] Waiting 20s for downlink...\r\n");
         trea_delay_ms(20000);
         {
@@ -1842,14 +1898,31 @@ static void do_upload(void)
             if(dl_count > 0)
                 printf_debug("[SM] Processed %d downlink msg(s)\r\n", dl_count);
         }
-        report_4g_power_state(0);
-        EC801E_PowerOff();
+
+        // long模式弱信号冷启动: 检查信号是否恢复, 决定是否保持在线
+        if(fourG_weak_signal && strcmp(g_window.pattern, "long") == 0)
+        {
+            if(fourG_signal_check_and_decide())
+            {
+                // 信号恢复, 保持4G在线(long模式正常行为)
+                EC801E_SetPSM(1);
+                printf_debug("[SM] UPLOAD: signal OK, keep 4G online\r\n");
+            }
+            // else: 内部已断电
+        }
+        else
+        {
+            report_4g_power_state(0);
+            EC801E_PowerOff();
+        }
     }
     else
     {
-        // long: 重新启用QSCLK休眠
+        // long(非弱信号): 检查信号决定去留
         trea_delay_ms(500);
-        EC801E_SetPSM(1);
+        if(fourG_signal_check_and_decide())
+            EC801E_SetPSM(1);
+        // else: 信号弱, 内部已断电
     }
 
     app_state = STATE_SLEEP;
@@ -1879,9 +1952,11 @@ static void do_downlink(void)
         printf_debug("[SM] Processed %d msg(s)\r\n", msg_count);
     }
 
-    // 重新启用模块休眠
+    // 重新启用模块休眠 (检查信号决定是否保持在线)
     trea_delay_ms(500);
-    EC801E_SetPSM(1);
+    if(fourG_signal_check_and_decide())
+        EC801E_SetPSM(1);
+    // else: 信号弱, 内部已断电
 
     app_state = STATE_SLEEP;
 }
@@ -1954,6 +2029,7 @@ static void debug_check_cmd(void)
             printf_debug("  P=%.2f T=%.2f V=%.2f last_Pc=%.2f last_Pr=%.2f\r\n",
                          g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, g_sensor.last_pressure_realtime);
             printf_debug("  valve=%d abnormal=%s\r\n", g_valve_last_order, g_abnormal_close);
+            printf_debug("  4G: user_off=%d init_fail=%d weak_sig=%d\r\n", fourG_user_off, fourG_init_failed, fourG_weak_signal);
             printf_debug("  PT304D err=%d stat=0x%02X\r\n", g_sensor.raw.err, g_sensor.raw.stat_raw);
             continue;
         }
@@ -2076,6 +2152,7 @@ static void debug_check_cmd(void)
         {
             printf_debug("  4G power on\r\n");
             fourG_user_off = 0;
+            fourG_weak_signal = 0;  // 手动开机清除弱信号标志
             com_lpuart_init();
             trea_delay_ms(100);
             EC801E_PowerOn();
@@ -2144,6 +2221,9 @@ int main(void)
     lpuart_wakeup_init();
 	printf_debug("\r\n[OTA] yes%s \r\n", APP_FIRMWARE_VERSION);
 	
+	// 4G开�?+ 注网 + MQTT连接 + keepalive + 时间同步 + QSCLK
+    EC801E_PowerOn();
+	
     config_load_all();
     config_enter_setup_mode(0);
     config_print_current();
@@ -2159,50 +2239,57 @@ int main(void)
 
     printf_debug("\r\n[OTA] yes%s \r\n", APP_FIRMWARE_VERSION);
 	
-//    printf_debug("\r\n========================================\r\n");
-//    printf_debug("  Household Valve Controller v%s\r\n", APP_FIRMWARE_VERSION);
-//    printf_debug("  Collect: %dmin  Upload: %dmin (grid-aligned)\r\n",
-//                 g_interval.collect_interval_min,
-//                 g_interval.upload_interval_min);
-//    printf_debug("  Window: pattern=%s start=%s stop=%s er=%d dot=%d\r\n",
-//                 g_window.pattern, g_window.start, g_window.stop,
-//                 g_window.end_result, g_window.dottime);
-//    printf_debug("  VPTH en=%d ppmax=%.1f pmax=%.1f ppmin=%.1f pmin=%.1f mut=%.1f shock=%.1f\r\n",
-//                 g_pthreshold.enabled, g_pthreshold.ppmax, g_pthreshold.pmax,
-//                 g_pthreshold.ppmin, g_pthreshold.pmin,
-//                 g_pthreshold.mutation, g_pthreshold.shock);
-//    printf_debug("  TTH  en=%d high=%.1f low=%.1f vhigh=%.1f vlow=%.1f\r\n",
-//                 g_tthreshold.enabled, g_tthreshold.high, g_tthreshold.low,
-//                 g_tthreshold.vhigh, g_tthreshold.vlow);
-//    printf_debug("  SPUP en=%d high=%.2f low=%.2f protect=%.2f\r\n",
-//                 g_spupower.enabled, g_spupower.high, g_spupower.low, g_spupower.protect);
-//    printf_debug("  VDLY en=%d delay_ms=%d\r\n", g_vdelay.enabled, g_vdelay.delay_ms);
-//    printf_debug("  Keepalive: %d s\r\n", config_get_keepalive());
-//    printf_debug("========================================\r\n");
+    printf_debug("\r\n========================================\r\n");
+    printf_debug("  Household Valve Controller v%s\r\n", APP_FIRMWARE_VERSION);
+    printf_debug("  Collect: %dmin  Upload: %dmin (grid-aligned)\r\n",
+                 g_interval.collect_interval_min,
+                 g_interval.upload_interval_min);
+    printf_debug("  Window: pattern=%s start=%s stop=%s er=%d dot=%d\r\n",
+                 g_window.pattern, g_window.start, g_window.stop,
+                 g_window.end_result, g_window.dottime);
+    printf_debug("  VPTH en=%d ppmax=%.1f pmax=%.1f ppmin=%.1f pmin=%.1f mut=%.1f shock=%.1f\r\n",
+                 g_pthreshold.enabled, g_pthreshold.ppmax, g_pthreshold.pmax,
+                 g_pthreshold.ppmin, g_pthreshold.pmin,
+                 g_pthreshold.mutation, g_pthreshold.shock);
+    printf_debug("  TTH  en=%d high=%.1f low=%.1f vhigh=%.1f vlow=%.1f\r\n",
+                 g_tthreshold.enabled, g_tthreshold.high, g_tthreshold.low,
+                 g_tthreshold.vhigh, g_tthreshold.vlow);
+    printf_debug("  SPUP en=%d high=%.2f low=%.2f protect=%.2f\r\n",
+                 g_spupower.enabled, g_spupower.high, g_spupower.low, g_spupower.protect);
+    printf_debug("  VDLY en=%d delay_ms=%d\r\n", g_vdelay.enabled, g_vdelay.delay_ms);
+    printf_debug("  Keepalive: %d s\r\n", config_get_keepalive());
+    printf_debug("========================================\r\n");
 
     // 4G开机前检查debug串口是否有待处理命令
     config_check_cmd();
 
     // 4G开�?+ 注网 + MQTT连接 + keepalive + 时间同步 + QSCLK
-    EC801E_PowerOn();
-    EC801E_InitAndConnect();
-    // InitAndConnect末尾启用了QSCLK休眠, 这里先禁用以确保后续AT查询成功
-    trea_delay_ms(300);
+    uint8_t init_4g_ok = (EC801E_InitAndConnect() == EC_OK);
 
-    // 4G连接完成, 检查debug串口命令
-    config_check_cmd();
+    if(init_4g_ok)
+    {
+//        // InitAndConnect末尾启用了QSCLK休眠, 这里先禁用以确保后续AT查询成功
+//        trea_delay_ms(300);
 
-    // 用户端MQTT连接 (id=1, 与本地服务器同阶段建�?
-    if(EC801E_UserMqtt_IsConfigured())
-        EC801E_UserMqtt_Connect();
-    report_4g_power_state(1);
+        // 4G连接完成, 检查debug串口命令
+        config_check_cmd();
 
-    // 4G连接后更新LCD信号强度图标
-    lcd_update_csq();
+        // 用户端MQTT连接 (id=1, 与本地服务器同阶段建立)
+        if(EC801E_UserMqtt_IsConfigured())
+            EC801E_UserMqtt_Connect();
+        report_4g_power_state(1);
 
-    // 联网成功蜂鸣提示: 2次�?s
-    if(EC801E_EnsureConnected() == EC_OK)
+        // 4G连接后更新LCD信号强度图标
+        lcd_update_csq();
+
+        // 联网成功蜂鸣提示
         buzzer_beep(2, 200);
+    }
+    else
+    {
+        printf_debug("[SM] INIT: 4G connect failed, skip MQTT reports\r\n");
+        fourG_init_failed = 1;
+    }
 
     // OTA前检查debug串口命令
     config_check_cmd();
@@ -2215,12 +2302,7 @@ int main(void)
 	// 首次采集后刷新LCD显示
     if(g_lcd_active) lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
     trea_delay_ms(50);
-    {
-        float v_now = adc_bat_read_voltage();
-        // 首次采集: ADC 无效则给一个安全默认�? 避免 last_normal_voltage=0 造成后续误判
-        g_sensor.voltage = (v_now >= 0.0f) ? v_now : 3.6f;
-        g_sensor.last_normal_voltage = g_sensor.voltage;
-    }
+    sensor_sample_voltage(1, 3.6f);
 
     init_record.pressure = g_sensor.raw.pressure;
     init_record.temperature = g_sensor.raw.temperature;
@@ -2243,8 +2325,13 @@ int main(void)
 
     
 
-    // ==================== 启动批量上报 ====================
-    // 上报传感器数�?
+    // 根据首次采集结果修正 prev_online (无论4G是否成功, 防止实时唤醒误判状态变化)
+    g_sensor.prev_online  = (g_sensor.raw.err  == PT304D_OK) ? 1 : 0;
+    g_sensor.prev_online2 = (g_sensor.raw2.err == PT304D_OK) ? 1 : 0;
+
+    // ==================== 启动批量上报 (仅4G连接成功时) ====================
+    if(!init_4g_ok) goto init_skip_report;
+
     EC801E_PublishSensorData(&g_sensor.raw, g_sensor.voltage);
     trea_delay_ms(500);
 
@@ -2294,44 +2381,44 @@ int main(void)
     }
     trea_delay_ms(500);
 
-    // �?4: 压力阈�?vpthreshold (与平台同步当前配�?
-    {
-        static char vpth_json[640];
-        static char vpth_ts[32];
-        rtc_get_time_str(vpth_ts, sizeof(vpth_ts));
-        snprintf(vpth_json, sizeof(vpth_json),
-            "[{\"id\":\"vpthreshold_switch\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"vpthreshold_ppmax\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"vpthreshold_pmax\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"vpthreshold_ppmin\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"vpthreshold_pmin\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"vpthreshold_mutation\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"vpthreshold_shock\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
-            g_pthreshold.enabled, vpth_ts,
-            g_pthreshold.ppmax, vpth_ts, g_pthreshold.pmax, vpth_ts,
-            g_pthreshold.ppmin, vpth_ts, g_pthreshold.pmin, vpth_ts,
-            g_pthreshold.mutation, vpth_ts, g_pthreshold.shock, vpth_ts);
-        EC801E_PublishRawJson(vpth_json);
-    }
-    trea_delay_ms(500);
+//    // �?4: 压力阈�?vpthreshold (与平台同步当前配�?
+//    {
+//        static char vpth_json[640];
+//        static char vpth_ts[32];
+//        rtc_get_time_str(vpth_ts, sizeof(vpth_ts));
+//        snprintf(vpth_json, sizeof(vpth_json),
+//            "[{\"id\":\"vpthreshold_switch\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"},"
+//            "{\"id\":\"vpthreshold_ppmax\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//            "{\"id\":\"vpthreshold_pmax\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//            "{\"id\":\"vpthreshold_ppmin\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//            "{\"id\":\"vpthreshold_pmin\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//            "{\"id\":\"vpthreshold_mutation\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//            "{\"id\":\"vpthreshold_shock\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
+//            g_pthreshold.enabled, vpth_ts,
+//            g_pthreshold.ppmax, vpth_ts, g_pthreshold.pmax, vpth_ts,
+//            g_pthreshold.ppmin, vpth_ts, g_pthreshold.pmin, vpth_ts,
+//            g_pthreshold.mutation, vpth_ts, g_pthreshold.shock, vpth_ts);
+//        EC801E_PublishRawJson(vpth_json);
+//    }
+//    trea_delay_ms(500);
 
-    // �?5: 温度阈�?Tthreshold
-    {
-        static char tth_json[480];
-        static char tth_ts[32];
-        rtc_get_time_str(tth_ts, sizeof(tth_ts));
-        snprintf(tth_json, sizeof(tth_json),
-            "[{\"id\":\"Tthreshold_switch\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"Tthreshold_high\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"Tthreshold_low\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"Tthreshold_vhigh\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"Tthreshold_vlow\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
-            g_tthreshold.enabled, tth_ts,
-            g_tthreshold.high, tth_ts, g_tthreshold.low, tth_ts,
-            g_tthreshold.vhigh, tth_ts, g_tthreshold.vlow, tth_ts);
-        EC801E_PublishRawJson(tth_json);
-    }
-    trea_delay_ms(500);
+//    // �?5: 温度阈�?Tthreshold
+//    {
+//        static char tth_json[480];
+//        static char tth_ts[32];
+//        rtc_get_time_str(tth_ts, sizeof(tth_ts));
+//        snprintf(tth_json, sizeof(tth_json),
+//            "[{\"id\":\"Tthreshold_switch\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"},"
+//            "{\"id\":\"Tthreshold_high\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//            "{\"id\":\"Tthreshold_low\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//            "{\"id\":\"Tthreshold_vhigh\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//            "{\"id\":\"Tthreshold_vlow\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
+//            g_tthreshold.enabled, tth_ts,
+//            g_tthreshold.high, tth_ts, g_tthreshold.low, tth_ts,
+//            g_tthreshold.vhigh, tth_ts, g_tthreshold.vlow, tth_ts);
+//        EC801E_PublishRawJson(tth_json);
+//    }
+//    trea_delay_ms(500);
 
     // �?6: 电压检�?spupower
     {
@@ -2350,18 +2437,18 @@ int main(void)
     }
     trea_delay_ms(500);
 
-    // �?7: 阀门动作延�?valve_delay
-    {
-        static char vd_json[256];
-        static char vd_ts[32];
-        rtc_get_time_str(vd_ts, sizeof(vd_ts));
-        snprintf(vd_json, sizeof(vd_json),
-            "[{\"id\":\"delay_switch\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"delay_time\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"}]",
-            g_vdelay.enabled, vd_ts, g_vdelay.delay_ms, vd_ts);
-        EC801E_PublishRawJson(vd_json);
-    }
-    trea_delay_ms(500);
+//    // �?7: 阀门动作延�?valve_delay
+//    {
+//        static char vd_json[256];
+//        static char vd_ts[32];
+//        rtc_get_time_str(vd_ts, sizeof(vd_ts));
+//        snprintf(vd_json, sizeof(vd_json),
+//            "[{\"id\":\"delay_switch\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"},"
+//            "{\"id\":\"delay_time\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"}]",
+//            g_vdelay.enabled, vd_ts, g_vdelay.delay_ms, vd_ts);
+//        EC801E_PublishRawJson(vd_json);
+//    }
+//    trea_delay_ms(500);
 
     // === 用户端MQTT发布 (id=1, 连接已在启动阶段建立) ===
     if(EC801E_UserMqtt_IsConfigured())
@@ -2372,8 +2459,26 @@ int main(void)
         EC801E_UserMqtt_Disconnect();
     }
 
-    EC801E_SetPSM(1);
+init_skip_report:
+    if(init_4g_ok)
+    {
+        // 首次启动也检查信号: 弱信号直接断电, 避免无效心跳
+        if(!fourG_signal_check_and_decide())
+            printf_debug("[SM] INIT: weak signal, 4G powered off\r\n");
+        else
+            EC801E_SetPSM(1);
+    }
+    else
+        EC801E_PowerOff();
     wakeup_count = 0;
+
+    // INIT结束: 如果 spupower 关闭或电压已恢复, 立即退出残留的 VLP 状态
+    if(voltage_low_power && (!g_spupower.enabled || g_sensor.voltage >= g_spupower.protect + 0.15f))
+    {
+        voltage_low_power = 0;
+        config_save_ext();
+        printf_debug("[SM] VLP cleared on boot (spup_en=%d V=%.2f)\r\n", g_spupower.enabled, g_sensor.voltage);
+    }
 
     // 初始化完成，进入休眠
     app_state = STATE_SLEEP;

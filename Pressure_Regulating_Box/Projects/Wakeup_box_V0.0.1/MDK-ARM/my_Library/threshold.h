@@ -42,7 +42,7 @@ typedef enum {
 // 阈值检查: 依据 g_pthreshold/g_tthreshold/g_spupower 三组配置进行全面检查
 // last_pressure: 上次采集的压力值 (用于突变检测, 首次传-1忽略)
 // 优先级: VPROTECT > PRESSURE_VERY > PRESSURE > TEMP_VERY > TEMP > VOLT > MUTATION
-ThresholdResult_t threshold_check(float pressure, float temperature, float voltage, float last_pressure, uint8_t check_voltage);
+ThresholdResult_t threshold_check(float pressure, float temperature, float voltage, float last_pressure, uint8_t check_voltage, uint8_t skip_mutation);
 
 // 将阈值检查结果映射为上报用报警类型字符串 (do_alarm/do_realtime_check/downlink 共用)
 const char* threshold_alarm_type_str(ThresholdResult_t result);
@@ -70,7 +70,7 @@ const char* threshold_temp_status_str(TempStatus_t status);
 
 // 出气端阈值检查: 依据 g_pthreshold2/g_tthreshold2 进行压力+温度检查 (不含电压)
 // last_pressure: 上次采集的出气端压力值 (用于突变检测, 首次传-1忽略)
-ThresholdResult_t threshold_check2(float pressure, float temperature, float last_pressure);
+ThresholdResult_t threshold_check2(float pressure, float temperature, float last_pressure, uint8_t skip_mutation);
 
 // 获取出气端压力状态枚举 (基于 g_pthreshold2)
 PressureStatus_t threshold_get_pressure_status2(float pressure, float last_pressure);

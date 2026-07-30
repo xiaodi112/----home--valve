@@ -236,7 +236,7 @@ void M24M01_Test(void)
     }
 
     // ---- 诊断C: 读未写过的高地址（空片应�?xFF�?---
-    test_addr = 0x1FFF0;
+    test_addr = 0x1FF0;
     ret = M24M01_Read(test_addr, &val, 1);
     printf_debug("[DiagC] Read virgin addr=0x%05lX: ret=%d val=0x%02X (expect 0xFF)\r\n",
                  (unsigned long)test_addr, ret, val);
@@ -271,7 +271,7 @@ void M24M01_Test(void)
         printf_debug("  -> FAIL (expect 0x55, got 0x%02X)\r\n", val);
 
     // ---- 诊断F: 高地址区写+�?(A16=1, 验证第二�?28KB可用) ----
-    test_addr = 0x10050;
+    test_addr = 0x1F50;
     printf_debug("[DiagF] WriteByte addr=0x%05lX data=0x3C\r\n", (unsigned long)test_addr);
     ret = M24M01_WriteByte(test_addr, 0x3C);
     printf_debug("  WriteByte ret=%d\r\n", ret);

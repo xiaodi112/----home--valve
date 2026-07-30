@@ -132,3 +132,15 @@ const char* valve_execute(const char *action, uint8_t update_last_order)
 //    gpio_bit_reset(GPIOA, GPIO_PIN_5);
     return "valve_err";
 }
+
+// ==================== 阀门实时状态查询 (不动作) ====================
+const char* valve_get_status(void)
+{
+    uint8_t l1 = motor_limit1_reached();  // 开阀到位
+    uint8_t l2 = motor_limit2_reached();  // 关阀到位
+
+    if(l1 && l2)  return "valve_err";
+    if(l1)        return "valve_on";
+    if(l2)        return "valve_off";
+    return "valve_timeout";
+}

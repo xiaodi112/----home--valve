@@ -34,6 +34,10 @@ void rtc_get_time_str(char *buf, uint8_t buf_size);
 // 获取当前RTC时间的HHMMSS整数值 (如 13:29:00 → 132900)
 uint32_t rtc_get_hhmmss(void);
 
+// 设置RTC闹钟到绝对时间 (HHMMSS格式, 如 134700 = 13:47:00)
+// 返回距离目标时间的秒数 (0=已过/立即触发)
+uint32_t rtc_set_alarm_at_hhmmss(uint32_t target_hhmmss);
+
 // RTC闹钟唤醒标志（中断中置1）
 extern volatile uint8_t rtc_alarm_flag;
 

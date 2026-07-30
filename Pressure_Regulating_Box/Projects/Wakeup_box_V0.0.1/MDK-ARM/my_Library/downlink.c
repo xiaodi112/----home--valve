@@ -111,6 +111,10 @@ static const CmdMap s_cmd_map[] = {
     {"Tthreshold_get2",   "Tthreshold2",     "",      NULL},
     {"lcd_switch",        "lcd_switch",      NULL,    "lcd_switch\",\"value\""},
     {"sensor_count_set",  "sensor_count_set",NULL,    "sensor_count\",\"value\""},
+    // 阀门定时开关
+    {"valve_get",         "valve_status",    "1",     NULL},
+    {"closeoropen_get",   "closeoropen",     "",      NULL},
+    {"closeoropen_set",   "closeoropen",     "1",     NULL},
 };
 #define CMD_MAP_COUNT (sizeof(s_cmd_map) / sizeof(s_cmd_map[0]))
 
@@ -123,15 +127,20 @@ void publish_sensor_status(void)
 
     const char *have    = (g_sensor.raw.err != PT304D_ERR_I2C) ? "1" : "0";
     const char *rstatus = (g_sensor.raw.err == PT304D_OK) ? "1" : "0";
-    const char *have2    = (g_sensor.raw2.err != PT304D_ERR_I2C) ? "1" : "0";
-    const char *rstatus2 = (g_sensor.raw2.err == PT304D_OK) ? "1" : "0";
 
     rtc_get_time_str(s_ts, sizeof(s_ts));
     jb_begin(&jb, s_json, sizeof(s_json));
     jb_add_str(&jb, "rtu_have", have, s_ts);
     jb_add_str(&jb, "rtu_status", rstatus, s_ts);
-    jb_add_str(&jb, "rtu2_have", have2, s_ts);
-    jb_add_str(&jb, "rtu2_status", rstatus2, s_ts);
+
+    if(g_sensor_count >= 2)
+    {
+        const char *have2    = (g_sensor.raw2.err != PT304D_ERR_I2C) ? "1" : "0";
+        const char *rstatus2 = (g_sensor.raw2.err == PT304D_OK) ? "1" : "0";
+        jb_add_str(&jb, "rtu2_have", have2, s_ts);
+        jb_add_str(&jb, "rtu2_status", rstatus2, s_ts);
+    }
+
     jb_end(&jb);
     EC801E_PublishRawJson(s_json);
 }
@@ -159,13 +168,7 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
         }
 
         if(EC801E_EnsureConnected() == EC_OK)
-        {
-            EC801E_PublishResponse("valve_control", result);
-            // 上报阀门最新状态
-            char v_order[4];
-            snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
-            EC801E_PublishResponse("valve_last_order", v_order);
-        }
+            EC801E_PublishValveStatus(result, g_valve_last_order);
         else
             printf_debug("[SM] Valve publish skipped: MQTT not connected\r\n");
     }
@@ -216,35 +219,18 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             }
         }
 
-        // 阈值检查 + 异常自动关阀
+        // 阈值检查 + 异常自动关阀 (复用公共模块)
         {
-            ThresholdResult_t tr = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, g_need_adc_sampling);
+            ThresholdResult_t tr = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, g_need_adc_sampling, 0);
             if(tr != THRESHOLD_OK)
             {
-                // 上报报警 (统一格式)
                 printf_debug("[SM] sensor_read ALARM: %s\r\n", threshold_alarm_type_str(tr));
                 if(EC801E_EnsureConnected() == EC_OK)
                     EC801E_PublishAlarmStatus(tr, g_sensor.voltage);
 
-                // 守卫: !g_valve_alarm_closed 避免二次/多次异常覆盖 pre_alarm_order
-                AbnormalClose_t policy = abnormal_from_str(g_abnormal_close);
-                // VPROTECT 电压保护: 强制关阀, 独立于 abnormal_close 策略
-                if((abnormal_should_close_valve(policy, tr) || tr == THRESHOLD_VPROTECT) && !g_valve_alarm_closed)
-                {
-                    g_valve_pre_alarm_order = g_valve_last_order;
-                    printf_debug("[SM] Auto-close valve (policy=%s, result=%d, pre=%d)\r\n",
-                                 g_abnormal_close, tr, g_valve_pre_alarm_order);
-                    const char *vr = valve_execute("close", 0);
-                    g_valve_alarm_closed = 1;
-                    config_save_ext();   // 持久化恢复标志
-                    if(EC801E_EnsureConnected() == EC_OK)
-                    {
-                        EC801E_PublishResponse("valve_control", vr);
-                        char v_order[4];
-                        snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
-                        EC801E_PublishResponse("valve_last_order", v_order);
-                    }
-                }
+                const char *vr = alarm_try_close_valve(tr);
+                if(vr && EC801E_EnsureConnected() == EC_OK)
+                    EC801E_PublishValveStatus(vr, g_valve_last_order);
             }
         }
     }
@@ -710,6 +696,7 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
         {
             g_lcd_enabled = (uint8_t)atoi(cmd_val);
             if(g_lcd_enabled > 1) g_lcd_enabled = 1;
+            if(!g_lcd_enabled) lcd_shutdown();
             config_save_ext();
             printf_debug("[SM] lcd_switch: %d (saved)\r\n", g_lcd_enabled);
         }
@@ -909,6 +896,49 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_str(&jb, "MQTT_password", g_user_mqtt.password, ts_buf);
             jb_add_str(&jb, "MQTT_client_id", g_user_mqtt.client_id, ts_buf);
             jb_add_str(&jb, "MQTT_subject", g_user_mqtt.topic_up, ts_buf);
+            jb_end(&jb);
+            EC801E_PublishRawJson(json_buf);
+        }
+    }
+    else if(strcmp(id_val, "valve_status") == 0)
+    {
+        // ---- 查询阀门实时状态 (不执行动作, 仅读限位开关) ----
+        const char *vs = valve_get_status();
+        printf_debug("[SM] valve_get: %s\r\n", vs);
+        if(EC801E_EnsureConnected() == EC_OK)
+            EC801E_PublishResponse("valve_control", vs);
+    }
+    else if(strcmp(id_val, "closeoropen") == 0)
+    {
+        // ---- 定时开关阀 set/get ----
+        if(cmd_val[0] != '\0')
+        {
+            // closeoropen_set: 解析 commandParms
+            char tv[16];
+            if(extract_json_field(raw_buf, "timing_switch\",\"value\"", tv, sizeof(tv)))
+            { g_valve_timing.enabled = (uint8_t)atoi(tv); if(g_valve_timing.enabled > 1) g_valve_timing.enabled = 0; }
+            if(extract_json_field(raw_buf, "timing_open\",\"value\"", tv, sizeof(tv)))
+                g_valve_timing.open_time = (uint32_t)atol(tv);
+            if(extract_json_field(raw_buf, "timing_close\",\"value\"", tv, sizeof(tv)))
+                g_valve_timing.close_time = (uint32_t)atol(tv);
+            config_save_valve_timing();
+            timing_open_done_today  = 0;
+            timing_close_done_today = 0;
+            printf_debug("[SM] closeoropen_set: en=%d open=%06lu close=%06lu (flags reset)\r\n",
+                         g_valve_timing.enabled, g_valve_timing.open_time, g_valve_timing.close_time);
+        }
+        // 上报当前配置
+        if(EC801E_EnsureConnected() == EC_OK)
+        {
+            char v_str[12];
+            rtc_get_time_str(ts_buf, sizeof(ts_buf));
+            jb_begin(&jb, json_buf, sizeof(json_buf));
+            snprintf(v_str, sizeof(v_str), "%d", g_valve_timing.enabled);
+            jb_add_str(&jb, "timing_switch", v_str, ts_buf);
+            snprintf(v_str, sizeof(v_str), "%06lu", g_valve_timing.open_time);
+            jb_add_str(&jb, "timing_open", v_str, ts_buf);
+            snprintf(v_str, sizeof(v_str), "%06lu", g_valve_timing.close_time);
+            jb_add_str(&jb, "timing_close", v_str, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
         }

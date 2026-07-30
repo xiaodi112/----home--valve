@@ -14,7 +14,9 @@
 #include "delay.h"
 #include "main.h"
 #include "mygpio.h"
+#include "eeprom_config.h"
 #include <stdio.h>
+#include <string.h>
 
 /*===========================================================================
  * 全局变量
@@ -627,4 +629,112 @@ void ble_ota_process(void)
             g_ble_ota.state = BLE_OTA_ERROR;
         }
     }
+}
+
+/*===========================================================================
+ * BLE AT 指令辅助函数
+ *===========================================================================*/
+
+/* 通过UART4发送AT字符串 */
+static void ble_at_send_str(const char *str)
+{
+    while(*str)
+    {
+        usart_data_transmit(UART4, (uint8_t)*str++);
+        while(RESET == usart_flag_get(UART4, USART_FLAG_TBE));
+    }
+}
+
+/* 等待BLE模块响应包含指定关键字, 超时返回0 */
+static uint8_t ble_at_wait_response(const char *keyword, uint32_t timeout_ms)
+{
+    char buf[64];
+    uint16_t idx = 0;
+    uint32_t start = trea_millis();
+
+    memset(buf, 0, sizeof(buf));
+    while((trea_millis() - start) < timeout_ms)
+    {
+        if(ble_uart_rx_available())
+        {
+            uint8_t ch = ble_uart_rx_read();
+            if(idx < sizeof(buf) - 1)
+                buf[idx++] = (char)ch;
+            if(strstr(buf, keyword))
+                return 1;
+        }
+    }
+    printf_debug("[BLE_AT] Timeout waiting for '%s', got: %s\r\n", keyword, buf);
+    return 0;
+}
+
+/*===========================================================================
+ * ble_set_name_from_device_id - 从 g_mqtt.client_id 提取设备ID后3位, 设置BLE名称
+ * BLE名称格式: YLY_<后3位>
+ * AT流程: AT+ENAT → AT+LENA<name> → AT+REST
+ *===========================================================================*/
+void ble_set_name_from_device_id(void)
+{
+    const char *p = g_mqtt.client_id;
+    const char *dev_start = NULL;
+    const char *dev_end = NULL;
+    int amp_count = 0;
+    char suffix[4] = {0};
+    char cmd[32];
+
+    /* 解析 clientId: "<prefix>&<device_id>&<product_id>&<seq>" */
+    while(*p)
+    {
+        if(*p == '&')
+        {
+            amp_count++;
+            if(amp_count == 1) dev_start = p + 1;
+            if(amp_count == 2) { dev_end = p; break; }
+        }
+        p++;
+    }
+
+    if(!dev_start || !dev_end || (dev_end - dev_start) < 3)
+    {
+        printf_debug("[BLE_AT] Cannot extract device_id suffix from clientId\r\n");
+        return;
+    }
+
+    /* 取设备ID后3位 */
+    suffix[0] = *(dev_end - 3);
+    suffix[1] = *(dev_end - 2);
+    suffix[2] = *(dev_end - 1);
+
+    printf_debug("[BLE_AT] Setting BLE name: YLY_%s\r\n", suffix);
+
+    /* 初始化UART4 (BLE串口) */
+    ble_uart_init();
+    trea_delay_ms(200);
+    ble_uart_rx_flush();
+
+    /* 1. 进入AT指令模式 */
+    ble_at_send_str("AT+ENAT\r\n");
+    if(!ble_at_wait_response("OK", 1000))
+    {
+        printf_debug("[BLE_AT] Failed to enter AT mode\r\n");
+        ble_uart_deinit();
+        return;
+    }
+
+    /* 2. 设置BLE名称 */
+    snprintf(cmd, sizeof(cmd), "AT+LENAYLY_%s\r\n", suffix);
+    ble_at_send_str(cmd);
+    if(!ble_at_wait_response("OK", 1000))
+    {
+        printf_debug("[BLE_AT] Failed to set name\r\n");
+        ble_uart_deinit();
+        return;
+    }
+
+    /* 3. 复位模块使名称生效 */
+    ble_at_send_str("AT+REST\r\n");
+    trea_delay_ms(800);
+
+    printf_debug("[BLE_AT] BLE name set to YLY_%s, module reset done\r\n", suffix);
+    ble_uart_deinit();
 }

@@ -42,6 +42,7 @@ VoltagePowerConfig_t       g_spupower;              // 电压检�?
 PressureThresholdConfig_t  g_pthreshold;            // 进气端压力阈�?
 PressureThresholdConfig_t  g_pthreshold2;           // 出气端压力阈�?
 UserMqttConfig_t           g_user_mqtt;             // 用户端MQTT配置
+ValveTimingConfig_t        g_valve_timing;          // 定时开关阀配置
 
 // ==================== 模块共享 配置命令行缓�?====================
 // config_enter_setup_mode (上电配置阶段) �?config_check_cmd (运行期主循环) 互斥调用
@@ -478,6 +479,23 @@ if(g_user_mqtt.topic_up[0] == '\0' || g_user_mqtt.topic_up[0] == (char)0xFF)
         printf_debug("[CFG] No UMQTT config (user platform disabled)\r\n");
     }
 
+    // --- 加载定时开关阀配置 (ValveTiming) ---
+    M24M01_Read(EE_ADDR_VTIMING_MAGIC, &magic, 1);
+    if(magic == EE_MAGIC_VTIMING)
+    {
+        M24M01_Read(EE_ADDR_VTIMING_SWITCH, &g_valve_timing.enabled, 1);
+        M24M01_Read(EE_ADDR_VTIMING_OPEN,  (uint8_t *)&g_valve_timing.open_time,  4);
+        M24M01_Read(EE_ADDR_VTIMING_CLOSE, (uint8_t *)&g_valve_timing.close_time, 4);
+        if(g_valve_timing.enabled > 1) g_valve_timing.enabled = 0;
+        printf_debug("[CFG] VTIMING: en=%d open=%06lu close=%06lu\r\n",
+                     g_valve_timing.enabled, g_valve_timing.open_time, g_valve_timing.close_time);
+    }
+    else
+    {
+        memset(&g_valve_timing, 0, sizeof(g_valve_timing));
+        printf_debug("[CFG] No VTIMING config (disabled)\r\n");
+    }
+
     // --- 加载扩展配置 (window/cycle/abnormal/valve) ---
 M24M01_Read(EE_ADDR_EXT_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_EXT)
@@ -716,6 +734,17 @@ void config_save_user_mqtt(void)
 ee_write_string(EE_ADDR_UMQTT_TOPIC_UP,  g_user_mqtt.topic_up,  MQTT_TOPIC_MAX);
     printf_debug("[CFG] UMQTT saved: %s@%s:%d topic=%s\r\n",
                  g_user_mqtt.client_id, g_user_mqtt.server, g_user_mqtt.port, g_user_mqtt.topic_up);
+}
+
+// ==================== 保存定时开关阀配置 ====================
+void config_save_valve_timing(void)
+{
+    M24M01_WriteByte(EE_ADDR_VTIMING_SWITCH, g_valve_timing.enabled);
+    M24M01_Write(EE_ADDR_VTIMING_OPEN,  (const uint8_t *)&g_valve_timing.open_time,  4);
+    M24M01_Write(EE_ADDR_VTIMING_CLOSE, (const uint8_t *)&g_valve_timing.close_time, 4);
+    M24M01_WriteByte(EE_ADDR_VTIMING_MAGIC, EE_MAGIC_VTIMING);
+    printf_debug("[CFG] VTIMING saved: en=%d open=%06lu close=%06lu\r\n",
+                 g_valve_timing.enabled, g_valve_timing.open_time, g_valve_timing.close_time);
 }
 
 // ==================== 获取心跳�?(防无效�? ====================
@@ -1146,8 +1175,26 @@ if(strcmp(cmd, "config") == 0)
         printf_debug("  sensor_count=%d\r\n", g_sensor_count);
         return 1;
     }
+    // ---- 实时采集开关+频率 ----
+    // 格式: real_set=1,5  (开启,5秒)  real_set=0  (关闭)  real_set=1  (开启,频率不变)
+    if(strncmp(cmd, "real_set=", 9) == 0)
+    {
+        const char *p = cmd + 9;
+        g_real_enabled = (uint8_t)atoi(p);
+        if(g_real_enabled > 1) g_real_enabled = 0;
+        const char *comma = strchr(p, ',');
+        if(comma)
+        {
+            uint8_t freq = (uint8_t)atoi(comma + 1);
+            if(freq >= 1 && freq <= 10)
+                g_real_frequency = freq;
+        }
+        config_save_ext();
+        printf_debug("  real_enabled=%d real_frequency=%ds\r\n", g_real_enabled, g_real_frequency);
+        return 1;
+    }
 
-    // 返回0: 未匹�? 由调用方(main.c)继续处理需要硬件上下文的命�?
+    // 返回0: 未匹配, 由调用方(main.c)继续处理需要硬件上下文的命令
 return 0;
 }
 
@@ -1296,6 +1343,17 @@ now   = rtc_get_hhmmss();
 
     // 未配置窗口时�?start==0 && stop==0), 全天有效
 if(start == 0 && stop == 0) return 1;
+
+    // stop 加 2 分钟容差(HHMMSS +200), 覆盖 RTC 闹钟偏移导致的边界踩空
+    {
+        uint32_t stop_m = stop % 10000;       // MMSS 部分
+        uint32_t stop_h = stop / 10000;       // HH 部分
+        stop_m += 200;                        // +2分钟
+        if((stop_m / 100) % 100 >= 60)        // MM>=60 进位
+        { stop_m -= 6000; stop_h++; }
+        if(stop_h >= 24) stop_h -= 24;
+        stop = stop_h * 10000 + stop_m;
+    }
 
     if(start < stop)
         return (now >= start && now <= stop);

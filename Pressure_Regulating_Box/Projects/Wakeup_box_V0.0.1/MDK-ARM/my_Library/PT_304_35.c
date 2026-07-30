@@ -183,6 +183,11 @@ PT304D_Status PT304D_Collect(uint8_t sensor_idx, PT304D_Data *p_data)
 // 一次性采集两路传感器，PD4 仅上/断电一次，效率更高   s2进气（中压）   s1出气（低压）
 void PT304D_CollectAll(PT304D_Data *p_s1, PT304D_Data *p_s2)
 {
+    // Init I2C GPIO before power-on: open-drain HIGH (bus idle)
+    // Prevents sensor seeing glitches from Analog-mode residue after deep sleep
+    if(p_s1 != NULL) IIC_Init();
+    if(p_s2 != NULL) IIC_GPIO_Init1();
+
     pt304d_sw_iic_on();
 
     // --- 传感�?: PC0/PC1 (�?M24M01 共用总线) ---

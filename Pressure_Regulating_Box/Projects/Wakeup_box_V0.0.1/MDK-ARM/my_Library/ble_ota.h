@@ -119,4 +119,7 @@ uint16_t ble_ota_crc16_update(uint16_t crc, const uint8_t *data, uint16_t len);
 uint16_t ble_ota_crc16_update_byte(uint16_t crc, uint8_t byte);
 uint32_t ble_ota_crc32_compute(const uint8_t *data, uint32_t len);
 
+/* BLE AT 配置 */
+void ble_set_name_from_device_id(void);
+
 #endif /* BLE_OTA_H */

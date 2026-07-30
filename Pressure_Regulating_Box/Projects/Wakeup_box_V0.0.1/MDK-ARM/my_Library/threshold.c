@@ -23,7 +23,7 @@
 //   5. Tthreshold high/low              (温度上下限)
 //   6. spupower high/low                (电压上下限)
 //   7. vpthreshold mutation             (压力突变, 不受 shock 影响)
-ThresholdResult_t threshold_check(float pressure, float temperature, float voltage, float last_pressure, uint8_t check_voltage)
+ThresholdResult_t threshold_check(float pressure, float temperature, float voltage, float last_pressure, uint8_t check_voltage, uint8_t skip_mutation)
 {
     // ---- 1. 电压保护(VLP) — 跟随 spupower.switch ----
     // voltage >= 0 守卫: ADC 超时返回 -1.0, 不可参与电压判定, 否则误触发 VPROTECT
@@ -70,7 +70,7 @@ ThresholdResult_t threshold_check(float pressure, float temperature, float volta
     }
 
     // ---- 7. 压力突变 (last_pressure < 0 表示首次采集,跳过; 不应用 shock) ----
-    if(g_pthreshold.enabled && last_pressure >= 0)
+    if(!skip_mutation && g_pthreshold.enabled && last_pressure >= 0)
     {
         float delta = pressure - last_pressure;
         if(delta < 0) delta = -delta;
@@ -188,7 +188,7 @@ const char* threshold_temp_status_str(TempStatus_t status)
 
 // ==================== 出气端(第二路)阈值检查 ====================
 // 基于 g_pthreshold2/g_tthreshold2, 不含电压检查 (电压为全局共享)
-ThresholdResult_t threshold_check2(float pressure, float temperature, float last_pressure)
+ThresholdResult_t threshold_check2(float pressure, float temperature, float last_pressure, uint8_t skip_mutation)
 {
     // ---- 压力检查 (含 shock 滞回带) ----
     if(g_pthreshold2.enabled)
@@ -218,7 +218,7 @@ ThresholdResult_t threshold_check2(float pressure, float temperature, float last
     }
 
     // ---- 压力突变 (last_pressure < 0 表示首次采集,跳过) ----
-    if(g_pthreshold2.enabled && last_pressure >= 0)
+    if(!skip_mutation && g_pthreshold2.enabled && last_pressure >= 0)
     {
         float delta = pressure - last_pressure;
         if(delta < 0) delta = -delta;

@@ -4,6 +4,7 @@
 #include "stdint.h"
 #include "PT_304_35.h"
 #include "ota_info.h"
+#include "threshold.h"
 
 #define APP_FW_VERSION_NUM     1
 typedef struct {
@@ -24,5 +25,9 @@ typedef struct {
 } SensorContext_t;
 
 extern SensorContext_t g_sensor;
+
+// 公共功能函数 (main.c 定义, downlink.c 等模块调用)
+void lcd_shutdown(void);
+const char* alarm_try_close_valve(ThresholdResult_t result);
 
 #endif

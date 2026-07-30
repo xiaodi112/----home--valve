@@ -34,7 +34,7 @@
 #define APP_DEFAULT_MQTT_TOPIC        "/149/D54GRG29T5HB0/property/post"
 
 /* ---------- 固定参数（不通过串口修改） ---------- */
-#define APP_EC_MAX_RETRY              3
+#define APP_EC_MAX_RETRY              1
 #define APP_AT_TIMEOUT_SHORT          2000		/*返回状态*/
 #define APP_AT_TIMEOUT_PUBEX          5000      /* QMTPUBEX等待'>'提示(QSCLK=2唤醒后模块需2-3s) */
 #define APP_AT_TIMEOUT_LONG           10000

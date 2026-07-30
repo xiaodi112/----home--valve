@@ -64,6 +64,9 @@ EC_Status_t EC801E_PublishAlarmStatus(ThresholdResult_t result, float voltage);
 // 发布下发响应结果 (单字段)
 EC_Status_t EC801E_PublishResponse(const char *id, const char *value);
 
+// 发布阀门状态 (合并 valve_control + valve_last_order 为一条JSON)
+EC_Status_t EC801E_PublishValveStatus(const char *valve_result, int last_order);
+
 // 发布任意已组装好的JSON字符串 (用于多字段回传: 阈值/窗口/周期等)
 EC_Status_t EC801E_PublishRawJson(const char *json_str);
 
@@ -108,6 +111,10 @@ EC_Status_t EC801E_UserMqtt_Disconnect(void);
 // 发布用户端传感器数据 (LY格式JSON, 发布到id=1)
 // 自动构建 {"param":[...]} 格式
 EC_Status_t EC801E_UserMqtt_PublishSensorData(PT304D_Data *inlet, PT304D_Data *outlet, float voltage);
+
+// 发布单条历史记录到用户端MQTT (LY格式, id=1)
+// 使用 record 自身的 timestamp, 适用于批量历史上报
+EC_Status_t EC801E_UserMqtt_PublishRecord(const SensorRecord_t *record);
 
 // 查询用户端MQTT连接状态 (id=1)
 // 返回: 1=已连接, 0=未连接/未配置

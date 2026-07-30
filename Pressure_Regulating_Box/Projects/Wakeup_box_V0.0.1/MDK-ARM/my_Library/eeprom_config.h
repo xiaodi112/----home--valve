@@ -193,6 +193,16 @@
 #define EE_ADDR_UMQTT_CLIENT_ID   0x3C3
 #define EE_ADDR_UMQTT_TOPIC_UP    0x403
 
+// 区域 11: 定时开关阀 (ValveTiming, Magic 0xC7)
+//   0x490: Magic
+//   0x491: timing_switch (uint8)
+//   0x492-0x495: open_time  (uint32, HHMMSS)
+//   0x496-0x499: close_time (uint32, HHMMSS)
+#define EE_ADDR_VTIMING_MAGIC     0x490
+#define EE_ADDR_VTIMING_SWITCH    0x491
+#define EE_ADDR_VTIMING_OPEN      0x492
+#define EE_ADDR_VTIMING_CLOSE     0x496
+
 // ==================== Magic 值 ====================
 #define EE_MAGIC_INTERVAL         0xA5
 #define EE_MAGIC_MQTT             0x5A
@@ -204,6 +214,7 @@
 #define EE_MAGIC_VPTH2            0xC4
 #define EE_MAGIC_TTH2             0xC5
 #define EE_MAGIC_UMQTT            0xC6
+#define EE_MAGIC_VTIMING          0xC7
 
 // ==================== 首次开机默认值 (清零策略, 用户后续填充) ====================
 // 说明: 按需求默认 switch=0 (报警关), 阈值=0; 本人可修改这些宏提供用户预设
@@ -292,6 +303,13 @@ typedef struct {
     uint16_t delay_ms;          // 保持时间 (ms)
 } ValveDelayConfig_t;
 
+// 定时开关阀 (closeoropen_set/get)
+typedef struct {
+    uint8_t  enabled;           // timing_switch: 0=关, 1=开
+    uint32_t open_time;         // 开阀时间 HHMMSS (如 123400)
+    uint32_t close_time;        // 关阀时间 HHMMSS (如 134700)
+} ValveTimingConfig_t;
+
 // 电压检测 (spupower_set/get)
 typedef struct {
     uint8_t enabled;            // 0=关闭电压检测(包括 VLP), 1=开启
@@ -344,6 +362,7 @@ extern ValveDelayConfig_t         g_vdelay;               // 阀门动作延时
 extern VoltagePowerConfig_t       g_spupower;             // 电压检测
 extern PressureThresholdConfig_t  g_pthreshold;           // 进气端压力阈值
 extern PressureThresholdConfig_t  g_pthreshold2;          // 出气端压力阈值
+extern ValveTimingConfig_t        g_valve_timing;         // 定时开关阀配置
 
 // ==================== 接口函数 ====================
 
@@ -379,6 +398,9 @@ void config_save_tthreshold2(void);
 
 // 保存用户端MQTT配置
 void config_save_user_mqtt(void);
+
+// 保存定时开关阀配置
+void config_save_valve_timing(void);
 
 // 获取心跳值(防无效)
 uint16_t config_get_keepalive(void);

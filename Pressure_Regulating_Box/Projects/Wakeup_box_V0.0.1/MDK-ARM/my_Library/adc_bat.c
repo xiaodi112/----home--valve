@@ -1,6 +1,6 @@
 #include "adc_bat.h"
 
-// ADC参考电压 3.3V, 12位分辨率
+// ADC参考电压 3.0V, 12位分辨率
 #define ADC_VREF        3.3f
 #define ADC_RESOLUTION  4095.0f
 

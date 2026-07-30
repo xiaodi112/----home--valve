@@ -30,10 +30,6 @@ static char s_payload[1024];         // MQTT publish payload (LY格式9条约870
 static char s_timestamp[32];         // 时间戳格式化
 static char s_topic[MQTT_TOPIC_MAX]; // 临时 topic (订阅/OTA reply)
 
-// ==================== 模块无响应短路标志 ====================
-// InitAndConnect 3轮重试全部失败后置1, 后续所有4G操作立即跳过
-// 仅 PowerOn() 清除 (新电源周期重新尝试)
-static uint8_t s_module_dead = 0;
 
 static EC_Status_t EC_SendCmd(const char *cmd, const char *expect, uint32_t timeout_ms);
 
@@ -170,7 +166,6 @@ static EC_Status_t EC_SendCmdRetry(const char *cmd, const char *expect,
 // ==================== 电源控制 ====================
 void EC801E_PowerOn(void)
 {
-    s_module_dead = 0;
     gpio_bit_set(EC_PWRKEY_PORT, EC_PWRKEY_PIN);
     printf_debug("[EC] Power ON\r\n");
 }
@@ -185,6 +180,7 @@ void EC801E_PowerOff(void)
 EC_Status_t EC801E_InitNetwork(void)
 {
     printf_debug("[EC] InitNetwork...\r\n");
+	trea_delay_ms(1000);
 
     if(EC_SendCmdRetry("AT\r\n", "OK", APP_AT_TIMEOUT_SHORT, APP_EC_MAX_RETRY) != EC_OK)
         return EC_ERROR;
@@ -204,12 +200,38 @@ EC_Status_t EC801E_InitNetwork(void)
     else
         printf_debug("[EC] ICCID query failed\r\n");
 
-	trea_delay_ms(1000);
+    // 等待网络注册 (CFUN=1,1复位后需重新搜网, 通常5~20s)
+    {
+        uint8_t cereg_ok = 0;
+        uint8_t i;
+        for(i = 0; i < 10; i++)   // 最多等15s (10次×1.5s)
+        {
+            trea_delay_ms(1500);
+            if(EC_SendCmd("AT+CEREG?\r\n", "OK", APP_AT_TIMEOUT_SHORT) == EC_OK)
+            {
+                // +CEREG: 0,1 (已注册本地) 或 +CEREG: 0,5 (已注册漫游)
+                if(strstr(ec_rx_buf, ",1") || strstr(ec_rx_buf, ",5"))
+                {
+                    cereg_ok = 1;
+                    printf_debug("[EC] Network registered (attempt %d)\r\n", i + 1);
+                    break;
+                }
+            }
+            printf_debug("[EC] CEREG waiting... (%d/10)\r\n", i + 1);
+            swdt_feed();  // 喂狗: CEREG轮询可能持续~30s, 防止看门狗超时
+        }
+        if(!cereg_ok)
+        {
+            printf_debug("[EC] Network registration timeout!\r\n");
+            return EC_ERROR;
+        }
+    }
+
     EC_SendCmd("AT+CSQ\r\n", "OK", APP_AT_TIMEOUT_SHORT);
 
     if(EC_SendCmdRetry("AT+CGACT=1,1\r\n", "OK", APP_AT_TIMEOUT_LONG, APP_EC_MAX_RETRY) != EC_OK)
     {
-        printf_debug("[EC] Network activate failed!\r\n");
+        printf_debug("[EC] PDP activate failed!\r\n");
         return EC_ERROR;
     }
 
@@ -223,7 +245,7 @@ EC_Status_t EC801E_SyncTime(void)
     uint8_t ch;
     uint16_t cnt;
 
-    if(s_module_dead) return EC_ERROR;
+
     printf_debug("[EC] SyncTime start\r\n");
 
     // 1. 清空接收缓冲 + 环形缓冲(避免前序命令残留OK污染)
@@ -349,7 +371,7 @@ EC_Status_t EC801E_ConnectMQTT(void)
 // ==================== MQTT断开 ====================
 EC_Status_t EC801E_DisconnectMQTT(void)
 {
-    if(s_module_dead) return EC_ERROR;
+
     trea_delay_ms(300);
     EC_SendCmd("AT+QMTDISC=0\r\n", "OK", APP_AT_TIMEOUT_SHORT);
     return EC_OK;
@@ -358,7 +380,7 @@ EC_Status_t EC801E_DisconnectMQTT(void)
 // ==================== 发布传感器数据 ====================
 EC_Status_t EC801E_PublishSensorData(PT304D_Data *data, float voltage)
 {
-    if(s_module_dead) return EC_ERROR;
+
     if(!data) return EC_ERROR;
 
     rtc_get_time_str(s_timestamp, sizeof(s_timestamp));
@@ -386,7 +408,7 @@ EC_Status_t EC801E_FullUpload(PT304D_Data *data, float voltage)
     uint8_t retry;
     EC_Status_t ret;
 
-    if(s_module_dead) return EC_ERROR;
+
     EC801E_SetPSM(0);
     trea_delay_ms(1000);
 
@@ -398,7 +420,7 @@ EC_Status_t EC801E_FullUpload(PT304D_Data *data, float voltage)
         if(ret != EC_OK)
         {
             printf_debug("[EC] InitNetwork fail, retry %d/%d\r\n", retry + 1, APP_EC_MAX_RETRY);
-            trea_delay_ms(2000);
+            trea_delay_ms(1000);
             continue;
         }
 
@@ -406,7 +428,7 @@ EC_Status_t EC801E_FullUpload(PT304D_Data *data, float voltage)
         if(ret != EC_OK)
         {
             printf_debug("[EC] ConnectMQTT fail, retry %d/%d\r\n", retry + 1, APP_EC_MAX_RETRY);
-            trea_delay_ms(2000);
+            trea_delay_ms(1000);
             continue;
         }
 
@@ -415,7 +437,7 @@ EC_Status_t EC801E_FullUpload(PT304D_Data *data, float voltage)
         {
             printf_debug("[EC] Publish fail, retry %d/%d\r\n", retry + 1, APP_EC_MAX_RETRY);
             EC801E_DisconnectMQTT();
-            trea_delay_ms(2000);
+            trea_delay_ms(1000);
             continue;
         }
 
@@ -439,7 +461,6 @@ EC_Status_t EC801E_FullUpload(PT304D_Data *data, float voltage)
 // mode=3: PSM深休眠(脱网, T3412周期唤醒, UART可唤醒)
 void EC801E_SetPSM(uint8_t mode)
 {
-    if(s_module_dead) return;
     switch(mode)
     {
         case 3:
@@ -475,7 +496,7 @@ void EC801E_Wakeup(void)
 // ==================== MQTT订阅下发topic ====================
 EC_Status_t EC801E_SubscribeTopic(void)
 {
-    if(s_module_dead) return EC_ERROR;
+
     // 共享 s_cmd_buf / s_topic (模块级, 此处 s_topic 复用为 topic_down)
 
     // 从上报topic推导订阅topic: /property/post → /function/get
@@ -512,7 +533,6 @@ EC_Status_t EC801E_ReadDownlink(char *payload_buf, uint16_t buf_size)
     char end_ch;
     uint16_t len;
 
-    if(s_module_dead) { payload_buf[0] = '\0'; return EC_ERROR; }
     payload_buf[0] = '\0';
 
     // 唤醒模块(QSCLK=2下首字节可能丢失)
@@ -570,8 +590,6 @@ EC_Status_t EC801E_ReadDownlink(char *payload_buf, uint16_t buf_size)
 // ==================== 确保MQTT已连接（QSCLK=1模式，断线自动重连） ====================
 EC_Status_t EC801E_EnsureConnected(void)
 {
-    if(s_module_dead) return EC_ERROR;
-
     EC801E_Wakeup();
 
     // 查询MQTT连接状态 (state=3表示已连接)
@@ -588,16 +606,24 @@ EC_Status_t EC801E_EnsureConnected(void)
 // ==================== 首次初始化+连接+订阅+QSCLK ====================
 EC_Status_t EC801E_InitAndConnect(void)
 {
-    // 共享 s_cmd_buf (模块级, 仅用于 keepalive 命令格式化)
     uint8_t retry;
     EC_Status_t ret;
-
-    if(s_module_dead) return EC_ERROR;
 
     EC801E_SetPSM(0);
     printf_debug("[EC] === InitAndConnect ===\r\n");
 
-    for(retry = 0; retry < APP_EC_MAX_RETRY; retry++)
+    // 软件复位模块射频+协议栈, 清除残留TCP/MQTT/PDP状态
+    EC_SendCmd("AT+CFUN=1,1\r\n", "OK", APP_AT_TIMEOUT_SHORT);
+    trea_delay_ms(5000);  // 等待模块复位完成
+
+    // 确认模块已就绪 (复位后AT可能需数秒才响应)
+    if(EC_SendCmdRetry("AT\r\n", "OK", APP_AT_TIMEOUT_SHORT, APP_EC_MAX_RETRY) != EC_OK)
+    {
+        printf_debug("[EC] Module not responding after CFUN reset\r\n");
+        return EC_ERROR;
+    }
+
+    for(retry = 0; retry < 1; retry++)
     {
         ret = EC801E_InitNetwork();
         if(ret != EC_OK) { trea_delay_ms(1000); continue; }
@@ -611,7 +637,6 @@ EC_Status_t EC801E_InitAndConnect(void)
         }
 
         // 消息缓存模式: 模块收到下发后缓存, MCU用AT+QMTRECV主动查询
-        // (LPUART唤醒时URC会丢失, 必须用主动查询)
         EC_SendCmd("AT+QMTCFG=\"recv/mode\",0,1,0\r\n", "OK", APP_AT_TIMEOUT_SHORT);
 
         ret = EC801E_ConnectMQTT();
@@ -638,15 +663,14 @@ EC_Status_t EC801E_InitAndConnect(void)
         return EC_OK;
     }
 
-    printf_debug("[EC] === InitAndConnect FAILED, marking module dead ===\r\n");
-    s_module_dead = 1;
+    printf_debug("[EC] === InitAndConnect FAILED ===\r\n");
     return EC_ERROR;
 }
 
 // ==================== 发布单条历史记录 ====================
 EC_Status_t EC801E_PublishSingleRecord(const SensorRecord_t *record)
 {
-    if(s_module_dead) return EC_ERROR;
+
     if(!record) return EC_ERROR;
 
     snprintf(s_payload, sizeof(s_payload),
@@ -671,7 +695,7 @@ EC_Status_t EC801E_PublishSingleRecord(const SensorRecord_t *record)
 // ==================== 发布报警状态 (统一格式) ====================
 EC_Status_t EC801E_PublishAlarmStatus(ThresholdResult_t result, float voltage)
 {
-    if(s_module_dead) return EC_ERROR;
+
 
     const char *id;
     const char *value;
@@ -732,11 +756,26 @@ EC_Status_t EC801E_PublishAlarmStatus(ThresholdResult_t result, float voltage)
 // ==================== 发布下发响应 ====================
 EC_Status_t EC801E_PublishResponse(const char *id, const char *value)
 {
-    if(s_module_dead) return EC_ERROR;
+
     rtc_get_time_str(s_timestamp, sizeof(s_timestamp));
     snprintf(s_payload, sizeof(s_payload),
         "[{\"id\":\"%s\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"}]", id, value, s_timestamp);
     printf_debug("[EC] Response: %s=%s\r\n", id, value);
+    return EC801E_PublishRawJson(s_payload);
+}
+
+// ==================== 发布阀门状态 (合并 valve_control + valve_last_order) ====================
+EC_Status_t EC801E_PublishValveStatus(const char *valve_result, int last_order)
+{
+
+    char v_order[4];
+    snprintf(v_order, sizeof(v_order), "%d", last_order);
+    rtc_get_time_str(s_timestamp, sizeof(s_timestamp));
+    snprintf(s_payload, sizeof(s_payload),
+        "[{\"id\":\"valve_control\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
+         "{\"id\":\"valve_last_order\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"}]",
+        valve_result, s_timestamp, v_order, s_timestamp);
+    printf_debug("[EC] ValveStatus: %s order=%s\r\n", valve_result, v_order);
     return EC801E_PublishRawJson(s_payload);
 }
 
@@ -746,7 +785,7 @@ EC_Status_t EC801E_PublishRawJson(const char *json_str)
     // 共享 s_cmd_buf (模块级); json_str 可指向 s_payload (本函数仅写 s_cmd_buf)
     uint16_t payload_len;
 
-    if(s_module_dead) return EC_ERROR;
+
     if(!json_str || json_str[0] == '\0') return EC_ERROR;
 
     payload_len = (uint16_t)strlen(json_str);
@@ -764,7 +803,7 @@ EC_Status_t EC801E_PublishRawJson(const char *json_str)
 // ==================== 查询信号强度 ====================
 EC_Status_t EC801E_QueryCSQ(char *out, uint16_t size)
 {
-    if(s_module_dead) return EC_ERROR;
+
 	trea_delay_ms(130);
     // 响应: +CSQ: 22,99\r\nOK  (等OK确保完整响应)
     if(EC_SendCmd("AT+CSQ\r\n", "OK", APP_AT_TIMEOUT_SHORT) != EC_OK)
@@ -786,7 +825,7 @@ EC_Status_t EC801E_QueryCSQ(char *out, uint16_t size)
 // ==================== 查询SIM卡ICCID ====================
 EC_Status_t EC801E_QueryICCID(char *out, uint16_t size)
 {
-    if(s_module_dead) return EC_ERROR;
+
     // 响应: +QCCID: 898604B6222280037080\r\nOK  (等OK确保完整响应)
     if(EC_SendCmd("AT+QCCID\r\n", "OK", APP_AT_TIMEOUT_SHORT) != EC_OK)
         return EC_ERROR;
@@ -836,7 +875,7 @@ static void ec_derive_upgrade_topic(const char *suffix, char *out, uint16_t out_
 // ==================== OTA: 订阅升级下发 topic ====================
 EC_Status_t EC801E_SubscribeUpgradeTopic(void)
 {
-    if(s_module_dead) return EC_ERROR;
+
     // 共享 s_topic / s_cmd_buf (模块级)
 
     ec_derive_upgrade_topic("set", s_topic, sizeof(s_topic));
@@ -856,7 +895,7 @@ EC_Status_t EC801E_SubscribeUpgradeTopic(void)
 // ==================== OTA: 升级状态回执 ====================
 EC_Status_t EC801E_PublishUpgradeReply(int reply_code)
 {
-    if(s_module_dead) return EC_ERROR;
+
     // 共享 s_topic / s_payload / s_cmd_buf (模块级)
     uint16_t payload_len;
 
@@ -892,7 +931,7 @@ EC_Status_t EC801E_HttpDownloadToFlash(const char *url,
                                        uint32_t max_size,
                                        uint32_t *actual_size)
 {
-    if(s_module_dead) return EC_ERROR;
+
     // 共享 s_cmd_buf (模块级)
     uint32_t url_len;
     uint32_t content_length = 0;
@@ -1118,7 +1157,7 @@ EC_Status_t EC801E_HttpDownloadToFlash(const char *url,
 // ==================== 查询模块IMEI ====================
 EC_Status_t EC801E_QueryIMEI(char *out, uint16_t size)
 {
-    if(s_module_dead) return EC_ERROR;
+
     // AT+GSN 响应: 直接返回IMEI号
     if(EC_SendCmd("AT+GSN\r\n", "OK", APP_AT_TIMEOUT_SHORT) != EC_OK)
         return EC_ERROR;
@@ -1137,7 +1176,6 @@ EC_Status_t EC801E_QueryIMEI(char *out, uint16_t size)
 void report_4g_power_state(uint8_t on)
 {
     char val[2];
-    if(s_module_dead) return;
     val[0] = on ? '1' : '0';
     val[1] = '\0';
     if(EC801E_EnsureConnected() == EC_OK)
@@ -1155,7 +1193,7 @@ uint8_t EC801E_UserMqtt_IsConfigured(void)
 // 连接用户端MQTT服务器 (id=1)
 EC_Status_t EC801E_UserMqtt_Connect(void)
 {
-    if(s_module_dead) return EC_ERROR;
+
     if(!EC801E_UserMqtt_IsConfigured())
     {
         printf_debug("[EC] UserMqtt: not configured, skip\r\n");
@@ -1163,6 +1201,13 @@ EC_Status_t EC801E_UserMqtt_Connect(void)
     }
 
     EC801E_Wakeup();
+
+    // 前置检查: 主平台MQTT(id=0)是否已连接, 未连接说明网络不可用, 跳过无谓重试
+    if(EC_SendCmd("AT+QMTCONN?\r\n", "+QMTCONN: 0,3", 3000) != EC_OK)
+    {
+        printf_debug("[EC] UserMqtt: main MQTT not connected, skip\r\n");
+        return EC_ERROR;
+    }
 
     // keepalive 配置
     snprintf(s_cmd_buf, sizeof(s_cmd_buf), "AT+QMTCFG=\"keepalive\",1,600\r\n");
@@ -1209,7 +1254,7 @@ EC_Status_t EC801E_UserMqtt_Connect(void)
 // 断开用户端MQTT (id=1)
 EC_Status_t EC801E_UserMqtt_Disconnect(void)
 {
-    if(s_module_dead) return EC_ERROR;
+
     EC_SendCmd("AT+QMTDISC=1\r\n", "OK", APP_AT_TIMEOUT_SHORT);
     trea_delay_ms(300);
     EC_SendCmd("AT+QMTCLOSE=1\r\n", "OK", APP_AT_TIMEOUT_SHORT);
@@ -1217,15 +1262,61 @@ EC_Status_t EC801E_UserMqtt_Disconnect(void)
     return EC_OK;
 }
 
-// 发布用户端传感器数据 (LY格式)
+// ==================== 内部: LY格式 payload 构建 ====================
+// 将9个字段格式化为 {"param":[...]} JSON, 写入 s_payload
+// LY01=进口压力(kPa) LY02=进口温度 LY03=电池电压 LY04=探头故障
+// LY05=信号强度 LY06=电压报警 LY07=上报周期(min) LY08=出口压力(kPa) LY11=出口温度
+static void ly_build_payload(float p1_kpa, float t1, float voltage,
+                             int fault, const char *csq, int volt_alarm,
+                             uint32_t report_min, float p2_kpa, float t2,
+                             const char *ts)
+{
+    snprintf(s_payload, sizeof(s_payload),
+        "{\"param\":["
+        "{\"deviceKey\":\"%s\",\"key\":\"LY01\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY02\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY03\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY05\",\"value\":\"%s\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY08\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY11\",\"value\":\"%.2f\",\"ts\":\"%s\"}"
+        "]}",
+        g_user_mqtt.client_id, p1_kpa, ts,
+        g_user_mqtt.client_id, t1, ts,
+        g_user_mqtt.client_id, voltage, ts,
+        g_user_mqtt.client_id, fault, ts,
+        g_user_mqtt.client_id, csq, ts,
+        g_user_mqtt.client_id, volt_alarm, ts,
+        g_user_mqtt.client_id, (unsigned int)report_min, ts,
+        g_user_mqtt.client_id, p2_kpa, ts,
+        g_user_mqtt.client_id, t2, ts);
+}
+
+// ==================== 内部: 用户端MQTT发布通用发送 ====================
+static EC_Status_t umqtt_publish_payload(void)
+{
+    uint16_t payload_len = (uint16_t)strlen(s_payload);
+
+    snprintf(s_cmd_buf, sizeof(s_cmd_buf),
+             "AT+QMTPUBEX=1,0,0,0,\"%s\",%d\r\n", g_user_mqtt.topic_up, payload_len);
+
+    if(ec_pubex_send(s_cmd_buf, s_payload, payload_len) != EC_OK)
+    {
+        printf_debug("[EC] UserMqtt: publish failed\r\n");
+        return EC_TIMEOUT;
+    }
+    return EC_OK;
+}
+
+// 发布用户端传感器数据 (LY格式, 实时)
 // JSON格式: {"param":[{"deviceKey":"xxx","key":"LYxx","value":"xxx","ts":"xxx"},…]}
 EC_Status_t EC801E_UserMqtt_PublishSensorData(PT304D_Data *inlet, PT304D_Data *outlet, float voltage)
 {
-    uint16_t payload_len;
     char csq_buf[8] = {0};
     uint32_t report_min;
 
-    if(s_module_dead) return EC_ERROR;
     if(!EC801E_UserMqtt_IsConfigured())
         return EC_ERROR;
 
@@ -1239,67 +1330,54 @@ EC_Status_t EC801E_UserMqtt_PublishSensorData(PT304D_Data *inlet, PT304D_Data *o
     // 获取时间戳
     rtc_get_time_str(s_timestamp, sizeof(s_timestamp));
 
-    // 构建 LY 格式 payload
-    // LY01=进口压力(kPa) LY02=进口温度 LY03=电池电压 LY04=探头故障
-    // LY05=信号强度 LY06=电压报警 LY07=上报周期(min) LY08=出口压力(kPa) LY11=出口温度
     {
         float p1_kpa = (inlet && inlet->err == PT304D_OK) ? (inlet->pressure / 1000.0f) : 0.0f;
         float t1 = (inlet && inlet->err == PT304D_OK) ? inlet->temperature : 0.0f;
         float p2_kpa = (outlet && outlet->err == PT304D_OK) ? (outlet->pressure / 1000.0f) : 0.0f;
         float t2 = (outlet && outlet->err == PT304D_OK) ? outlet->temperature : 0.0f;
         int fault = 0;
-        // LY06 电压报警状态 (-1=未知/0=正常/1=报警), 与 downlink LY06_get 共用单一真源
         int volt_alarm = threshold_voltage_alarm(voltage);
 
         if(inlet && inlet->err != PT304D_OK) fault |= 1;
         if(outlet && outlet->err != PT304D_OK) fault |= 2;
 
-//        snprintf(s_payload, sizeof(s_payload),
-//            "{\"param\":["
-//            "{\"deviceKey\":\"%s\",\"key\":\"LY01\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//            "{\"deviceKey\":\"%s\",\"key\":\"LY02\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//            "{\"deviceKey\":\"%s\",\"key\":\"LY03\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//            "{\"deviceKey\":\"%s\",\"key\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
-//            "{\"deviceKey\":\"%s\",\"key\":\"LY05\",\"value\":\"%s\",\"ts\":\"%s\"},"
-//            "{\"deviceKey\":\"%s\",\"key\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
-//            "{\"deviceKey\":\"%s\",\"key\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
-//            "{\"deviceKey\":\"%s\",\"key\":\"LY08\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//            "{\"deviceKey\":\"%s\",\"key\":\"LY11\",\"value\":\"%.2f\",\"ts\":\"%s\"}"
-//            "]}",
-//            g_user_mqtt.client_id, p1_kpa, s_timestamp,
-//            g_user_mqtt.client_id, t1, s_timestamp,
-//            g_user_mqtt.client_id, voltage, s_timestamp,
-//            g_user_mqtt.client_id, fault, s_timestamp,
-//            g_user_mqtt.client_id, csq_buf, s_timestamp,
-//            g_user_mqtt.client_id, volt_alarm, s_timestamp,
-//            g_user_mqtt.client_id, (unsigned int)report_min, s_timestamp,
-//            g_user_mqtt.client_id, p2_kpa, s_timestamp,
-//            g_user_mqtt.client_id, t2, s_timestamp);
-           snprintf(s_payload, sizeof(s_payload),
-        "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"temp2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"pressure2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"voltage\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
-        11.1, s_timestamp,
-        g_sensor.raw2.temperature, s_timestamp,
-        11.1, s_timestamp,
-        g_sensor.raw2.pressure, s_timestamp,
-        voltage, s_timestamp);
+        ly_build_payload(p1_kpa, t1, voltage, fault, csq_buf,
+                         volt_alarm, report_min, p2_kpa, t2, s_timestamp);
     }
 
-    payload_len = (uint16_t)strlen(s_payload);
+    printf_debug("[EC] UserMqtt: published %d bytes\r\n", (int)strlen(s_payload));
+    return umqtt_publish_payload();
+}
 
-    snprintf(s_cmd_buf, sizeof(s_cmd_buf),
-             "AT+QMTPUBEX=1,0,0,0,\"%s\",%d\r\n", g_user_mqtt.topic_up, payload_len);
+// ==================== 用户端MQTT: 发布单条历史记录 (LY格式) ====================
+// 将 SensorRecord_t 转为 LY 格式 JSON 并通过 id=1 发布, 使用记录自身的 timestamp
+// csq/report_min 由调用者在批量上报前查好, 通过参数传入避免重复AT查询
+EC_Status_t EC801E_UserMqtt_PublishRecord(const SensorRecord_t *record)
+{
+    char csq_buf[8] = {0};
+    uint32_t report_min;
 
-    if(ec_pubex_send(s_cmd_buf, s_payload, payload_len) != EC_OK)
+    if(!record) return EC_ERROR;
+    if(!EC801E_UserMqtt_IsConfigured()) return EC_ERROR;
+
+    // CSQ: 使用上报时刻值 (历史记录无CSQ字段)
+    EC801E_QueryCSQ(csq_buf, sizeof(csq_buf));
+
+    // 上报周期(分钟)
+    report_min = cycle_to_seconds(&g_report_cycle) / 60;
+    if(report_min == 0) report_min = 1;
+
     {
-        printf_debug("[EC] UserMqtt: publish failed\r\n");
-        return EC_TIMEOUT;
+        float p1_kpa = record->pressure / 1000.0f;
+        float p2_kpa = record->pressure2 / 1000.0f;
+        int volt_alarm = threshold_voltage_alarm(record->voltage);
+
+        // fault=0: 采集失败时不入缓冲, 历史记录均为有效数据
+        ly_build_payload(p1_kpa, record->temperature, record->voltage,
+                         0, csq_buf, volt_alarm, report_min,
+                         p2_kpa, record->temperature2, record->timestamp);
     }
 
-    printf_debug("[EC] UserMqtt: published %d bytes\r\n", payload_len);
-    return EC_OK;
+    return umqtt_publish_payload();
 }
 

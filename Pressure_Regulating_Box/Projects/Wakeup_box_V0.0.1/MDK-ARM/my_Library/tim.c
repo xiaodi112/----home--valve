@@ -504,3 +504,56 @@ void rtc_set_next_alarm_sec(uint8_t seconds)
     printf_debug("[RTC] Next frequency: %02d:%02d:%02d (in %d sec)\r\n",
                  next_hour, next_min, next_sec, seconds);
 }
+
+// ==============================
+// 设置RTC闹钟到绝对HHMMSS时间 (定时阀门用)
+// 如果目标时间已过, 设为明天同一时间
+// 返回距离目标的秒数
+// ==============================
+uint32_t rtc_set_alarm_at_hhmmss(uint32_t target_hhmmss)
+{
+    rtc_alarm_struct alarm_cfg;
+    rtc_parameter_struct cur_time;
+
+    uint8_t t_hour = (uint8_t)(target_hhmmss / 10000);
+    uint8_t t_min  = (uint8_t)((target_hhmmss / 100) % 100);
+    uint8_t t_sec  = (uint8_t)(target_hhmmss % 100);
+
+    rtc_current_time_get(&cur_time);
+    uint8_t cur_hour = bcd2dec(cur_time.hour);
+    uint8_t cur_min  = bcd2dec(cur_time.minute);
+    uint8_t cur_sec  = bcd2dec(cur_time.second);
+
+    uint32_t now_total = (uint32_t)cur_hour * 3600 + (uint32_t)cur_min * 60 + cur_sec;
+    uint32_t tgt_total = (uint32_t)t_hour * 3600 + (uint32_t)t_min * 60 + t_sec;
+
+    uint32_t wait_sec;
+    if(tgt_total > now_total)
+        wait_sec = tgt_total - now_total;
+    else
+        wait_sec = 86400 - now_total + tgt_total;  // 明天
+
+    rtc_alarm_disable(RTC_ALARM0);
+
+    alarm_cfg.alarm_mask       = RTC_ALARM_DATE_MASK;
+    alarm_cfg.weekday_or_date  = RTC_ALARM_DATE_SELECTED;
+    alarm_cfg.alarm_day        = 0x01;
+    alarm_cfg.am_pm            = RTC_AM;
+    alarm_cfg.alarm_hour       = dec2bcd(t_hour);
+    alarm_cfg.alarm_minute     = dec2bcd(t_min);
+    alarm_cfg.alarm_second     = dec2bcd(t_sec);
+
+    rtc_alarm_config(RTC_ALARM0, &alarm_cfg);
+
+    rtc_flag_clear(RTC_FLAG_ALARM0);
+    exti_flag_clear(EXTI_17);
+
+    rtc_interrupt_enable(RTC_INT_ALARM0);
+    rtc_alarm_enable(RTC_ALARM0);
+
+    rtc_alarm_flag = 0;
+
+    printf_debug("[RTC] Valve alarm: %02d:%02d:%02d (in %lu sec)\r\n",
+                 t_hour, t_min, t_sec, wait_sec);
+    return wait_sec;
+}
