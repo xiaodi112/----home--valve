@@ -1233,11 +1233,11 @@ uint8_t mqtt_valid = 0;
     while((trea_millis() - start) < 30000)
     {
         // �?5秒提�?
-    uint32_t elapsed = (trea_millis() - start) / 1000;
+    int elapsed = (trea_millis() - start) / 1000;
         if(elapsed - last_hint >= 15)
         {
             last_hint = elapsed;
-            printf_debug("[CFG] Waiting for MQTT... (%ds/30s)\r\n", (int)elapsed);
+            printf_debug("[CFG] Waiting for MQTT... (%ds/30s)\r\n", elapsed);
         }
 
         uint16_t len = debug_rx_read_line(s_cfg_line_buf, sizeof(s_cfg_line_buf), 1000);
@@ -1247,14 +1247,14 @@ uint8_t mqtt_valid = 0;
         config_parse_and_apply(s_cfg_line_buf);
 
         // 检查MQTT是否已配�?        {
-uint8_t m = 0;
+	uint8_t m = 0;
             M24M01_Read(EE_ADDR_MQTT_MAGIC, &m, 1);
             if(m == EE_MAGIC_MQTT)
             {
                 printf_debug("[CFG] MQTT configured! Waiting 5s for optional params...\r\n");
                 // 短窗口接收可选参�?
     uint32_t opt_start = trea_millis();
-                while((trea_millis() - opt_start) < 5000)
+                while((trea_millis() - opt_start) < 10000)
                 {
                     len = debug_rx_read_line(s_cfg_line_buf, sizeof(s_cfg_line_buf), 1000);
                     if(len > 0)

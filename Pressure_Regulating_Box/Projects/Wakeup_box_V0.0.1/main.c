@@ -72,7 +72,7 @@ uint8_t voltage_low_power = 0;              // 低电压省电模�? �?:00/18
 uint8_t fourG_user_off = 0;                 // 用户主动关机4G标志(阻止do_wakeup盲目恢复PD9)
 static uint8_t fourG_init_failed = 0;       // 4G注网失败标志(阻止do_sleep保持4G供电, 下次上报周期重试)
 static uint8_t fourG_weak_signal = 0;       // 弱信号断电标志(long模式下CSQ过低, 暂时按需冷启动)
-#define CSQ_WEAK_THRESHOLD  8               // CSQ<此值触发断电省电(8≈-97dBm)
+#define CSQ_WEAK_THRESHOLD  11               // CSQ<此值触发断电省电(8≈-97dBm)
 static uint8_t vlp_uploaded_this_hour = 0;  // 低电压模�? 防止同一小时重复上报
 ThresholdResult_t last_realtime_alarm = THRESHOLD_OK;          // 实时模式防重复报�?
 static uint8_t g_is_minimal_wakeup = 0;            // 标志：是否为纯周期传感器采集的最简唤醒状�?
@@ -1078,7 +1078,7 @@ static void do_wakeup(void)
     if(button_wakeup_flag == 0 && counter0 == 0)
     {
         g_is_minimal_wakeup = 1;
-        g_need_adc_sampling = config_need_adc_sampling();
+        g_need_adc_sampling = 0;
         
         system_wakeup_reinit();
         
@@ -1249,7 +1249,7 @@ static void do_wakeup(void)
                     if(g_bt_on)
                     {
                         ble_link_gpio_init();  /* PD2输入+上拉, 检测BLE连接状态 */
-                        ble_set_name_from_device_id(); /* AT指令设置BLE名称: YLY_<设备ID后3位> */
+                        ble_set_name_from_device_id(); /* AT指令设置BLE名称: 设备表号 */
                         ble_ota_init();        /* 状态=WAIT_CONNECT, 启动60s超时 */
                         app_state = STATE_BLE_OTA;
                         printf_debug("[SM] Entering BLE_OTA mode (waiting PD2=LOW)\r\n");
@@ -1502,13 +1502,7 @@ static void do_collect(void)
     }
 
     PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
-    
-    if(g_need_adc_sampling)
-        sensor_sample_voltage(1, g_sensor.last_normal_voltage);
-    else
-    {
-        g_sensor.voltage = g_sensor.last_normal_voltage;
-    }
+    g_sensor.voltage = g_sensor.last_normal_voltage;
 
     printf_debug("[SM] COLLECT (buf=%d) V=%.2f S2:P=%.2f T=%.2f err=%d S1:P=%.2f T=%.2f err=%d (ADC=%d)\r\n",
                  sensor_buf_count() + 1, g_sensor.voltage,
@@ -1566,7 +1560,7 @@ static void do_collect(void)
     }
 
     // 阈值检�?
-    result = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, g_need_adc_sampling, 0);
+    result = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, 0, 0);
     // 第二路阈值检查 (仅在双传感器且第二路在线时)
     if(result == THRESHOLD_OK && g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
         result = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_collect2, 0);
@@ -1868,10 +1862,10 @@ static void do_upload(void)
         EC801E_UserMqtt_Disconnect();
     }
 
-    // 上报传感器在线状�?
-    trea_delay_ms(500);
-    publish_sensor_status();
-    printf_debug("[SM] sensor status published\r\n");
+    // 上报汇总状态 (传感器在线+信号+压力温度状态+阀门+IP+电压)
+    trea_delay_ms(200);
+    publish_upload_summary();
+    printf_debug("[SM] upload summary published\r\n");
 
     // 上传流程结束，复位唤醒周期统计计�?
     wakeup_count = 0;
@@ -2339,20 +2333,19 @@ int main(void)
     {
         char v_order[4];
         snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
-        static char boot_json[256];
+        static char boot_json[100];
         static char boot_ts[32];
         rtc_get_time_str(boot_ts, sizeof(boot_ts));
         snprintf(boot_json, sizeof(boot_json),
-            "[{\"id\":\"restart\",\"value\":\"1\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"valve_last_order\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"}]",
-            boot_ts, v_order, boot_ts);
+            "[{\"id\":\"restart\",\"value\":\"1\",\"ts\":\"%s\",\"remark\":\"\"}]",
+            boot_ts);
         EC801E_PublishRawJson(boot_json);
     }
     trea_delay_ms(500);
 
     // �?2: 设备信息 (csq + soft-version + ICCID + IMEI)
     {
-        static char info_json[512];
+        static char info_json[380];
         char csq[8] = {0}, iccid[32] = {0}, imei[24] = {0};
         EC801E_Wakeup();
         EC801E_QueryCSQ(csq, sizeof(csq));
@@ -2369,86 +2362,19 @@ int main(void)
             "{\"id\":\"IMEI\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"}]",
             csq, info_ts, APP_FIRMWARE_VERSION, info_ts, iccid, info_ts, imei, info_ts);
         EC801E_PublishRawJson(info_json);
-        printf_debug("[SM] Device info: CSQ=%s ICCID=%s IMEI=%s\r\n", csq, iccid, imei);
+        printf_debug("[SM] Device info:\r\n CSQ=%s\r\n ICCID=%s\r\n IMEI=%s\r\n", csq, iccid, imei);
     }
     trea_delay_ms(500);
 
     // �?3: 传感器在线状�?(进气+出气�?字段)
     {
-        publish_sensor_status();   // rtu_have/status × 2 (与状态机各处共用)
+//        publish_sensor_status();   // rtu_have/status × 2 (与状态机各处共用)
+		publish_upload_summary();
         g_sensor.prev_online  = (g_sensor.raw.err  == PT304D_OK) ? 1 : 0;
         g_sensor.prev_online2 = (g_sensor.raw2.err == PT304D_OK) ? 1 : 0;
     }
     trea_delay_ms(500);
 
-//    // �?4: 压力阈�?vpthreshold (与平台同步当前配�?
-//    {
-//        static char vpth_json[640];
-//        static char vpth_ts[32];
-//        rtc_get_time_str(vpth_ts, sizeof(vpth_ts));
-//        snprintf(vpth_json, sizeof(vpth_json),
-//            "[{\"id\":\"vpthreshold_switch\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"},"
-//            "{\"id\":\"vpthreshold_ppmax\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-//            "{\"id\":\"vpthreshold_pmax\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-//            "{\"id\":\"vpthreshold_ppmin\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-//            "{\"id\":\"vpthreshold_pmin\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-//            "{\"id\":\"vpthreshold_mutation\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-//            "{\"id\":\"vpthreshold_shock\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
-//            g_pthreshold.enabled, vpth_ts,
-//            g_pthreshold.ppmax, vpth_ts, g_pthreshold.pmax, vpth_ts,
-//            g_pthreshold.ppmin, vpth_ts, g_pthreshold.pmin, vpth_ts,
-//            g_pthreshold.mutation, vpth_ts, g_pthreshold.shock, vpth_ts);
-//        EC801E_PublishRawJson(vpth_json);
-//    }
-//    trea_delay_ms(500);
-
-//    // �?5: 温度阈�?Tthreshold
-//    {
-//        static char tth_json[480];
-//        static char tth_ts[32];
-//        rtc_get_time_str(tth_ts, sizeof(tth_ts));
-//        snprintf(tth_json, sizeof(tth_json),
-//            "[{\"id\":\"Tthreshold_switch\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"},"
-//            "{\"id\":\"Tthreshold_high\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-//            "{\"id\":\"Tthreshold_low\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-//            "{\"id\":\"Tthreshold_vhigh\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-//            "{\"id\":\"Tthreshold_vlow\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
-//            g_tthreshold.enabled, tth_ts,
-//            g_tthreshold.high, tth_ts, g_tthreshold.low, tth_ts,
-//            g_tthreshold.vhigh, tth_ts, g_tthreshold.vlow, tth_ts);
-//        EC801E_PublishRawJson(tth_json);
-//    }
-//    trea_delay_ms(500);
-
-    // �?6: 电压检�?spupower
-    {
-        static char sp_json[384];
-        static char sp_ts[32];
-        rtc_get_time_str(sp_ts, sizeof(sp_ts));
-        snprintf(sp_json, sizeof(sp_json),
-            "[{\"id\":\"spupower_switch\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"spupower_high\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"spupower_low\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-            "{\"id\":\"spupower_protect\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
-            g_spupower.enabled, sp_ts,
-            g_spupower.high, sp_ts, g_spupower.low, sp_ts,
-            g_spupower.protect, sp_ts);
-        EC801E_PublishRawJson(sp_json);
-    }
-    trea_delay_ms(500);
-
-//    // �?7: 阀门动作延�?valve_delay
-//    {
-//        static char vd_json[256];
-//        static char vd_ts[32];
-//        rtc_get_time_str(vd_ts, sizeof(vd_ts));
-//        snprintf(vd_json, sizeof(vd_json),
-//            "[{\"id\":\"delay_switch\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"},"
-//            "{\"id\":\"delay_time\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"}]",
-//            g_vdelay.enabled, vd_ts, g_vdelay.delay_ms, vd_ts);
-//        EC801E_PublishRawJson(vd_json);
-//    }
-//    trea_delay_ms(500);
 
     // === 用户端MQTT发布 (id=1, 连接已在启动阶段建立) ===
     if(EC801E_UserMqtt_IsConfigured())

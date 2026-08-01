@@ -4,6 +4,8 @@
  */
 #include "ota_app.h"
 #include "ec800e.h"
+#include "eeprom_config.h"
+#include "adc_bat.h"
 #include "usart.h"
 #include "delay.h"
 #include "tim.h"
@@ -13,6 +15,34 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+
+#define OTA_CSQ_MIN  8   			// OTA最低信号要求 (CSQ<8 拒绝升级)
+#define OTA_vol_protection  3.1     // OTA最低电压要求 (value<OTA_vol_protection 拒绝升级)
+
+// OTA upgrade 状态上报值 (id:upgrade)
+#define OTA_ST_UPGRADING     0   // 进行升级
+#define OTA_ST_SUCCESS       1   // 升级成功
+#define OTA_ST_FAILED        2   // 升级失败
+#define OTA_ST_REJECT_CSQ    3   // 拒绝升级（信号）
+#define OTA_ST_REJECT_VOL    4   // 拒绝升级（电压）
+#define OTA_ST_VERIFY_OK     5   // 校验成功
+#define OTA_ST_VERIFY_FAIL   6   // 校验失败
+#define OTA_ST_DOWNLOADING   7   // 下载中
+#define OTA_ST_REBOOT        8   // 重启
+#define OTA_ST_VER_LOW       9   // 固件版本低
+
+// 内部helper: 上报 upgrade 状态到数据topic
+static void ota_report_status(uint8_t status)
+{
+    static char s_ota_ts[32];
+    static char s_ota_json[128];
+    rtc_get_time_str(s_ota_ts, sizeof(s_ota_ts));
+    snprintf(s_ota_json, sizeof(s_ota_json),
+             "[{\"id\":\"upgrade\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"}]",
+             status, s_ota_ts);
+    EC801E_PublishRawJson(s_ota_json);
+    trea_delay_ms(300);
+}
 
 /* ==================== InfoBlock 读写 (1 KB 整页) ==================== */
 
@@ -210,8 +240,39 @@ void ota_app_handle_upgrade_cmd(const char *payload)
     if(url_buf[0] == '\0')
     {
         printf_debug("[OTA] no downloadUrl\r\n");
+        ota_report_status(OTA_ST_FAILED);
         EC801E_PublishUpgradeReply(OTA_REPLY_FAILED);
         return;
+    }
+
+    /* 1.5 前置条件检查: 电压+信号, 不满足则拒绝升级 */
+    {
+        // 电压检查: 低电压模式或实时电压低于保护值
+        float bat_v = adc_bat_read_voltage();
+        if(voltage_low_power || (bat_v < OTA_vol_protection))
+        {
+            printf_debug("[OTA] reject: low voltage (%.2fV, protect=%.2f)\r\n",
+                         bat_v, OTA_vol_protection);
+            ota_report_status(OTA_ST_REJECT_VOL);
+            EC801E_PublishUpgradeReply(OTA_REPLY_FAILED);
+            return;
+        }
+
+        // 信号检查: CSQ过低则拒绝(下载大概率失败)
+        {
+            char csq_buf[8] = {0};
+            if(EC801E_QueryCSQ(csq_buf, sizeof(csq_buf)) == EC_OK)
+            {
+                uint8_t csq_val = (uint8_t)atoi(csq_buf);
+                if(csq_val < OTA_CSQ_MIN || csq_val == 99)
+                {
+                    printf_debug("[OTA] reject: weak signal (CSQ=%d)\r\n", csq_val);
+                    ota_report_status(OTA_ST_REJECT_CSQ);
+                    EC801E_PublishUpgradeReply(OTA_REPLY_FAILED);
+                    return;
+                }
+            }
+        }
     }
 
     /* 2. 立即上报 REPLY=2 (升级中) */
@@ -223,21 +284,13 @@ void ota_app_handle_upgrade_cmd(const char *payload)
     {
         printf_debug("[OTA] reject: new=%u cur=%u (need higher)\r\n",
                      (unsigned int)new_version, (unsigned int)APP_FW_VERSION_NUM);
+        ota_report_status(OTA_ST_VER_LOW);
         EC801E_PublishUpgradeReply(OTA_REPLY_FAILED);
         return;
     }
 
-    /* 版本校验通过，正式进入升级下载阶段，上报 upgrade=0 表示升级中 */
-    {
-        static char s_up_ts[32];
-        static char s_up_json[128];
-        rtc_get_time_str(s_up_ts, sizeof(s_up_ts));
-        snprintf(s_up_json, sizeof(s_up_json),
-                 "[{\"id\":\"upgrade\",\"value\":\"0\",\"ts\":\"%s\",\"remark\":\"\"}]",
-                 s_up_ts);
-        EC801E_PublishRawJson(s_up_json);
-        trea_delay_ms(500); // 延时防包发送过于密集
-    }
+    /* 版本校验通过，上报 upgrade=0 (进行升级) */
+    ota_report_status(OTA_ST_UPGRADING);
 
     /* 启动看门狗保护OTA过程 */
     ota_wdt_enable();
@@ -249,24 +302,27 @@ void ota_app_handle_upgrade_cmd(const char *payload)
     /* 5. 擦除缓存区 */
     if(ota_cache_erase() != 0)
     {
+        ota_report_status(OTA_ST_FAILED);
         EC801E_PublishUpgradeReply(OTA_REPLY_FAILED);
         EC801E_SetPSM(1);
         trea_delay_ms(1000);
-        NVIC_SystemReset(); /* 干净重启复位看门狗 */
+        NVIC_SystemReset();
         return;
     }
 
     /* 6. HTTP 下载 → 缓存区 */
+    ota_report_status(OTA_ST_DOWNLOADING);
     {
         char host[64];
         const char *path;
         if(ota_parse_url(url_buf, host, sizeof(host), &path) != 0)
         {
             printf_debug("[OTA] parse url fail\r\n");
+            ota_report_status(OTA_ST_FAILED);
             EC801E_PublishUpgradeReply(OTA_REPLY_FAILED);
             EC801E_SetPSM(1);
             trea_delay_ms(1000);
-            NVIC_SystemReset(); /* 干净重启复位看门狗 */
+            NVIC_SystemReset();
             return;
         }
         if(EC801E_HttpDownloadToFlash(url_buf,
@@ -276,25 +332,29 @@ void ota_app_handle_upgrade_cmd(const char *payload)
         {
             printf_debug("[OTA] download fail (got %u bytes)\r\n",
                          (unsigned int)actual_size);
+            ota_report_status(OTA_ST_FAILED);
             EC801E_PublishUpgradeReply(OTA_REPLY_FAILED);
             EC801E_SetPSM(1);
             trea_delay_ms(1000);
-            NVIC_SystemReset(); /* 干净重启复位看门狗 */
+            NVIC_SystemReset();
             return;
         }
     }
 
+    /* 7. 固件校验 */
     if(actual_size == 0 || actual_size > OTA_APP_SIZE)
     {
         printf_debug("[OTA] bad size: %u (max %u)\r\n",
                      (unsigned int)actual_size, (unsigned int)OTA_APP_SIZE);
+        ota_report_status(OTA_ST_VERIFY_FAIL);
         EC801E_PublishUpgradeReply(OTA_REPLY_FAILED);
         EC801E_SetPSM(1);
         trea_delay_ms(1000);
-        NVIC_SystemReset(); /* 干净重启复位看门狗 */
+        NVIC_SystemReset();
         return;
     }
-    printf_debug("[OTA] downloaded %u bytes\r\n", (unsigned int)actual_size);
+    printf_debug("[OTA] downloaded %u bytes, verify OK\r\n", (unsigned int)actual_size);
+    ota_report_status(OTA_ST_VERIFY_OK);
 
     /* 7. 写 InfoBlock: PENDING + size + version */
     printf_debug("[OTA] preparing InfoBlock...\r\n");
@@ -309,15 +369,17 @@ void ota_app_handle_upgrade_cmd(const char *payload)
     if(ota_info_write(&info) != 0)
     {
         printf_debug("[OTA] info write fail\r\n");
+        ota_report_status(OTA_ST_FAILED);
         EC801E_PublishUpgradeReply(OTA_REPLY_FAILED);
         EC801E_SetPSM(1);
         trea_delay_ms(1000);
-        NVIC_SystemReset(); /* 干净重启复位看门狗 */
+        NVIC_SystemReset();
         return;
     }
     printf_debug("[OTA] InfoBlock written, restarting...\r\n");
 
     /* 8. 重启 → 进入 Bootloader 完成擦写 */
+    ota_report_status(OTA_ST_REBOOT);
     trea_delay_ms(500);
     NVIC_SystemReset();
 }
@@ -337,19 +399,8 @@ void ota_app_report_boot_status(void)
                          (unsigned int)info->cur_version,
                          (unsigned int)info->new_fw_version);
             EC801E_PublishUpgradeReply(OTA_REPLY_SUCCESS);
-            trea_delay_ms(500); // 延时防包发送过于密集
-
-            // 上报升级成功
-            {
-                static char s_up_ts[32];
-                static char s_up_json[128];
-                rtc_get_time_str(s_up_ts, sizeof(s_up_ts));
-                snprintf(s_up_json, sizeof(s_up_json),
-                         "[{\"id\":\"upgrade\",\"value\":\"1\",\"ts\":\"%s\",\"remark\":\"\"}]",
-                         s_up_ts);
-                EC801E_PublishRawJson(s_up_json);
-                trea_delay_ms(500); // 延时保障数据不丢失
-            }
+            trea_delay_ms(500);
+            ota_report_status(OTA_ST_SUCCESS);
             ota_info_clear();
             break;
 
@@ -357,6 +408,8 @@ void ota_app_report_boot_status(void)
             printf_debug("[OTA] boot FAILED report (retry=%u)\r\n",
                          (unsigned int)info->retry_count);
             EC801E_PublishUpgradeReply(OTA_REPLY_FAILED);
+            trea_delay_ms(300);
+            ota_report_status(OTA_ST_FAILED);
             ota_info_clear();
             break;
 

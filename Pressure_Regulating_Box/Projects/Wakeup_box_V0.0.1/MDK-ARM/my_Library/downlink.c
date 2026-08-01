@@ -118,10 +118,10 @@ static const CmdMap s_cmd_map[] = {
 };
 #define CMD_MAP_COUNT (sizeof(s_cmd_map) / sizeof(s_cmd_map[0]))
 
-// ==================== 传感器状态上报 (公共函数) ====================
+// ==================== 传感器状态上报 (公共函数, 仅rtu在线状态) ====================
 void publish_sensor_status(void)
 {
-    static char s_json[512];
+    static char s_json[360];
     static char s_ts[32];
     JsonBuilder jb;
 
@@ -143,6 +143,118 @@ void publish_sensor_status(void)
 
     jb_end(&jb);
     EC801E_PublishRawJson(s_json);
+}
+
+// ==================== 上报汇总 (历史数据上报完成后调用) ====================
+// 合并传感器在线状态 + 信号 + 压力温度状态 + 阀门 + IP + 异常关阀 + 电压
+void publish_upload_summary(void)
+{
+    static char s_json[800];
+    static char s_ts[32];
+    static char csq_buf[8];
+    static char v_buf[8];
+    static char va_buf[4];
+	static volatile char user_state = 0;
+    JsonBuilder jb;
+	
+	
+	// 1. 传感器在线状态
+	publish_sensor_status();
+    rtc_get_time_str(s_ts, sizeof(s_ts));
+    jb_begin(&jb, s_json, sizeof(s_json));
+
+    // 2. 信号强度
+    csq_buf[0] = '\0';
+    EC801E_QueryCSQ(csq_buf, sizeof(csq_buf));
+    jb_add_str(&jb, "csq", csq_buf, s_ts);
+
+    // 4. 压力+温度状态
+    {
+        PressureStatus_t ps = threshold_get_pressure_status(g_sensor.raw.pressure, g_sensor.last_pressure_collect);
+        jb_add_str(&jb, "pressure_status", threshold_pressure_status_str(ps), s_ts);
+        TempStatus_t ts = threshold_get_temp_status(g_sensor.raw.temperature);
+        jb_add_str(&jb, "temp_status", threshold_temp_status_str(ts), s_ts);
+
+        if(g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
+        {
+            PressureStatus_t ps2 = threshold_get_pressure_status2(g_sensor.raw2.pressure, g_sensor.last_pressure_collect2);
+            jb_add_str(&jb, "pressure2_status", threshold_pressure_status_str(ps2), s_ts);
+            TempStatus_t ts2 = threshold_get_temp_status2(g_sensor.raw2.temperature);
+            jb_add_str(&jb, "temp2_status", threshold_temp_status_str(ts2), s_ts);
+        }
+    }
+	jb_end(&jb);
+    EC801E_PublishRawJson(s_json);
+	
+		// 7. 用户端mqtt配置
+	if(!user_state)
+	{
+		user_state = 1;
+		jb_begin(&jb, s_json, sizeof(s_json));
+		jb_add_str(&jb, "MQTT_username", g_user_mqtt.username, s_ts);
+		jb_add_str(&jb, "MQTT_password", g_user_mqtt.password, s_ts);
+		jb_add_str(&jb, "MQTT_client_id", g_user_mqtt.client_id, s_ts);
+		jb_add_str(&jb, "MQTT_subject", g_user_mqtt.topic_up, s_ts);
+
+		jb_add_str(&jb, "window_pattern", g_window.pattern, s_ts);
+		jb_add_int(&jb, "window_end_result", g_window.end_result, s_ts);
+		jb_add_str(&jb, "window_start", g_window.start, s_ts);
+		jb_add_str(&jb, "window_stop", g_window.stop, s_ts);
+		jb_add_int(&jb, "window_dottime", g_window.dottime, s_ts);
+		
+		jb_end(&jb);
+		EC801E_PublishRawJson(s_json);
+	}
+	
+	jb_begin(&jb, s_json, sizeof(s_json));
+	 // 5. 阀门状态
+    {
+		const char *valve_status = valve_get_status();
+        jb_add_str(&jb, "valve_control", valve_status, s_ts);
+    }
+	
+    // 6. 用户端IP / 主IP / 副IP
+	{
+		jb_add_str(&jb, "user_ip", g_user_mqtt.server, s_ts);
+		jb_add_str(&jb, "first_ip", g_mqtt.server, s_ts);
+		jb_add_str(&jb, "scend_ip", g_mqtt.server2, s_ts);
+	}
+
+
+	
+    // 8. 异常自动关阀
+    jb_add_str(&jb, "abnormal_close", g_abnormal_close, s_ts);
+
+    // 9. 电压数值 + 电压状态
+    {
+        float bat_v = adc_bat_read_voltage();
+        if(bat_v >= 0.0f)
+        {
+            g_sensor.voltage = bat_v;
+            g_sensor.last_normal_voltage = bat_v;
+        }
+        snprintf(v_buf, sizeof(v_buf), "%.2f", g_sensor.voltage);
+        jb_add_str(&jb, "voltage", v_buf, s_ts);
+
+        int volt_alarm = threshold_voltage_alarm(g_sensor.voltage);
+        snprintf(va_buf, sizeof(va_buf), "%d", volt_alarm);
+        jb_add_str(&jb, "LY06", va_buf, s_ts);
+    }
+
+    jb_end(&jb);
+    EC801E_PublishRawJson(s_json);
+    printf_debug("[SM] upload summary:\r\n CSQ=%s V=%s\r\n", csq_buf, v_buf);
+}
+
+// ==================== 指令反馈上报 ====================
+static void publish_feedback(int code)
+{
+    static char fb_json[128];
+    static char fb_ts[32];
+    rtc_get_time_str(fb_ts, sizeof(fb_ts));
+    snprintf(fb_json, sizeof(fb_json),
+        "[{\"id\":\"feedback\",\"value\":\"%d\",\"ts\":\"%s\",\"remark\":\"\"}]", code, fb_ts);
+    EC801E_PublishRawJson(fb_json);
 }
 
 // ==================== 处理单条下发指令 ====================
@@ -168,7 +280,11 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
         }
 
         if(EC801E_EnsureConnected() == EC_OK)
+        {
             EC801E_PublishValveStatus(result, g_valve_last_order);
+            trea_delay_ms(300);
+            publish_feedback(23);
+        }
         else
             printf_debug("[SM] Valve publish skipped: MQTT not connected\r\n");
     }
@@ -206,18 +322,18 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
         }
 
         // 温度状态判断 + 上报
-        {
-            TempStatus_t t_s = threshold_get_temp_status(g_sensor.raw.temperature);
-            const char *t_str = threshold_temp_status_str(t_s);
-            if(EC801E_EnsureConnected() == EC_OK)
-            {
-                rtc_get_time_str(ts_buf, sizeof(ts_buf));
-                jb_begin(&jb, json_buf, sizeof(json_buf));
-                jb_add_str(&jb, "temp_status", t_str, ts_buf);
-                jb_end(&jb);
-                EC801E_PublishRawJson(json_buf);
-            }
-        }
+//        {
+//            TempStatus_t t_s = threshold_get_temp_status(g_sensor.raw.temperature);
+//            const char *t_str = threshold_temp_status_str(t_s);
+//            if(EC801E_EnsureConnected() == EC_OK)
+//            {
+//                rtc_get_time_str(ts_buf, sizeof(ts_buf));
+//                jb_begin(&jb, json_buf, sizeof(json_buf));
+//                jb_add_str(&jb, "temp_status", t_str, ts_buf);
+//                jb_end(&jb);
+//                EC801E_PublishRawJson(json_buf);
+//            }
+//        }
 
         // 阈值检查 + 异常自动关阀 (复用公共模块)
         {
@@ -258,6 +374,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_str(&jb, "collect_type", cycle_type_to_str(g_collect_cycle.type), ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(cmd_val[0] != '\0' ? 12 : 11);
         }
     }
     else if(strcmp(id_val, "report_cycle") == 0)
@@ -284,6 +402,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_str(&jb, "report_type", cycle_type_to_str(g_report_cycle.type), ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(cmd_val[0] != '\0' ? 10 : 9);
         }
     }
     else if(strcmp(id_val, "vpthreshold") == 0)
@@ -318,6 +438,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_float(&jb, "vpthreshold_shock", g_pthreshold.shock, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(changed ? 8 : 7);
         }
     }
     else if(strcmp(id_val, "Tthreshold") == 0)
@@ -346,6 +468,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_float(&jb, "Tthreshold_vlow", g_tthreshold.vlow, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(changed ? 6 : 5);
         }
     }
     else if(strcmp(id_val, "spupower") == 0)
@@ -371,6 +495,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_float(&jb, "spupower_protect", g_spupower.protect, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(changed ? 16 : 15);
         }
     }
     else if(strcmp(id_val, "threshold") == 0)
@@ -406,6 +532,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_float(&jb, "spupower_protect", g_spupower.protect, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(5);
         }
     }
     else if(strcmp(id_val, "delay") == 0)
@@ -430,6 +558,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_int(&jb, "delay_time", g_vdelay.delay_ms, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(changed ? 20 : 19);
         }
     }
     else if(strcmp(id_val, "window_pattern") == 0)
@@ -468,6 +598,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_int(&jb, "window_dottime", g_window.dottime, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(cmd_val[0] != '\0' ? 4 : 3);
         }
     }
     else if(strcmp(id_val, "abnormal_close") == 0)
@@ -534,6 +666,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_str(&jb, "first_ip", ip_str, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(1);
         }
     }
     else if(strcmp(id_val, "get_scend_ip") == 0)
@@ -548,6 +682,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_str(&jb, "scend_ip", ip_str, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(1);
         }
     }
     else if(strcmp(id_val, "first_ip_set") == 0)
@@ -568,7 +704,16 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             EC801E_ConnectMQTT();
             EC801E_SubscribeTopic();
             if(EC801E_EnsureConnected() == EC_OK)
+            {
                 EC801E_PublishResponse("first_ip_set", cmd_val);
+                trea_delay_ms(300);
+                publish_feedback(2);
+            }
+        }
+        else
+        {
+            if(EC801E_EnsureConnected() == EC_OK)
+                publish_feedback(24);
         }
     }
     else if(strcmp(id_val, "scend_ip_set") == 0)
@@ -585,7 +730,16 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             config_save_mqtt();
             printf_debug("[SM] Secondary IP set: %s:%d\r\n", g_mqtt.server2, g_mqtt.port2);
             if(EC801E_EnsureConnected() == EC_OK)
+            {
                 EC801E_PublishResponse("scend_ip_set", cmd_val);
+                trea_delay_ms(300);
+                publish_feedback(2);
+            }
+        }
+        else
+        {
+            if(EC801E_EnsureConnected() == EC_OK)
+                publish_feedback(24);
         }
     }
     else if(strcmp(id_val, "sensor_status") == 0)
@@ -688,6 +842,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_int(&jb, "real_frequency", g_real_frequency, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(strcmp(id_val, "real_set") == 0 ? 14 : 13);
         }
     }
     else if(strcmp(id_val, "lcd_switch") == 0)
@@ -762,6 +918,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_float1(&jb, "vpthreshold2_shock", g_pthreshold2.shock, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(cmd_val[0] != '\0' ? 8 : 7);
         }
     }
     else if(strcmp(id_val, "Tthreshold2") == 0)
@@ -793,6 +951,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_float1(&jb, "Tthreshold2_vlow", g_tthreshold2.vlow, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(cmd_val[0] != '\0' ? 6 : 5);
         }
     }
     else if(strcmp(id_val, "temp_status2") == 0)
@@ -840,6 +1000,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_str(&jb, "user_ip", ip_str, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(1);
         }
     }
     else if(strcmp(id_val, "user_ip_set") == 0)
@@ -858,9 +1020,18 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
                 snprintf(g_user_mqtt.topic_up, MQTT_TOPIC_MAX, "/155/%s/property/post", g_user_mqtt.client_id);
             config_save_user_mqtt();
             printf_debug("[SM] User IP set: %s:%d\r\n", g_user_mqtt.server, g_user_mqtt.port);
+            if(EC801E_EnsureConnected() == EC_OK)
+            {
+                EC801E_PublishResponse("user_ip_set", cmd_val);
+                trea_delay_ms(300);
+                publish_feedback(2);
+            }
         }
-        if(EC801E_EnsureConnected() == EC_OK)
-            EC801E_PublishResponse("user_ip_set", cmd_val);
+        else
+        {
+            if(EC801E_EnsureConnected() == EC_OK)
+                publish_feedback(24);
+        }
     }
     else if(strcmp(id_val, "user_mqtt_get") == 0 || strcmp(id_val, "user_mqtt_set") == 0)
     {
@@ -898,6 +1069,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_str(&jb, "MQTT_subject", g_user_mqtt.topic_up, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(strcmp(id_val, "user_mqtt_set") == 0 ? 18 : 17);
         }
     }
     else if(strcmp(id_val, "valve_status") == 0)
@@ -941,6 +1114,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_str(&jb, "timing_close", v_str, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(cmd_val[0] != '\0' ? 22 : 21);
         }
     }
     else

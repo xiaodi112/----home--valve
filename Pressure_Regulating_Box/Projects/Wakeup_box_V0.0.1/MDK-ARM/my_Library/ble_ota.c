@@ -679,7 +679,7 @@ void ble_set_name_from_device_id(void)
     const char *dev_start = NULL;
     const char *dev_end = NULL;
     int amp_count = 0;
-    char suffix[4] = {0};
+    char device_id[20] = {0};
     char cmd[32];
 
     /* 解析 clientId: "<prefix>&<device_id>&<product_id>&<seq>" */
@@ -694,18 +694,29 @@ void ble_set_name_from_device_id(void)
         p++;
     }
 
-    if(!dev_start || !dev_end || (dev_end - dev_start) < 3)
+    if(!dev_start || !dev_end || (dev_end - dev_start) <= 0)
     {
         printf_debug("[BLE_AT] Cannot extract device_id suffix from clientId\r\n");
         return;
     }
 
-    /* 取设备ID后3位 */
-    suffix[0] = *(dev_end - 3);
-    suffix[1] = *(dev_end - 2);
-    suffix[2] = *(dev_end - 1);
+//	计算device_id长度
+	uint16_t id_len = dev_end - dev_start;
+	
+//	防止数组越界
 
-    printf_debug("[BLE_AT] Setting BLE name: YLY_%s\r\n", suffix);
+	if(id_len >= sizeof(device_id))
+    {
+        id_len = sizeof(device_id)-1;
+    }
+    /*  memcpy不会自动添加'\0' */
+    memcpy(device_id,
+           dev_start,
+           id_len);
+    device_id[id_len] = '\0';
+
+//    printf_debug("[BLE_AT] Setting BLE name: %s\r\n", suffix);
+	printf_debug("[BLE_AT] Setting BLE name: %s\r\n", device_id);
 
     /* 初始化UART4 (BLE串口) */
     ble_uart_init();
@@ -722,7 +733,7 @@ void ble_set_name_from_device_id(void)
     }
 
     /* 2. 设置BLE名称 */
-    snprintf(cmd, sizeof(cmd), "AT+LENAYLY_%s\r\n", suffix);
+    snprintf(cmd, sizeof(cmd), "AT+LENA%s\r\n", device_id);
     ble_at_send_str(cmd);
     if(!ble_at_wait_response("OK", 1000))
     {
@@ -735,6 +746,6 @@ void ble_set_name_from_device_id(void)
     ble_at_send_str("AT+REST\r\n");
     trea_delay_ms(800);
 
-    printf_debug("[BLE_AT] BLE name set to YLY_%s, module reset done\r\n", suffix);
+    printf_debug("[BLE_AT] BLE name set to %s, module reset done\r\n", device_id);
     ble_uart_deinit();
 }

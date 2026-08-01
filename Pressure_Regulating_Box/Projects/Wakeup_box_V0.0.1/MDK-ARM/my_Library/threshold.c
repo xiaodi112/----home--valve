@@ -108,7 +108,8 @@ const char* threshold_alarm_type_str(ThresholdResult_t result)
 // 报警条件: voltage > high || voltage < low || voltage < protect
 int threshold_voltage_alarm(float voltage)
 {
-    if(voltage < 0.0f || !g_spupower.enabled)
+//    if(voltage < 0.0f || !g_spupower.enabled)
+	if(voltage < 0.0f || !g_spupower.enabled)
         return -1;
     if(voltage > g_spupower.high || voltage < g_spupower.low || voltage < g_spupower.protect)
         return 1;

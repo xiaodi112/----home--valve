@@ -12,7 +12,7 @@
  */
 
 /* ---------- 固件版本 ---------- */
-#define APP_FIRMWARE_VERSION          "1"
+#define APP_FIRMWARE_VERSION          "4"
 
 /* ---------- 间隔默认值（EEPROM无数据时使用） ----------
  * 注意: 必须与下面 APP_DEFAULT_COLLECT/REPORT_ONCE+TYPE 数学等价!
@@ -35,8 +35,8 @@
 
 /* ---------- 固定参数（不通过串口修改） ---------- */
 #define APP_EC_MAX_RETRY              1
-#define APP_AT_TIMEOUT_SHORT          2000		/*返回状态*/
-#define APP_AT_TIMEOUT_PUBEX          5000      /* QMTPUBEX等待'>'提示(QSCLK=2唤醒后模块需2-3s) */
+#define APP_AT_TIMEOUT_SHORT          3000		/*返回状态*/
+#define APP_AT_TIMEOUT_PUBEX          3000      /* QMTPUBEX等待'>'提示(QSCLK=2唤醒后模块需2-3s) */
 #define APP_AT_TIMEOUT_LONG           10000
 #define APP_AT_TIMEOUT_MQTT           15000
 #define APP_MQTT_KEEPALIVE            300    /* MQTT心跳(秒), 模块自动发PINGREQ */
