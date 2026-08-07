@@ -599,7 +599,6 @@ EE_READ(EE_ADDR_EXT_MAGIC, &magic, 1);
         EE_READ(EE_ADDR_REAL_FREQUENCY, &g_real_frequency, 1);
         EE_READ(EE_ADDR_VALVE_ALARM_CLOSED,    &g_valve_alarm_closed,    1);
         EE_READ(EE_ADDR_VALVE_PRE_ALARM_ORDER, &g_valve_pre_alarm_order, 1);
-        EE_READ(EE_ADDR_SENSOR_COUNT, &g_sensor_count, 1);
         EE_READ(EE_ADDR_LCD_ENABLED, &g_lcd_enabled, 1);
         EE_READ(EE_ADDR_VLP_FLAG, &voltage_low_power, 1);
         if(g_lcd_enabled > 1)    g_lcd_enabled = 1;
@@ -609,7 +608,6 @@ EE_READ(EE_ADDR_EXT_MAGIC, &magic, 1);
         // 防护: 未写过的字节??0xFF, 视为 0
 if(g_valve_alarm_closed    > 1) g_valve_alarm_closed    = 0;
         if(g_valve_pre_alarm_order > 1) g_valve_pre_alarm_order = 0;
-        if(g_sensor_count < 1 || g_sensor_count > 2) g_sensor_count = APP_DEFAULT_SENSOR_COUNT;
     char dot_str[64]; window_dottime_to_str(g_window.dottime_mask, dot_str, sizeof(dot_str));
         printf_debug("[CFG] EXT: win=%s er=%d start=%s stop=%s dot=%s\r\n",
                      g_window.pattern, g_window.end_result,
@@ -694,7 +692,6 @@ void config_save_ext(void)
     EE_WRITE_BYTE(EE_ADDR_REAL_FREQUENCY, g_real_frequency);
     EE_WRITE_BYTE(EE_ADDR_VALVE_ALARM_CLOSED,    g_valve_alarm_closed);
     EE_WRITE_BYTE(EE_ADDR_VALVE_PRE_ALARM_ORDER, g_valve_pre_alarm_order);
-    EE_WRITE_BYTE(EE_ADDR_SENSOR_COUNT, g_sensor_count);
     EE_WRITE_BYTE(EE_ADDR_LCD_ENABLED, g_lcd_enabled);
     EE_WRITE_BYTE(EE_ADDR_VLP_FLAG, voltage_low_power);
     printf_debug("[CFG] EXT saved\r\n");
@@ -1255,13 +1252,6 @@ if(strcmp(cmd, "config") == 0)
         g_lcd_enabled = (uint8_t)atoi(cmd + 11);
         if(g_lcd_enabled > 1) g_lcd_enabled = 1;
         printf_debug("  lcd_enabled=%d\r\n", g_lcd_enabled);
-        return 1;
-    }
-    if(strncmp(cmd, "sensor_count=", 13) == 0)
-    {
-        uint8_t v = (uint8_t)atoi(cmd + 13);
-        if(v >= 1 && v <= 2) { g_sensor_count = v; config_save_ext(); }
-        printf_debug("  sensor_count=%d\r\n", g_sensor_count);
         return 1;
     }
     // ---- 实时采集开关+频率 ----

@@ -75,7 +75,7 @@
 
 /* ---------- 产品复用配置默认值 ---------- */
 #define APP_DEFAULT_LCD_ENABLED       0         /* 0=无LCD产品, 1=有LCD产品 */
-#define APP_DEFAULT_SENSOR_COUNT      1         /* 1=单路传感器(进气端), 2=双路传感器 */
+#define APP_DEFAULT_SENSOR_COUNT      2         /* 1=单路传感器(进气端), 2=双路传感器 */
 
 /* ---------- 阈值默认值 ---------- */
 /* 注: 阈值结构已拆分为 4 组独立配置, 默认值定义在 eeprom_config.h:

@@ -110,7 +110,6 @@ static const CmdMap s_cmd_map[] = {
     {"Tthreshold_set2",   "Tthreshold2",     "1",     NULL},
     {"Tthreshold_get2",   "Tthreshold2",     "",      NULL},
     {"lcd_switch",        "lcd_switch",      NULL,    "lcd_switch\",\"value\""},
-    {"sensor_count_set",  "sensor_count_set",NULL,    "sensor_count\",\"value\""},
     // 阀门定时开关
     {"valve_get",         "valve_status",    "1",     NULL},
     {"closeoropen_get",   "closeoropen",     "",      NULL},
@@ -896,24 +895,6 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             EC801E_PublishRawJson(json_buf);
         }
     }
-    else if(strcmp(id_val, "sensor_count_set") == 0)
-    {
-        if(cmd_val[0] != '\0')
-        {
-            uint8_t v = (uint8_t)atoi(cmd_val);
-            if(v >= 1 && v <= 2) g_sensor_count = v;
-            config_save_ext();
-            printf_debug("[SM] sensor_count_set: %d\r\n", g_sensor_count);
-        }
-        if(EC801E_EnsureConnected() == EC_OK)
-        {
-            rtc_get_time_str(ts_buf, sizeof(ts_buf));
-            jb_begin(&jb, json_buf, sizeof(json_buf));
-            jb_add_int(&jb, "sensor_count", g_sensor_count, ts_buf);
-            jb_end(&jb);
-            EC801E_PublishRawJson(json_buf);
-        }
-    }
     else if(strcmp(id_val, "vpthreshold2") == 0)
     {
         if(cmd_val[0] != '\0')
@@ -1143,9 +1124,9 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_begin(&jb, json_buf, sizeof(json_buf));
             snprintf(v_str, sizeof(v_str), "%d", g_valve_timing.enabled);
             jb_add_str(&jb, "timing_switch", v_str, ts_buf);
-            snprintf(v_str, sizeof(v_str), "%06lu", g_valve_timing.open_time);
+            snprintf(v_str, sizeof(v_str), "%06u", g_valve_timing.open_time);
             jb_add_str(&jb, "timing_open", v_str, ts_buf);
-            snprintf(v_str, sizeof(v_str), "%06lu", g_valve_timing.close_time);
+            snprintf(v_str, sizeof(v_str), "%06u", g_valve_timing.close_time);
             jb_add_str(&jb, "timing_close", v_str, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
