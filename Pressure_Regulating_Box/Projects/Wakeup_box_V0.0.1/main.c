@@ -67,7 +67,8 @@ SensorContext_t g_sensor = { .last_pressure_collect = -1.0f, .last_pressure_real
 
 static volatile uint16_t wakeup_count = 0;
 static AppState_t app_state = STATE_INIT;
-static uint8_t dot_uploaded_this_hour = 0;  // dot模式: 防止同一小时重复上报
+static uint8_t dot_uploaded_mask[3] = {0};
+static uint16_t dot_uploaded_day = 0xFFFF;  // RTC day of uploaded bitmap (cross-day reset)  // dot pattern: uploaded-hour bitmap
 // valve_alarm_closed / valve_pre_alarm_order 已移�?g_* 全局 (EEPROM 持久�? OTA 重启后可恢复), �?eeprom_config.h
 uint8_t voltage_low_power = 0;              // 低电压省电模�? �?:00/18:00上报
 uint8_t fourG_user_off = 0;                 // 用户主动关机4G标志(阻止do_wakeup盲目恢复PD9)
@@ -1487,22 +1488,27 @@ static void check_upload_schedule(void)
     // 判断是否需要上�?(正常模式, 基于时间对齐)
     if(strcmp(g_window.pattern, "dot") == 0)
     {
-        // dot模式: 当前整点小时==dottime �?本小时未上报 �?触发上报
+        // dot pattern: any configured hour in 24h bitmap triggers upload once per day
         uint32_t now_hhmmss = rtc_get_hhmmss();
         uint8_t current_hour = (uint8_t)(now_hhmmss / 10000);
-        if(current_hour == g_window.dottime && !dot_uploaded_this_hour)
+        rtc_parameter_struct tp;
+        rtc_current_time_get(&tp);
+        uint16_t day_key = (uint16_t)(((tp.year & 0xFF) << 8) | ((tp.month & 0xFF) << 4) | (tp.date & 0xFF));
+        if(day_key != dot_uploaded_day)
         {
-            printf_debug("[SM] DOT trigger: hour=%d == dottime=%d\r\n",
-                         current_hour, g_window.dottime);
-            dot_uploaded_this_hour = 1;
+            memset(dot_uploaded_mask, 0, sizeof(dot_uploaded_mask));
+            dot_uploaded_day = day_key;
+        }
+        if(window_dottime_hit(g_window.dottime_mask, current_hour) &&
+           !window_dottime_hit(dot_uploaded_mask, current_hour))
+        {
+            printf_debug("[SM] DOT trigger: hour=%d (mask hit)\r\n", current_hour);
+            window_dottime_set(dot_uploaded_mask, current_hour);
             ensure_full_init();
             app_state = STATE_UPLOAD;
         }
         else
         {
-            // 跨小时后重置标志
-            if(current_hour != g_window.dottime)
-                dot_uploaded_this_hour = 0;
             app_state = STATE_SLEEP;
         }
     }
@@ -2404,9 +2410,10 @@ int main(void)
     printf_debug("  Collect: %dmin  Upload: %dmin (grid-aligned)\r\n",
                  g_interval.collect_interval_min,
                  g_interval.upload_interval_min);
-    printf_debug("  Window: pattern=%s start=%s stop=%s er=%d dot=%d\r\n",
+    char dot_str5[64]; window_dottime_to_str(g_window.dottime_mask, dot_str5, sizeof(dot_str5));
+    printf_debug("  Window: pattern=%s start=%s stop=%s er=%d dot=%s\r\n",
                  g_window.pattern, g_window.start, g_window.stop,
-                 g_window.end_result, g_window.dottime);
+                 g_window.end_result, dot_str5);
     printf_debug("  VPTH en=%d ppmax=%.1f pmax=%.1f ppmin=%.1f pmin=%.1f mut=%.1f shock=%.1f\r\n",
                  g_pthreshold.enabled, g_pthreshold.ppmax, g_pthreshold.pmax,
                  g_pthreshold.ppmin, g_pthreshold.pmin,

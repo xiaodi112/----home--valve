@@ -31,6 +31,70 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+/* ==================== dot pattern (24-hour bitmap) helpers ==================== */
+void window_dottime_clear(uint8_t *mask)
+{
+    if(!mask) return;
+    memset(mask, 0, 3);
+}
+
+void window_dottime_set(uint8_t *mask, uint8_t hour)
+{
+    if(!mask || hour > 23) return;
+    mask[hour >> 3] |= (uint8_t)(1u << (hour & 7));
+}
+
+uint8_t window_dottime_hit(const uint8_t *mask, uint8_t hour)
+{
+    if(!mask || hour > 23) return 0;
+    return (mask[hour >> 3] & (uint8_t)(1u << (hour & 7))) ? 1 : 0;
+}
+
+uint8_t window_dottime_first(const uint8_t *mask)
+{
+    uint8_t i;
+    if(!mask) return 0xFF;
+    for(i = 0; i < 24; i++)
+        if(window_dottime_hit(mask, i)) return i;
+    return 0xFF;
+}
+
+void window_dottime_from_str(const char *str, uint8_t *mask)
+{
+    char tmp[96];
+    char *tok;
+    if(!str || !mask) return;
+    window_dottime_clear(mask);
+    strncpy(tmp, str, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = 0;
+    tok = strtok(tmp, ", ");
+    while(tok)
+    {
+        int v = atoi(tok);
+        if(v >= 0 && v <= 23) window_dottime_set(mask, (uint8_t)v);
+        tok = strtok(NULL, ", ");
+    }
+}
+
+void window_dottime_to_str(const uint8_t *mask, char *buf, uint16_t buf_size)
+{
+    uint8_t i;
+    uint8_t first = 1;
+    if(!buf || buf_size == 0) return;
+    buf[0] = 0;
+    if(!mask) return;
+    for(i = 0; i < 24; i++)
+    {
+        if(window_dottime_hit(mask, i))
+        {
+            char hh[8];
+            int n = snprintf(hh, sizeof(hh), "%s%02u", first ? "" : ",", (unsigned)i);
+            if((int)strlen(buf) + n < (int)buf_size) strcat(buf, hh);
+            first = 0;
+        }
+    }
+}
+
 
 // ==================== 全局运行时配??====================
 AppInterval_t              g_interval;
@@ -516,7 +580,15 @@ EE_READ(EE_ADDR_EXT_MAGIC, &magic, 1);
         EE_READ(EE_ADDR_WINDOW_END_RESULT, &g_window.end_result, 1);
         ee_read_string(EE_ADDR_WINDOW_START_STR, g_window.start, 8);
         ee_read_string(EE_ADDR_WINDOW_STOP_STR, g_window.stop, 8);
-        EE_READ(EE_ADDR_WINDOW_DOTTIME, &g_window.dottime, 1);
+        /* dot multi-point bitmap; fall back to legacy single point when empty */
+        EE_READ(EE_ADDR_WINDOW_DOTTIME_MASK, g_window.dottime_mask, 3);
+        if(g_window.dottime_mask[0] == 0xFF && g_window.dottime_mask[1] == 0xFF && g_window.dottime_mask[2] == 0xFF)
+        {
+            uint8_t legacy_dot = 0xFF;
+            EE_READ(EE_ADDR_WINDOW_DOTTIME, &legacy_dot, 1);
+            window_dottime_clear(g_window.dottime_mask);
+            if(legacy_dot <= 23) window_dottime_set(g_window.dottime_mask, legacy_dot);
+        }
         EE_READ(EE_ADDR_COLLECT_ONCE, (uint8_t *)&g_collect_cycle.once, 2);
         { uint8_t t = 0; EE_READ(EE_ADDR_COLLECT_TYPE, &t, 1); g_collect_cycle.type = (CycleType_t)t; }
         EE_READ(EE_ADDR_REPORT_ONCE, (uint8_t *)&g_report_cycle.once, 2);
@@ -538,9 +610,10 @@ EE_READ(EE_ADDR_EXT_MAGIC, &magic, 1);
 if(g_valve_alarm_closed    > 1) g_valve_alarm_closed    = 0;
         if(g_valve_pre_alarm_order > 1) g_valve_pre_alarm_order = 0;
         if(g_sensor_count < 1 || g_sensor_count > 2) g_sensor_count = APP_DEFAULT_SENSOR_COUNT;
-        printf_debug("[CFG] EXT: win=%s er=%d start=%s stop=%s dot=%d\r\n",
+    char dot_str[64]; window_dottime_to_str(g_window.dottime_mask, dot_str, sizeof(dot_str));
+        printf_debug("[CFG] EXT: win=%s er=%d start=%s stop=%s dot=%s\r\n",
                      g_window.pattern, g_window.end_result,
-                     g_window.start, g_window.stop, g_window.dottime);
+                     g_window.start, g_window.stop, dot_str);
         printf_debug("[CFG] EXT: collect=%d*%s report=%d*%s abnormal=%s valve=%d\r\n",
                      g_collect_cycle.once, cycle_type_to_str(g_collect_cycle.type),
                      g_report_cycle.once, cycle_type_to_str(g_report_cycle.type),
@@ -558,7 +631,8 @@ g_interval.collect_interval_hours = (float)cycle_to_seconds(&g_collect_cycle) / 
         g_window.end_result  = APP_DEFAULT_WINDOW_END_RESULT;
         strncpy(g_window.start, APP_DEFAULT_WINDOW_START, 7); g_window.start[7] = '\0';
         strncpy(g_window.stop,  APP_DEFAULT_WINDOW_STOP,  7); g_window.stop[7]  = '\0';
-        g_window.dottime     = APP_DEFAULT_WINDOW_DOTTIME;
+        window_dottime_clear(g_window.dottime_mask);
+        window_dottime_set(g_window.dottime_mask, APP_DEFAULT_WINDOW_DOTTIME);
         g_collect_cycle.once = APP_DEFAULT_COLLECT_ONCE;
         g_collect_cycle.type = APP_DEFAULT_COLLECT_TYPE;
         g_report_cycle.once  = APP_DEFAULT_REPORT_ONCE;
@@ -575,9 +649,10 @@ g_interval.collect_interval_hours = (float)cycle_to_seconds(&g_collect_cycle) / 
 g_interval.collect_interval_hours = (float)cycle_to_seconds(&g_collect_cycle) / 3600.0f;
         g_interval.upload_interval_hours  = (float)cycle_to_seconds(&g_report_cycle)  / 3600.0f;
         config_recalc_interval();
-        printf_debug("[CFG] No EXT, using defaults: win=%s er=%d start=%s stop=%s dot=%d collect=%d*%s report=%d*%s abnormal=%s valve=%d real=%d/%ds\r\n",
+    char dot_str[64]; window_dottime_to_str(g_window.dottime_mask, dot_str, sizeof(dot_str));
+        printf_debug("[CFG] No EXT, using defaults: win=%s er=%d start=%s stop=%s dot=%s collect=%d*%s report=%d*%s abnormal=%s valve=%d real=%d/%ds\r\n",
                      g_window.pattern, g_window.end_result,
-                     g_window.start, g_window.stop, g_window.dottime,
+                     g_window.start, g_window.stop, dot_str,
                      g_collect_cycle.once, cycle_type_to_str(g_collect_cycle.type),
                      g_report_cycle.once,  cycle_type_to_str(g_report_cycle.type),
                      g_abnormal_close, g_valve_last_order,
@@ -607,7 +682,8 @@ void config_save_ext(void)
     EE_WRITE_BYTE(EE_ADDR_WINDOW_END_RESULT, g_window.end_result);
     ee_write_string(EE_ADDR_WINDOW_START_STR, g_window.start, 8);
     ee_write_string(EE_ADDR_WINDOW_STOP_STR, g_window.stop, 8);
-    EE_WRITE_BYTE(EE_ADDR_WINDOW_DOTTIME, g_window.dottime);
+    EE_WRITE(EE_ADDR_WINDOW_DOTTIME_MASK, g_window.dottime_mask, 3);
+    EE_WRITE_BYTE(EE_ADDR_WINDOW_DOTTIME, window_dottime_first(g_window.dottime_mask));  /* legacy compat: first point */
     EE_WRITE(EE_ADDR_COLLECT_ONCE, (const uint8_t *)&g_collect_cycle.once, 2);
     { uint8_t t = (uint8_t)g_collect_cycle.type; EE_WRITE_BYTE(EE_ADDR_COLLECT_TYPE, t); }
     EE_WRITE(EE_ADDR_REPORT_ONCE, (const uint8_t *)&g_report_cycle.once, 2);
@@ -1041,7 +1117,7 @@ EE_WRITE_BYTE(EE_ADDR_INTERVAL_MAGIC, 0xFF);
     // 格式: {id:abnormal,value:temph}
 if(strstr(cmd, "id:abnormal"))
     {
-        char val_buf[16];
+        char val_buf[96];
         if(extract_field(cmd, "value", val_buf, sizeof(val_buf)))
         {
             strncpy(g_abnormal_close, val_buf, 15);
@@ -1057,7 +1133,7 @@ if(strstr(cmd, "id:abnormal"))
     // 格式: {id:collect_cycle,once:22,type:minute}
 if(strstr(cmd, "id:collect_cycle"))
     {
-        char val_buf[16];
+        char val_buf[96];
         int got = 0;
         if(extract_field(cmd, "once", val_buf, sizeof(val_buf)))
         { g_collect_cycle.once = (uint16_t)atoi(val_buf); got = 1; }
@@ -1080,7 +1156,7 @@ if(strstr(cmd, "id:collect_cycle"))
     // 格式: {id:report_cycle,once:12,type:minute}
 if(strstr(cmd, "id:report_cycle"))
     {
-        char val_buf[16];
+        char val_buf[96];
         int got = 0;
         if(extract_field(cmd, "once", val_buf, sizeof(val_buf)))
         { g_report_cycle.once = (uint16_t)atoi(val_buf); got = 1; }
@@ -1103,7 +1179,7 @@ if(strstr(cmd, "id:report_cycle"))
     // 格式: {id:window_pattern,value:short,start:080000,stop:200000,end_result:1,dottime:3}
 if(strstr(cmd, "id:window_pattern"))
     {
-        char val_buf[16];
+        char val_buf[96];
         int got = 0;
         if(extract_field(cmd, "value", val_buf, sizeof(val_buf)))
         { strncpy(g_window.pattern, val_buf, 7); got = 1; }
@@ -1114,11 +1190,12 @@ if(strstr(cmd, "id:window_pattern"))
         if(extract_field(cmd, "end_result", val_buf, sizeof(val_buf)))
         { g_window.end_result = (uint8_t)atoi(val_buf); got = 1; }
         if(extract_field(cmd, "dottime", val_buf, sizeof(val_buf)))
-        { g_window.dottime = (uint8_t)atoi(val_buf); got = 1; }
+        { window_dottime_from_str(val_buf, g_window.dottime_mask); got = 1; }
         if(got) config_save_ext();
-        printf_debug("[CFG] window: %s er=%d s=%s e=%s dot=%d\r\n",
+    char dot_str[64]; window_dottime_to_str(g_window.dottime_mask, dot_str, sizeof(dot_str));
+        printf_debug("[CFG] window: %s er=%d s=%s e=%s dot=%s\r\n",
                      g_window.pattern, g_window.end_result,
-                     g_window.start, g_window.stop, g_window.dottime);
+                     g_window.start, g_window.stop, dot_str);
         return 1;
     }
 
@@ -1302,9 +1379,10 @@ void config_print_current(void)
                  g_interval.upload_interval_hours, g_interval.upload_interval_min,
                  g_report_cycle.once, cycle_type_to_str(g_report_cycle.type),
                  g_interval.upload_every_n);
-    printf_debug("  Window: pattern=%s start=%s stop=%s er=%d dot=%d\r\n",
+    char dot_str[64]; window_dottime_to_str(g_window.dottime_mask, dot_str, sizeof(dot_str));
+    printf_debug("  Window: pattern=%s start=%s stop=%s er=%d dot=%s\r\n",
                  g_window.pattern, g_window.start, g_window.stop,
-                 g_window.end_result, g_window.dottime);
+                 g_window.end_result, dot_str);
     printf_debug("  Abnormal: %s\r\n", g_abnormal_close);
     printf_debug("  Valve: last_order=%d\r\n", g_valve_last_order);
     printf_debug("  VPTH en=%d ppmax=%.1f pmax=%.1f ppmin=%.1f pmin=%.1f mut=%.1f shock=%.1f\r\n",
@@ -1388,8 +1466,8 @@ if(strcmp(g_window.pattern, "dot") == 0)
         uint8_t cur_hour = (uint8_t)(now_hhmmss / 10000);
         uint8_t cur_min = (uint8_t)((now_hhmmss / 100) % 100);
 
-        uint8_t is_last_col = (cur_hour == g_window.dottime && cur_min == 0);
-        uint8_t is_first_col = (cur_hour == g_window.dottime && cur_min == g_interval.collect_interval_min);
+        uint8_t is_last_col = (window_dottime_hit(g_window.dottime_mask, cur_hour) && cur_min == 0);
+        uint8_t is_first_col = (window_dottime_hit(g_window.dottime_mask, cur_hour) && cur_min == g_interval.collect_interval_min);
 
         if (is_last_col || is_first_col)
             return 1;

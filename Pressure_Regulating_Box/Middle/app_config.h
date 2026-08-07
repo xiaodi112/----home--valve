@@ -108,7 +108,7 @@ typedef struct {
     uint8_t  end_result;       /* long模式: 0=窗口结束4G断电, 1=窗口外4G保持可收下发 */
     char     start[8];         /* HHMMSS格式, 如"132900" (short模式) */
     char     stop[8];          /* HHMMSS格式, 如"140700" (short模式) */
-    uint8_t  dottime;          /* dot模式: 整点小时(0-23), 如12=每天12:00上报 */
+    uint8_t  dottime_mask[3];  /* dot pattern: 24-hour bitmap, bit0=0h..bit23=23h, e.g. "08,12,14,18,20" */
 } WindowConfig_t;
 
 /* ---------- 采集/上报周期配置结构体 ---------- */

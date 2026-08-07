@@ -214,7 +214,8 @@ void publish_upload_summary(void)
 		jb_add_int(&jb, "window_end_result", g_window.end_result, s_ts);
 		jb_add_str(&jb, "window_start", g_window.start, s_ts);
 		jb_add_str(&jb, "window_stop", g_window.stop, s_ts);
-		jb_add_int(&jb, "window_dottime", g_window.dottime, s_ts);
+        char dot_str3[64]; window_dottime_to_str(g_window.dottime_mask, dot_str3, sizeof(dot_str3));
+		jb_add_str(&jb, "window_dottime", dot_str3, s_ts);
 		
 		jb_end(&jb);
 		EC801E_PublishRawJson(s_json);
@@ -596,10 +597,11 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             tmp[0] = '\0';
             extract_json_field(raw_buf, "\"dottime\"", tmp, sizeof(tmp));
             if(!tmp[0]) extract_json_field(raw_buf, "window_dottime\",\"value\"", tmp, sizeof(tmp));
-            if(tmp[0]) g_window.dottime = (uint8_t)atoi(tmp);
+            if(tmp[0]) window_dottime_from_str(tmp, g_window.dottime_mask);
             config_save_ext();
-            printf_debug("[SM] window: %s er=%d s=%s e=%s dot=%d\r\n",
-                         g_window.pattern, g_window.end_result, g_window.start, g_window.stop, g_window.dottime);
+            char dot_str4[64]; window_dottime_to_str(g_window.dottime_mask, dot_str4, sizeof(dot_str4));
+            printf_debug("[SM] window: %s er=%d s=%s e=%s dot=%s\r\n",
+                         g_window.pattern, g_window.end_result, g_window.start, g_window.stop, dot_str4);
         }
         if(EC801E_EnsureConnected() == EC_OK)
         {
@@ -609,7 +611,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             jb_add_int(&jb, "window_end_result", g_window.end_result, ts_buf);
             jb_add_str(&jb, "window_start", g_window.start, ts_buf);
             jb_add_str(&jb, "window_stop", g_window.stop, ts_buf);
-            jb_add_int(&jb, "window_dottime", g_window.dottime, ts_buf);
+            char dot_str2[64]; window_dottime_to_str(g_window.dottime_mask, dot_str2, sizeof(dot_str2));
+            jb_add_str(&jb, "window_dottime", dot_str2, ts_buf);
             jb_end(&jb);
             EC801E_PublishRawJson(json_buf);
             trea_delay_ms(300);

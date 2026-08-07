@@ -124,6 +124,7 @@
 #define EE_ADDR_WINDOW_START_STR  0x20A
 #define EE_ADDR_WINDOW_STOP_STR   0x212
 #define EE_ADDR_WINDOW_DOTTIME    0x21A
+#define EE_ADDR_WINDOW_DOTTIME_MASK 0x2E0   /* dot 24h bitmap (3B); 0x21A keeps legacy first point */
 #define EE_ADDR_COLLECT_ONCE      0x21B
 #define EE_ADDR_COLLECT_TYPE      0x21D
 #define EE_ADDR_REPORT_ONCE       0x21E
@@ -449,4 +450,12 @@ extern uint8_t voltage_low_power;
 // 仅在首次、尾次或低电压保护模式下开启，其余中间周期关闭以省电
 uint8_t config_need_adc_sampling(void);
 
+
+/* ==================== dot pattern (24-hour bitmap) helpers ==================== */
+void window_dottime_clear(uint8_t *mask);
+void window_dottime_set(uint8_t *mask, uint8_t hour);
+uint8_t window_dottime_hit(const uint8_t *mask, uint8_t hour);
+uint8_t window_dottime_first(const uint8_t *mask);
+void window_dottime_from_str(const char *str, uint8_t *mask);
+void window_dottime_to_str(const uint8_t *mask, char *buf, uint16_t buf_size);
 #endif /* EEPROM_CONFIG_H */
