@@ -86,6 +86,8 @@ static uint16_t last_grid_collect_min = 0xFFFF;    // 标志：上一次执行�
 uint8_t timing_open_done_today  = 0;   // 今日已执行开阀
 uint8_t timing_close_done_today = 0;   // 今日已执行关阀
 static uint8_t timing_last_reset_hour  = 0xFF;// 上次重置标志的小时(防重复)
+volatile uint8_t g_timing_pending = 0;   /* timing valve pending (set by RTC ISR) */
+volatile uint8_t g_timing_alarm_set = 0; /* current RTC alarm is a timing-valve alarm */
 
 // ==================== LCD 延时关闭 ====================
 uint8_t  g_lcd_active     = 0;      // LCD当前是否在显�?(运行�? 区别于产品开关g_lcd_enabled)
@@ -529,6 +531,51 @@ static void publish_all_status(float last_p1, float last_p2)
 // ==================== 定时阀门: 执行+上报(公共函数) ====================
 // action: "open" 或 "close"
 // 执行阀门动作, 唤醒4G上报 valve_control + valve_last_order, 恢复PSM
+static void vtiming_execute_and_report(const char *action);   /* forward */
+/* timing valve immediate check: run during upload/blocking as fallback;
+ * executes when within +-30s window and not yet done today */
+static void vtiming_check_now(void)
+{
+    uint32_t now_hhmmss;
+    uint32_t now_sec;
+    int32_t diff;
+    uint8_t cur_hour;
+
+    if(!g_valve_timing.enabled) return;
+
+    now_hhmmss = rtc_get_hhmmss();
+    now_sec = hhmmss_to_seconds(now_hhmmss);
+    cur_hour = (uint8_t)(now_hhmmss / 10000);
+
+    if(cur_hour == 0 && timing_last_reset_hour != 0)
+    {
+        timing_open_done_today  = 0;
+        timing_close_done_today = 0;
+        timing_last_reset_hour  = 0;
+    }
+    else if(cur_hour != 0)
+        timing_last_reset_hour = cur_hour;
+
+    if(!timing_open_done_today && g_valve_timing.open_time > 0)
+    {
+        diff = (int32_t)now_sec - (int32_t)hhmmss_to_seconds(g_valve_timing.open_time);
+        if(diff >= 0 && diff <= 30)
+        {
+            vtiming_execute_and_report("open");
+            timing_open_done_today = 1;
+        }
+    }
+    if(!timing_close_done_today && g_valve_timing.close_time > 0)
+    {
+        diff = (int32_t)now_sec - (int32_t)hhmmss_to_seconds(g_valve_timing.close_time);
+        if(diff >= 0 && diff <= 30)
+        {
+            vtiming_execute_and_report("close");
+            timing_close_done_today = 1;
+        }
+    }
+}
+
 static void vtiming_execute_and_report(const char *action)
 {
     ensure_full_init();
@@ -552,6 +599,7 @@ static void realtime_enter_sleep(void)
     gpio_bit_reset(GPIOD, GPIO_PIN_4);
     rtc_alarm_wakeup_init();
     rtc_set_next_alarm_sec(g_real_frequency);
+    g_timing_alarm_set = 0;   /* realtime alarm, timing handled per-cycle */
 
     // 4G在线时使能LPUART唤醒 + RI唤醒 (接收平台下发, 弱信号断电时不启用)
     if(!voltage_low_power && !fourG_user_off && !fourG_init_failed && !fourG_weak_signal &&
@@ -847,6 +895,7 @@ static void do_sleep(void)
 
             rtc_alarm_wakeup_init();
             rtc_set_next_alarm_sec((uint8_t)remain);
+            g_timing_alarm_set = 0;   /* LCD timeout sleep: normal alarm */
             button_exti_init();
             if(g_bt_on) ble_exti_init();
             if(fourG_keep_on) { com_lpuart_init(); lpuart_wakeup_init(); ri_exti_init(); }
@@ -915,6 +964,7 @@ static void do_sleep(void)
                     target = g_valve_timing.close_time;
 
                 rtc_set_alarm_at_hhmmss(target);
+                g_timing_alarm_set = 1;   /* timing valve alarm */
                 use_valve_alarm = 1;
             }
         }
@@ -925,6 +975,7 @@ static void do_sleep(void)
                 rtc_set_next_alarm_sec(g_real_frequency);
             else
                 rtc_set_next_alarm(g_interval.collect_interval_min);
+                g_timing_alarm_set = 0;   /* normal collect alarm */
         }
     }
 
@@ -1934,6 +1985,7 @@ static void do_upload(void)
     // === 逐条上传 (双通道: 主平台id=0 + 用户端id=1, 从EEPROM读取) ===
     while(ee_hist_count() > 0)
     {
+        vtiming_check_now();   /* timing valve preempts upload */
         EeHistRecord_t ee_rec;
         SensorRecord_t rec;
         uint8_t rd_ret;
@@ -1944,7 +1996,13 @@ static void do_upload(void)
         {
             ee_hist_to_sensor_record(&ee_rec, &rec);
 
-            if(EC801E_PublishSingleRecord(&rec) == EC_OK)
+            EC_Status_t pub_ret = EC801E_PublishSingleRecord(&rec);
+            if(pub_ret == EC_PREEMPT)
+            {
+                vtiming_check_now();   /* run timing valve, then resend current record */
+                continue;
+            }
+            if(pub_ret == EC_OK)
             {
                 if(user_mqtt_on)
                 {
@@ -2611,6 +2669,7 @@ init_skip_report:
         // 深休眠由 enter_deepsleep_mode() 内部 swdt_disable() 关闭, 休眠期不计时
         swdt_enable(SWDT_TIMEOUT_MS);
 
+        vtiming_check_now();   /* timing valve highest priority */
         switch(app_state)
         {
             case STATE_SLEEP:    do_sleep();    break;

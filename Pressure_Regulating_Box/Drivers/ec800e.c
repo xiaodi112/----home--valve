@@ -19,6 +19,8 @@
 #include "ota_app.h"
 #include "threshold.h"
 
+extern volatile uint8_t g_timing_pending;   /* set by RTC ISR when timing-valve alarm fires */
+
 // ==================== 内部: LPUART接收缓冲 ====================
 char ec_rx_buf[1024];
 static uint16_t ec_rx_len = 0;
@@ -57,7 +59,9 @@ static EC_Status_t ec_pubex_send(const char *cmd_buf, const char *payload, uint1
             printf_debug("[EC] Publish retry\r\n");
             trea_delay_ms(500);
         }
-        if(EC_SendCmd(cmd_buf, ">", APP_AT_TIMEOUT_PUBEX) == EC_OK)
+        EC_Status_t pr = EC_SendCmd(cmd_buf, ">", APP_AT_TIMEOUT_PUBEX);
+        if(pr == EC_PREEMPT) return EC_PREEMPT;
+        if(pr == EC_OK)
         {
             trea_delay_ms(100);
             serial_write(LPUART0, (const uint8_t*)payload, payload_len);
@@ -102,6 +106,8 @@ static EC_Status_t EC_SendCmd(const char *cmd, const char *expect, uint32_t time
             break;
 
         // 剩余时间不足30ms时，用剩余时间作为单字节超时
+        /* timing valve preempts any long 4G wait */
+        if(g_timing_pending) return EC_PREEMPT;
         byte_timeout = timeout_ms - (trea_millis() - start);
         if(byte_timeout > 30) byte_timeout = 30;
 
@@ -136,8 +142,9 @@ static EC_Status_t EC_SendCmdRetry(const char *cmd, const char *expect,
 
     for(i = 0; i < max_retry; i++)
     {
-        if(EC_SendCmd(cmd, expect, timeout_ms) == EC_OK)
-            return EC_OK;
+        EC_Status_t sr = EC_SendCmd(cmd, expect, timeout_ms);
+        if(sr == EC_OK) return EC_OK;
+        if(sr == EC_PREEMPT) return EC_PREEMPT;
 
         printf_debug("[EC] Retry %d/%d (got %d bytes): %s",
                      i + 1, max_retry, ec_rx_len, cmd);
@@ -826,7 +833,9 @@ EC_Status_t EC801E_PublishRawJson(const char *json_str)
     snprintf(s_cmd_buf, sizeof(s_cmd_buf),
              "AT+QMTPUBEX=0,0,0,0,\"%s\",%d\r\n", g_mqtt.topic_up, payload_len);
 
-    if(ec_pubex_send(s_cmd_buf, json_str, payload_len) != EC_OK)
+    EC_Status_t pr2 = ec_pubex_send(s_cmd_buf, json_str, payload_len);
+    if(pr2 == EC_PREEMPT) return EC_PREEMPT;
+    if(pr2 != EC_OK)
         return EC_TIMEOUT;
 
     printf_debug("[EC] RawJson published (%d bytes)\r\n", payload_len);

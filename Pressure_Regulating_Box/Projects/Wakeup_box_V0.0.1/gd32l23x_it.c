@@ -39,6 +39,8 @@ OF SUCH DAMAGE.
 #include "delay.h"
 #include "usart.h"
 #include "mygpio.h"
+extern volatile uint8_t g_timing_pending;
+extern volatile uint8_t g_timing_alarm_set;
 
 __IO uint8_t counter0 = 0x00;
 extern volatile uint8_t rtc_alarm_flag;
@@ -141,6 +143,7 @@ void RTC_Alarm_IRQHandler(void)
         rtc_flag_clear(RTC_FLAG_ALARM0);
         exti_flag_clear(EXTI_17);
         rtc_alarm_flag = 1;
+        if(g_timing_alarm_set) { g_timing_pending = 1; g_timing_alarm_set = 0; }
     }
 }
 

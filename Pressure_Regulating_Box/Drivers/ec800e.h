@@ -12,7 +12,8 @@
 typedef enum {
     EC_OK = 0,
     EC_ERROR,
-    EC_TIMEOUT
+    EC_TIMEOUT,
+    EC_PREEMPT    /* preempted by higher-priority task (timing valve) */
 } EC_Status_t;
 
 // ==================== 硬件引脚 ====================
