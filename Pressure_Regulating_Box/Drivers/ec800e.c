@@ -385,15 +385,26 @@ EC_Status_t EC801E_PublishSensorData(PT304D_Data *data, float voltage)
     if(!data) return EC_ERROR;
 
     rtc_get_time_str(s_timestamp, sizeof(s_timestamp));
-    snprintf(s_payload, sizeof(s_payload),
-        "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"temp2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"pressure2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
-        data->temperature, s_timestamp,
-        g_sensor.raw2.temperature, s_timestamp,
-        data->pressure, s_timestamp,
-        g_sensor.raw2.pressure, s_timestamp);
+    if(g_sensor_count >= 2)
+    {
+        snprintf(s_payload, sizeof(s_payload),
+            "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+             "{\"id\":\"temp2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+             "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+             "{\"id\":\"pressure2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
+            data->temperature, s_timestamp,
+            g_sensor.raw2.temperature, s_timestamp,
+            data->pressure, s_timestamp,
+            g_sensor.raw2.pressure, s_timestamp);
+    }
+    else
+    {
+        snprintf(s_payload, sizeof(s_payload),
+            "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+             "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
+            data->temperature, s_timestamp,
+            data->pressure, s_timestamp);
+    }
 
     printf_debug("[EC] Publish OK: P=%.2f T=%.2f P2=%.2f T2=%.2f\r\n",
                  data->pressure, data->temperature,
@@ -1357,6 +1368,27 @@ static void ly_build_payload(float p1_kpa, float t1, float voltage,
 {
     if(g_sensor_count >= 2)
     {
+		//    snprintf(s_payload, sizeof(s_payload),
+//        "{\"param\":["
+//        "{\"deviceKey\":\"%s\",\"key\":\"LY01\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+//        "{\"deviceKey\":\"%s\",\"key\":\"LY02\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+//        "{\"deviceKey\":\"%s\",\"key\":\"LY03\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+//        "{\"deviceKey\":\"%s\",\"key\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
+//        "{\"deviceKey\":\"%s\",\"key\":\"LY05\",\"value\":\"%s\",\"ts\":\"%s\"},"
+//        "{\"deviceKey\":\"%s\",\"key\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
+//        "{\"deviceKey\":\"%s\",\"key\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
+//        "{\"deviceKey\":\"%s\",\"key\":\"LY08\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+//        "{\"deviceKey\":\"%s\",\"key\":\"LY11\",\"value\":\"%.2f\",\"ts\":\"%s\"}"
+//        "]}",
+//        g_user_mqtt.client_id, p1_kpa, ts,
+//        g_user_mqtt.client_id, t1, ts,
+//        g_user_mqtt.client_id, voltage, ts,
+//        g_user_mqtt.client_id, fault, ts,
+//        g_user_mqtt.client_id, csq, ts,
+//        g_user_mqtt.client_id, volt_alarm, ts,
+//        g_user_mqtt.client_id, (unsigned int)report_min, ts,
+//        g_user_mqtt.client_id, p2_kpa, ts,
+//        g_user_mqtt.client_id, t2, ts);
         snprintf(s_payload, sizeof(s_payload),
                  "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
                  "{\"id\":\"temp2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
