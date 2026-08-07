@@ -686,15 +686,26 @@ EC_Status_t EC801E_PublishSingleRecord(const SensorRecord_t *record)
 
     if(!record) return EC_ERROR;
 
-    snprintf(s_payload, sizeof(s_payload),
-        "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"temp2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"pressure2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
-        record->temperature, record->timestamp,
-        record->temperature2, record->timestamp,
-        record->pressure, record->timestamp,
-        record->pressure2, record->timestamp);
+    if(g_sensor_count >= 2)
+    {
+        snprintf(s_payload, sizeof(s_payload),
+            "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+             "{\"id\":\"temp2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+             "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+             "{\"id\":\"pressure2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
+            record->temperature, record->timestamp,
+            record->temperature2, record->timestamp,
+            record->pressure, record->timestamp,
+            record->pressure2, record->timestamp);
+    }
+    else
+    {
+        snprintf(s_payload, sizeof(s_payload),
+            "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+             "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
+            record->temperature, record->timestamp,
+            record->pressure, record->timestamp);
+    }
 
     printf_debug("[EC] Record: P=%.2f T=%.2f P2=%.2f T2=%.2f @%s\r\n",
                  record->pressure, record->temperature,
@@ -1344,47 +1355,36 @@ static void ly_build_payload(float p1_kpa, float t1, float voltage,
                              uint32_t report_min, float p2_kpa, float t2,
                              const char *ts)
 {
-//    snprintf(s_payload, sizeof(s_payload),
-//        "{\"param\":["
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY01\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY02\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY03\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY05\",\"value\":\"%s\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY08\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY11\",\"value\":\"%.2f\",\"ts\":\"%s\"}"
-//        "]}",
-//        g_user_mqtt.client_id, p1_kpa, ts,
-//        g_user_mqtt.client_id, t1, ts,
-//        g_user_mqtt.client_id, voltage, ts,
-//        g_user_mqtt.client_id, fault, ts,
-//        g_user_mqtt.client_id, csq, ts,
-//        g_user_mqtt.client_id, volt_alarm, ts,
-//        g_user_mqtt.client_id, (unsigned int)report_min, ts,
-//        g_user_mqtt.client_id, p2_kpa, ts,
-//        g_user_mqtt.client_id, t2, ts);
-
-snprintf(s_payload, sizeof(s_payload),
-         "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"temp2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
-         "{\"id\":\"csq\",\"value\":\"%s\",\"ts\":\"%s\"},"
-         "{\"id\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
-         "{\"id\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
-         "{\"id\":\"pressure2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"voltage\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
-        t1, ts,
-        t2, ts,
-        p1_kpa, ts,
-		fault,ts,
-		csq,ts,
-		volt_alarm,ts,
-		(unsigned int)report_min,ts,
-        p2_kpa, ts,
-        voltage, ts);
+    if(g_sensor_count >= 2)
+    {
+        snprintf(s_payload, sizeof(s_payload),
+                 "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+                 "{\"id\":\"temp2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+                 "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+                 "{\"id\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
+                 "{\"id\":\"csq\",\"value\":\"%s\",\"ts\":\"%s\"},"
+                 "{\"id\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
+                 "{\"id\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
+                 "{\"id\":\"pressure2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+                 "{\"id\":\"voltage\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
+                t1, ts, t2, ts, p1_kpa, ts,
+                fault, ts, csq, ts, volt_alarm, ts,
+                (unsigned int)report_min, ts, p2_kpa, ts, voltage, ts);
+    }
+    else
+    {
+        snprintf(s_payload, sizeof(s_payload),
+                 "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+                 "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+                 "{\"id\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
+                 "{\"id\":\"csq\",\"value\":\"%s\",\"ts\":\"%s\"},"
+                 "{\"id\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
+                 "{\"id\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
+                 "{\"id\":\"voltage\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
+                t1, ts, p1_kpa, ts,
+                fault, ts, csq, ts, volt_alarm, ts,
+                (unsigned int)report_min, ts, voltage, ts);
+    }
 }
 
 // ==================== 内部: 用户端MQTT发布通用发送 ====================
@@ -1426,13 +1426,13 @@ EC_Status_t EC801E_UserMqtt_PublishSensorData(PT304D_Data *inlet, PT304D_Data *o
     {
         float p1_kpa = (inlet && inlet->err == PT304D_OK) ? (inlet->pressure / 1000.0f) : 0.0f;
         float t1 = (inlet && inlet->err == PT304D_OK) ? inlet->temperature : 0.0f;
-        float p2_kpa = (outlet && outlet->err == PT304D_OK) ? (outlet->pressure / 1000.0f) : 0.0f;
-        float t2 = (outlet && outlet->err == PT304D_OK) ? outlet->temperature : 0.0f;
+        float p2_kpa = (g_sensor_count >= 2 && outlet && outlet->err == PT304D_OK) ? (outlet->pressure / 1000.0f) : 0.0f;
+        float t2 = (g_sensor_count >= 2 && outlet && outlet->err == PT304D_OK) ? outlet->temperature : 0.0f;
         int fault = 0;
         int volt_alarm = threshold_voltage_alarm(voltage);
 
         if(inlet && inlet->err != PT304D_OK) fault |= 1;
-        if(outlet && outlet->err != PT304D_OK) fault |= 2;
+        if(g_sensor_count >= 2 && outlet && outlet->err != PT304D_OK) fault |= 2;
 
         ly_build_payload(p1_kpa, t1, voltage, fault, csq_buf,
                          volt_alarm, report_min, p2_kpa, t2, s_timestamp);
