@@ -1,37 +1,48 @@
 /**
  * @file eeprom_history.c
- * @brief EEPROM å†å²æ•°æ®ç¯å½¢ç¼“å†²å®ç°
+ * @brief EEPROM ÀúÊ·Êı¾İ»·ĞÎ»º³åÊµÏÖ
  *
- * å­˜å‚¨åŒº: 0x800 ~ 0x1FFF (6144B)
- *   ç®¡ç†å¤´ (32B @0x800): magic(2) + head(2) + tail(2) + count(2) + crc8(1) + reserved(23)
- *   æ•°æ®åŒº (6112B @0x820): 191æ¡ x 32B, æ¯æ¡æ°å¥½ä¸€é¡µå†™å…¥
+ * ´æ´¢Çø: 0x800 ~ 0x1FFF (6144B)
+ *   ¹ÜÀíÍ· (32B @0x800): magic(2) + head(2) + tail(2) + count(2) + crc8(1) + reserved(23)
+ *   Êı¾İÇø (6112B @0x820): 191Ìõ x 32B, Ã¿ÌõÇ¡ºÃÒ»Ò³Ğ´Èë
  *
- * ç¯å½¢è¦†ç›–ç­–ç•¥: å†™æ»¡å head è‡ªåŠ¨å‰è¿›, è¦†ç›–æœ€æ—§è®°å½•.
+ * »·ĞÎ¸²¸Ç²ßÂÔ: Ğ´Âúºó head ×Ô¶¯Ç°½ø, ¸²¸Ç×î¾É¼ÇÂ¼.
  */
 
 #include "eeprom_history.h"
+/* EEPROM chip driver selection (macro in app_config.h): M24M01 / AT24C64 */
+#if defined(EEPROM_DRV_AT24C64)
+#include "at24c64.h"
+#define EE_READ(addr, buf, len)       AT24C64_Read((addr), (buf), (len))
+#define EE_WRITE(addr, buf, len)      AT24C64_Write((addr), (buf), (len))
+#define EE_WRITE_BYTE(addr, data)     AT24C64_WriteByte((addr), (data))
+#else
 #include "m24m01.h"
+#define EE_READ(addr, buf, len)       M24M01_Read((addr), (buf), (len))
+#define EE_WRITE(addr, buf, len)      M24M01_Write((addr), (buf), (len))
+#define EE_WRITE_BYTE(addr, data)     M24M01_WriteByte((addr), (data))
+#endif
 #include "tim.h"
 #include "sensor_buffer.h"
 #include "usart.h"
 #include <string.h>
 #include <stdio.h>
 
-// ==================== ç®¡ç†å¤´ç»“æ„ (32å­—èŠ‚, ä¸é¡µå¤§å°å¯¹é½) ====================
+// ==================== ¹ÜÀíÍ·½á¹¹ (32×Ö½Ú, ÓëÒ³´óĞ¡¶ÔÆë) ====================
 typedef struct {
     uint16_t magic;          // EE_HIST_MAGIC
-    uint16_t head;           // å†™æŒ‡é’ˆ (ä¸‹ä¸€ä¸ªå†™å…¥çš„slotç´¢å¼•, 0~190)
-    uint16_t tail;           // è¯»æŒ‡é’ˆ (æœ€æ—§è®°å½•çš„slotç´¢å¼•)
-    uint16_t count;          // æœ‰æ•ˆè®°å½•æ•° (0~191)
-    uint8_t  crc8;           // ç®¡ç†å¤´å‰8å­—èŠ‚çš„CRC8
-    uint8_t  reserved[23];   // å¡«å……åˆ°32å­—èŠ‚
+    uint16_t head;           // Ğ´Ö¸Õë (ÏÂÒ»¸öĞ´ÈëµÄslotË÷Òı, 0~190)
+    uint16_t tail;           // ¶ÁÖ¸Õë (×î¾É¼ÇÂ¼µÄslotË÷Òı)
+    uint16_t count;          // ÓĞĞ§¼ÇÂ¼Êı (0~191)
+    uint8_t  crc8;           // ¹ÜÀíÍ·Ç°8×Ö½ÚµÄCRC8
+    uint8_t  reserved[23];   // Ìî³äµ½32×Ö½Ú
 } EeHistHeader_t;
 
-// ==================== RAM ç¼“å­˜ç®¡ç†å¤´ (é¿å…é¢‘ç¹è¯»EEPROM) ====================
+// ==================== RAM »º´æ¹ÜÀíÍ· (±ÜÃâÆµ·±¶ÁEEPROM) ====================
 static EeHistHeader_t s_hdr;
 static uint8_t s_inited = 0;
 
-// ==================== CRC8 (å¤šé¡¹å¼ 0x07, åˆå€¼ 0x00) ====================
+// ==================== CRC8 (¶àÏîÊ½ 0x07, ³õÖµ 0x00) ====================
 static uint8_t crc8_calc(const uint8_t *data, uint16_t len)
 {
     uint8_t crc = 0x00;
@@ -51,28 +62,28 @@ static uint8_t crc8_calc(const uint8_t *data, uint16_t len)
     return crc;
 }
 
-// ==================== å†…éƒ¨: å†™ç®¡ç†å¤´åˆ°EEPROM ====================
+// ==================== ÄÚ²¿: Ğ´¹ÜÀíÍ·µ½EEPROM ====================
 static void header_save(void)
 {
     s_hdr.crc8 = crc8_calc((const uint8_t *)&s_hdr, 8);
-    M24M01_Write(EE_HIST_HEADER_ADDR, (const uint8_t *)&s_hdr, sizeof(EeHistHeader_t));
+    EE_WRITE(EE_HIST_HEADER_ADDR, (const uint8_t *)&s_hdr, sizeof(EeHistHeader_t));
 }
 
-// ==================== å†…éƒ¨: ä»EEPROMè¯»ç®¡ç†å¤´ ====================
+// ==================== ÄÚ²¿: ´ÓEEPROM¶Á¹ÜÀíÍ· ====================
 static uint8_t header_load(void)
 {
-    M24M01_Read(EE_HIST_HEADER_ADDR, (uint8_t *)&s_hdr, sizeof(EeHistHeader_t));
+    EE_READ(EE_HIST_HEADER_ADDR, (uint8_t *)&s_hdr, sizeof(EeHistHeader_t));
 
-    // æ ¡éªŒmagic
+    // Ğ£Ñémagic
     if(s_hdr.magic != EE_HIST_MAGIC)
         return 1;
 
-    // æ ¡éªŒCRC
+    // Ğ£ÑéCRC
     uint8_t expected_crc = crc8_calc((const uint8_t *)&s_hdr, 8);
     if(s_hdr.crc8 != expected_crc)
         return 2;
 
-    // èŒƒå›´æ£€æŸ¥
+    // ·¶Î§¼ì²é
     if(s_hdr.head >= EE_HIST_MAX_RECORDS ||
        s_hdr.tail >= EE_HIST_MAX_RECORDS ||
        s_hdr.count > EE_HIST_MAX_RECORDS)
@@ -81,7 +92,7 @@ static uint8_t header_load(void)
     return 0;
 }
 
-// ==================== å†…éƒ¨: æ ¼å¼åŒ–(æ¸…ç©º)å†å²åŒº ====================
+// ==================== ÄÚ²¿: ¸ñÊ½»¯(Çå¿Õ)ÀúÊ·Çø ====================
 static void history_format(void)
 {
     memset(&s_hdr, 0, sizeof(s_hdr));
@@ -92,7 +103,7 @@ static void history_format(void)
     header_save();
 }
 
-// ==================== å†…éƒ¨: è·å–BCDæ—¶é—´æˆ³ ====================
+// ==================== ÄÚ²¿: »ñÈ¡BCDÊ±¼ä´Á ====================
 static void get_bcd_timestamp(uint8_t *ts_bcd)
 {
     rtc_parameter_struct tp;
@@ -105,18 +116,18 @@ static void get_bcd_timestamp(uint8_t *ts_bcd)
     ts_bcd[5] = (uint8_t)(tp.second & 0xFF);  // SS (BCD)
 }
 
-// ==================== å†…éƒ¨: è®¡ç®—è®°å½•EEPROMåœ°å€ ====================
+// ==================== ÄÚ²¿: ¼ÆËã¼ÇÂ¼EEPROMµØÖ· ====================
 static uint16_t record_addr(uint16_t slot)
 {
     return EE_HIST_DATA_ADDR + (uint16_t)(slot * EE_HIST_RECORD_SIZE);
 }
 
-// ==================== å…¬å¼€æ¥å£ ====================
+// ==================== ¹«¿ª½Ó¿Ú ====================
 
 void ee_hist_init(void)
 {
-    // æ¯æ¬¡ä¸Šç”µæ¸…ç©ºå†å²åŒº, ä»ç¬¬ä¸€æ¡å¼€å§‹è®°å½•
-    // (EEPROMä½œä¸ºå”¯ä¸€å­˜å‚¨, ä¸Šç”µå³ä¸ºæ–°å‘¨æœŸèµ·ç‚¹)
+    // Ã¿´ÎÉÏµçÇå¿ÕÀúÊ·Çø, ´ÓµÚÒ»Ìõ¿ªÊ¼¼ÇÂ¼
+    // (EEPROM×÷ÎªÎ¨Ò»´æ´¢, ÉÏµç¼´ÎªĞÂÖÜÆÚÆğµã)
     printf_debug("[EE_HIST] Power-on reset, formatting...\r\n");
     history_format();
     s_inited = 1;
@@ -130,7 +141,7 @@ void ee_hist_push(float pressure, float temperature,
 
     if(!s_inited) return;
 
-    // å¡«å……è®°å½•
+    // Ìî³ä¼ÇÂ¼
     rec.pressure = pressure;
     rec.temperature = temperature;
     rec.pressure2 = pressure2;
@@ -140,15 +151,15 @@ void ee_hist_push(float pressure, float temperature,
     rec.flags = flags;
     memset(rec.reserved, 0, sizeof(rec.reserved));
 
-    // è®¡ç®—CRC8 (å‰31å­—èŠ‚)
+    // ¼ÆËãCRC8 (Ç°31×Ö½Ú)
     rec.crc8 = 0;
     rec.crc8 = crc8_calc((const uint8_t *)&rec, EE_HIST_RECORD_SIZE - 1);
 
-    // å†™å…¥å½“å‰slot (æ°å¥½32å­—èŠ‚ = 1é¡µå†™å…¥)
+    // Ğ´Èëµ±Ç°slot (Ç¡ºÃ32×Ö½Ú = 1Ò³Ğ´Èë)
     uint16_t addr = record_addr(s_hdr.head);
-    M24M01_Write(addr, (const uint8_t *)&rec, EE_HIST_RECORD_SIZE);
+    EE_WRITE(addr, (const uint8_t *)&rec, EE_HIST_RECORD_SIZE);
 
-    // æ›´æ–°ç¯å½¢æŒ‡é’ˆ
+    // ¸üĞÂ»·ĞÎÖ¸Õë
     s_hdr.head = (s_hdr.head + 1) % EE_HIST_MAX_RECORDS;
     if(s_hdr.count < EE_HIST_MAX_RECORDS)
     {
@@ -156,11 +167,11 @@ void ee_hist_push(float pressure, float temperature,
     }
     else
     {
-        // æ»¡äº†, tailè·Ÿéšå‰è¿› (è¦†ç›–æœ€æ—§)
+        // ÂúÁË, tail¸úËæÇ°½ø (¸²¸Ç×î¾É)
         s_hdr.tail = (s_hdr.tail + 1) % EE_HIST_MAX_RECORDS;
     }
 
-    // ä¿å­˜ç®¡ç†å¤´
+    // ±£´æ¹ÜÀíÍ·
     header_save();
 }
 
@@ -169,20 +180,20 @@ uint8_t ee_hist_read(uint16_t index, EeHistRecord_t *out)
     if(!s_inited || !out) return 1;
     if(index >= s_hdr.count) return 1;
 
-    // è®¡ç®—å®é™…slot
+    // ¼ÆËãÊµ¼Êslot
     uint16_t slot = (s_hdr.tail + index) % EE_HIST_MAX_RECORDS;
     uint16_t addr = record_addr(slot);
 
-    M24M01_Read(addr, (uint8_t *)out, EE_HIST_RECORD_SIZE);
+    EE_READ(addr, (uint8_t *)out, EE_HIST_RECORD_SIZE);
 
-    // CRCæ ¡éªŒ
+    // CRCĞ£Ñé
     uint8_t saved_crc = out->crc8;
     out->crc8 = 0;
     uint8_t calc_crc = crc8_calc((const uint8_t *)out, EE_HIST_RECORD_SIZE - 1);
     out->crc8 = saved_crc;
 
     if(saved_crc != calc_crc)
-        return 2;  // CRCå¤±è´¥
+        return 2;  // CRCÊ§°Ü
 
     return 0;
 }
@@ -228,6 +239,6 @@ void ee_hist_to_sensor_record(const EeHistRecord_t *hist, void *out)
     rec->flags = hist->flags;
     memset(rec->reserved, 0, sizeof(rec->reserved));
 
-    // BCDæ—¶é—´æˆ³è½¬å­—ç¬¦ä¸²
+    // BCDÊ±¼ä´Á×ª×Ö·û´®
     ee_hist_ts_to_str(hist->ts_bcd, rec->timestamp);
 }
