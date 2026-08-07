@@ -109,7 +109,7 @@ uint8_t                    g_valve_pre_alarm_order = 0; // 关阀前阀门状??(EEPROM
 uint8_t                    g_real_enabled   = 0;   // 实时采集开??(默认关闭)
 uint8_t                    g_real_frequency = 5;   // 实时采集频率 (默认5??
 uint8_t           		   g_lcd_enabled    = APP_DEFAULT_LCD_ENABLED;   // LCD显示开??
-uint8_t                    g_sensor_count   = 2;   // 传感器数??(默认双路)
+uint8_t                    g_sensor_count   = APP_DEFAULT_SENSOR_COUNT;   // 传感器数??(默认双路)
 uint16_t                   g_keepalive_sec  = APP_MQTT_KEEPALIVE;
 TempThresholdConfig_t      g_tthreshold;            // 进气端温度阈??
 TempThresholdConfig_t      g_tthreshold2;           // 出气端温度阈??
