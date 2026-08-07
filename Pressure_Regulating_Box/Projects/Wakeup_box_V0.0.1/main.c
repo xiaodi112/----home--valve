@@ -59,7 +59,7 @@ typedef enum {
 } AppState_t;
 
 // ==================== 全局变量 ====================
-SensorContext_t g_sensor = { .last_pressure_collect = -1.0f, .last_pressure_realtime = -1.0f, .last_pressure_collect2 = -1.0f, .last_pressure_realtime2 = -1.0f, .prev_online = 1, .offline_cnt = 0, .online_cnt = 0, .prev_online2 = 1, .offline_cnt2 = 0, .online_cnt2 = 0 };
+SensorContext_t g_sensor = { .last_pressure_collect = -1.0f, .last_pressure_realtime = -1.0f, .last_pressure_collect2 = -1.0f, .last_pressure_realtime2 = -1.0f, .prev_online = 1, .offline_cnt = 0, .online_cnt = 0, .prev_online2 = 1, .offline_cnt2 = 0, .online_cnt2 = 0, .last_normal_voltage = 3.6f };
 
 #define SENSOR_OFFLINE_DEBOUNCE  3   // 连续N次离线才确认状态变�?
 #define SENSOR_ONLINE_DEBOUNCE   2   // 连续N次上线才确认状态变�?(防接触不良抖�?
@@ -2526,9 +2526,9 @@ int main(void)
 	trea_delay_ms(50);
     PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
 	// 首次采集后刷新LCD显示
+    sensor_sample_voltage(1, g_sensor.last_normal_voltage);
     if(g_lcd_active) lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
     trea_delay_ms(50);
-    sensor_sample_voltage(1, 3.6f);
 
     init_record.pressure = g_sensor.raw.pressure;
     init_record.temperature = g_sensor.raw.temperature;
