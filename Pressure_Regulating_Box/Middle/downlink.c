@@ -629,6 +629,8 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
         }
         if(EC801E_EnsureConnected() == EC_OK)
             EC801E_PublishResponse("abnormal_close", g_abnormal_close);
+            /* feedback: 28=abnormal close GET ok, 29=abnormal close SET ok */
+            publish_feedback(cmd_val[0] != 0 ? 29 : 28);
     }
     else if(strcmp(id_val, "valve_last_order") == 0)
     {
