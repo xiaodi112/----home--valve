@@ -166,6 +166,30 @@ void EXTI0_IRQHandler(void)
 }
 
 /*!
+    \brief      this function handles EXTI1 interrupt request (PA1 4G RI wakeup)
+*/
+void EXTI1_IRQHandler(void)
+{
+    if(RESET != exti_flag_get(EXTI_1)) {
+        exti_flag_clear(EXTI_1);
+        exti_interrupt_disable(EXTI_1);
+        ri_wakeup_flag = 1;
+    }
+}
+
+/*!
+    \brief      this function handles EXTI2 interrupt request (PD2 BLE connect wakeup)
+*/
+void EXTI2_IRQHandler(void)
+{
+    if(RESET != exti_flag_get(EXTI_2)) {
+        exti_flag_clear(EXTI_2);
+        exti_interrupt_disable(EXTI_2);
+        ble_connect_wakeup_flag = 1;
+    }
+}
+
+/*!
     \brief      this function handles UART4 interrupt request (BLE OTA RX IDLE)
 */
 void UART4_IRQHandler(void)

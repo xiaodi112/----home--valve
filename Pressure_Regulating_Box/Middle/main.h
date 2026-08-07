@@ -6,7 +6,7 @@
 #include "ota_info.h"
 #include "threshold.h"
 
-#define APP_FW_VERSION_NUM     4
+#define APP_FW_VERSION_NUM     1
 typedef struct {
     PT304D_Data raw;
     PT304D_Data raw2;

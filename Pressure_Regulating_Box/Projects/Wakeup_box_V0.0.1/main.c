@@ -44,6 +44,7 @@
 #include "buzzer.h"
 #include "ble_ota.h"
 #include "json_builder.h"
+#include "eeprom_history.h"
 
 // ==================== 状态定�?====================
 typedef enum {
@@ -72,9 +73,10 @@ uint8_t voltage_low_power = 0;              // 低电压省电模�? �?:00/18
 uint8_t fourG_user_off = 0;                 // 用户主动关机4G标志(阻止do_wakeup盲目恢复PD9)
 static uint8_t fourG_init_failed = 0;       // 4G注网失败标志(阻止do_sleep保持4G供电, 下次上报周期重试)
 static uint8_t fourG_weak_signal = 0;       // 弱信号断电标志(long模式下CSQ过低, 暂时按需冷启动)
-#define CSQ_WEAK_THRESHOLD  11               // CSQ<此值触发断电省电(8≈-97dBm)
+#define CSQ_WEAK_THRESHOLD  8               // CSQ<此值触发断电省电(8≈-97dBm)
 static uint8_t vlp_uploaded_this_hour = 0;  // 低电压模�? 防止同一小时重复上报
 ThresholdResult_t last_realtime_alarm = THRESHOLD_OK;          // 实时模式防重复报�?
+static uint32_t g_ble_on_hhmmss = 0;                          // BLE开启时的RTC时间 (HHMMSS), 用于60s未连接超时自动关闭�?
 static uint8_t g_is_minimal_wakeup = 0;            // 标志：是否为纯周期传感器采集的最简唤醒状�?
 uint8_t g_need_adc_sampling = 1;                   // 标志：当前周期是否需要进行电池电压采�?
 static uint16_t last_grid_collect_min = 0xFFFF;    // 标志：上一次执行周期采集的分钟戳，防止在同一采集整点多次触发
@@ -284,8 +286,18 @@ static void lcd_update_csq(void)
         uint8_t csq_val = (uint8_t)atoi(csq_buf);
         if(g_lcd_active) lcd_ui_update_signal(csq_val);
 
-        // 上报CSQ到本端平�?
+        // 上报CSQ到本端平台
         publish_status_field("csq", csq_buf);
+    }
+
+    // 附加诊断: LTE信号质量 + 网络注册状态
+    {
+        int rsrp = 0, sinr = 0;
+        uint8_t cereg = 0;
+        EC801E_QueryQCSQ(&rsrp, &sinr);
+        EC801E_QueryCEREG(&cereg);
+        printf_debug("[SM] Signal: CSQ=%s RSRP=%d SINR=%d CEREG=%d\r\n",
+                     csq_buf, rsrp, sinr, cereg);
     }
 }
 
@@ -406,8 +418,11 @@ static int fourG_signal_check_and_decide(void)
 
     uint8_t csq_val = (uint8_t)atoi(csq_buf);
     if(csq_val < CSQ_WEAK_THRESHOLD || csq_val == 99)
+
     {
+
         printf_debug("[SM] CSQ=%d < %d, 4G power off (weak signal)\r\n", csq_val, CSQ_WEAK_THRESHOLD);
+
         fourG_weak_signal = 1;
         report_4g_power_state(0);
         EC801E_PowerOff();
@@ -417,7 +432,7 @@ static int fourG_signal_check_and_decide(void)
     // 信号恢复
     if(fourG_weak_signal)
     {
-        printf_debug("[SM] CSQ=%d, signal recovered, restoring long mode\r\n", csq_val);
+        printf_debug("[SM] CSQ=%d, signal recovered\r\n", csq_val);
         fourG_weak_signal = 0;
     }
     return 1;
@@ -462,20 +477,32 @@ const char* alarm_try_close_valve(ThresholdResult_t result)
     return NULL;
 }
 
-// 用户端MQTT上报 (id=1, LY格式双通道): 连接→发送→断开
+// 用户端MQTT上报 (id=1, LY格式双通道): 连接→发送→断开 (含1次重试)
 static void user_mqtt_try_publish(void)
 {
-    if(EC801E_UserMqtt_IsConfigured())
+    if(!EC801E_UserMqtt_IsConfigured())
+        return;
+
+    trea_delay_ms(500);
+    if(EC801E_UserMqtt_Connect() != EC_OK)
     {
-        trea_delay_ms(500);
-        if(EC801E_UserMqtt_Connect() == EC_OK)
+        printf_debug("[SM] UserMqtt: connect failed, retry once...\r\n");
+        trea_delay_ms(1000);
+        if(EC801E_UserMqtt_Connect() != EC_OK)
         {
-            trea_delay_ms(300);
-            EC801E_UserMqtt_PublishSensorData(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
-            trea_delay_ms(500);
-            EC801E_UserMqtt_Disconnect();
+            printf_debug("[SM] UserMqtt: retry failed, skip publish\r\n");
+            return;
         }
     }
+
+    trea_delay_ms(300);
+    if(EC801E_UserMqtt_PublishSensorData(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage) != EC_OK)
+        printf_debug("[SM] UserMqtt: publish sensor data failed\r\n");
+    else
+        printf_debug("[SM] UserMqtt: publish OK\r\n");
+
+    trea_delay_ms(500);
+    EC801E_UserMqtt_Disconnect();
 }
 
 // ==================== 状态上报公共模块 ====================
@@ -525,17 +552,19 @@ static void realtime_enter_sleep(void)
     rtc_alarm_wakeup_init();
     rtc_set_next_alarm_sec(g_real_frequency);
 
-    // 4G在线时使能LPUART唤醒 (接收平台下发, 弱信号断电时不启用)
+    // 4G在线时使能LPUART唤醒 + RI唤醒 (接收平台下发, 弱信号断电时不启用)
     if(!voltage_low_power && !fourG_user_off && !fourG_init_failed && !fourG_weak_signal &&
        strcmp(g_window.pattern, "long") == 0 &&
        (config_is_active_window() || g_window.end_result == 1))
     {
         com_lpuart_init();
         lpuart_wakeup_init();
+        ri_exti_init();
         lpuart_enabled = 1;
     }
 
     button_exti_init();
+    if(g_bt_on) ble_exti_init();
     lpuart_dma_rx_disable();
     enter_deepsleep_mode(lpuart_enabled);
 }
@@ -558,7 +587,7 @@ static void do_realtime_check(void)
     // SysTick 已由 system_wakeup_reinit 重新配置; 回睡�?enter_deepsleep_mode 会关�?
     swdt_enable(SWDT_TIMEOUT_MS);
 
-    // === 采集 (仅传感器, 不读ADC; PB5/IIC �?CollectAll 内部管理) ===
+    // === 采集 (仅传感器, 不读ADC; PD4/IIC �?CollectAll 内部管理) ===
     PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
 
     // === LCD超时检�?+ 采样周期刷新显示 ===
@@ -746,6 +775,9 @@ static void do_realtime_check(void)
                 publish_sensor_status();
             if(vr)
                 EC801E_PublishValveStatus(vr, g_valve_last_order);
+
+            // 用户端MQTT同步上报报警数据
+            user_mqtt_try_publish();
         }
         fourG_restore(was_online, ec_ok);
     }
@@ -815,15 +847,16 @@ static void do_sleep(void)
             rtc_alarm_wakeup_init();
             rtc_set_next_alarm_sec((uint8_t)remain);
             button_exti_init();
-            if(fourG_keep_on) { com_lpuart_init(); lpuart_wakeup_init(); }
+            if(g_bt_on) ble_exti_init();
+            if(fourG_keep_on) { com_lpuart_init(); lpuart_wakeup_init(); ri_exti_init(); }
             lpuart_dma_rx_disable();
 
             printf_debug("[SM] LCD timeout sleep %ds\r\n", (int)remain);
             trea_delay_ms(20);
             enter_deepsleep_mode(fourG_keep_on);
 
-            // 唤醒: 按键或LPUART �?直接进入 STATE_WAKEUP (lcd_activate 会重置计�?
-            if(button_wakeup_flag || counter0)
+            // 唤醒: 按键或LPUART或RI或BLE连接 → 直接进入 STATE_WAKEUP
+            if(button_wakeup_flag || counter0 || ri_wakeup_flag || ble_connect_wakeup_flag)
             {
                 app_state = STATE_WAKEUP;
                 return;
@@ -894,33 +927,60 @@ static void do_sleep(void)
         }
     }
 
-    // LPUART唤醒: �?G有电时才有意�?可接收下发URC)
+    // LPUART唤醒 + RI唤醒: 4G有电时才有意义(可接收下发URC)
     if(fourG_keep_on)
     {
         com_lpuart_init();
         lpuart_wakeup_init();
+        ri_exti_init();
     }
 
     // PA12按键唤醒: 始终启用(用于手动开�?G)
     button_exti_init();
 
+    // BLE连接事件未处理(与按键同时唤醒), 回到WAKEUP处理
+    if(ble_connect_wakeup_flag)
+    {
+        app_state = STATE_WAKEUP;
+        return;
+    }
+
+    // BLE开启时: 检查60s未连接超时, 未超时则使能PD2 EXTI唤醒
+    if(g_bt_on)
+    {
+        uint32_t now_sec = hhmmss_to_seconds(rtc_get_hhmmss());
+        uint32_t on_sec  = hhmmss_to_seconds(g_ble_on_hhmmss);
+        uint32_t elapsed = (now_sec >= on_sec) ? (now_sec - on_sec) : (86400 - on_sec + now_sec);
+        if(elapsed >= 60)
+        {
+            printf_debug("[SM] BLE timeout (%ds), auto power off\r\n", (int)elapsed);
+            g_bt_on = 0;
+            gpio_bit_reset(GPIOC, GPIO_PIN_12);
+            if(g_lcd_active) slcd_seg_icon_display(SLCD_ICON_LY, RESET);
+        }
+        else
+        {
+            ble_exti_init();
+        }
+    }
+
     // 深休眠前禁用DMA(深休眠期间DMA时钟被门�? 需清理状�?
     lpuart_dma_rx_disable();
 
     if(g_real_enabled)
-        printf_debug("[SM] SLEEP %ds-RT (buf=%d 4G=%s)\r\n",
-                     g_real_frequency, sensor_buf_count(),
-                     fourG_keep_on ? "ON" : "OFF");
+        printf_debug("[SM] SLEEP %ds-RT (buf=%d 4G=%s BLE=%d)\r\n",
+                     g_real_frequency, ee_hist_count(),
+                     fourG_keep_on ? "ON" : "OFF", g_bt_on);
     else
-        printf_debug("[SM] SLEEP %dmin (buf=%d 4G=%s)\r\n",
-                     g_interval.collect_interval_min, sensor_buf_count(),
-                     fourG_keep_on ? "ON" : "OFF");
+        printf_debug("[SM] SLEEP %dmin (buf=%d 4G=%s BLE=%d)\r\n",
+                     g_interval.collect_interval_min, ee_hist_count(),
+                     fourG_keep_on ? "ON" : "OFF", g_bt_on);
     trea_delay_ms(20);
 
     enter_deepsleep_mode(fourG_keep_on);
 
-    // 实时采集循环: RTC秒级唤醒 �?检查是否到采集网格 �?否则最小采�?回睡
-    while(g_real_enabled && rtc_alarm_flag && !counter0 && !button_wakeup_flag)
+    // 实时采集循环: RTC秒级唤醒 → 检查是否到采集网格 → 否则最小采集回睡
+    while(g_real_enabled && rtc_alarm_flag && !counter0 && !ri_wakeup_flag && !button_wakeup_flag && !ble_connect_wakeup_flag)
     {
         // 最小时钟恢�?�?读RTC判断是否到达正常采集网格
         system_wakeup_reinit();
@@ -1074,17 +1134,17 @@ static void do_button_short_press(void)
 // ==================== 唤醒恢复 ====================
 static void do_wakeup(void)
 {
-    // 判断是否为纯周期采集定时唤醒 (非按键且非LPUART活动)
-    if(button_wakeup_flag == 0 && counter0 == 0)
+    // 判断是否为纯周期采集定时唤醒 (非按键且非LPUART且非RI且非BLE连接)
+    if(button_wakeup_flag == 0 && counter0 == 0 && ri_wakeup_flag == 0 && ble_connect_wakeup_flag == 0)
     {
         g_is_minimal_wakeup = 1;
         g_need_adc_sampling = 0;
         
         system_wakeup_reinit();
         
-        // 极简采集初始�? Systick、Debug 串口发�? PB5(SW_IIC)/IIC 引脚�?PT304D_CollectAll 内部初始�?
+        // 极简采集初始�? Systick、Debug 串口发�? PD4(SW_IIC)/IIC 引脚�?PT304D_CollectAll 内部初始�?
         systick_config();
-        my_systick_config();
+//        my_systick_config();
         trea_uart_init();
         
         if(g_need_adc_sampling)
@@ -1097,7 +1157,7 @@ static void do_wakeup(void)
         rtc_show_time();
         printf_debug("[SM] PURE RTC WAKEUP: minimal init (ADC=%d)\r\n", g_need_adc_sampling);
     }
-    else if(button_wakeup_flag && counter0 == 0)
+    else if(button_wakeup_flag && counter0 == 0 && ri_wakeup_flag == 0)
     {
         // === 按键唤醒 (快速检测路�?: 最小初始化, 跳过 sys_init() �?1s 延时 ===
         // GPIO 状态在深休眠期间保�? PD0 仍为输入上拉, button_is_pressed() 可直接使�?
@@ -1115,7 +1175,7 @@ static void do_wakeup(void)
     }
     else
     {
-        // === LPUART 唤醒或混合唤�? 完整初始�?===
+        // === LPUART/RI 唤醒或混合唤醒: 完整初始化 ===
         g_is_minimal_wakeup = 0;
         g_need_adc_sampling = 1;
         
@@ -1233,7 +1293,7 @@ static void do_wakeup(void)
                     // 1次短按? LCD页面切换 + 蜂鸣确认
                     buzzer_beep(1, 200);
                     if(g_lcd_active) lcd_ui_next_page();
-                    printf_debug("[SM] BUTTON: LCD page -> %d\r\n", g_lcd_page);
+                        printf_debug("[SM] BUTTON: LCD page -> %d\r\n", g_lcd_page);
                     break;
 
                 case 2:
@@ -1243,22 +1303,22 @@ static void do_wakeup(void)
                     break;
 
                 case 3:
-                    // 3次短按? 蓝牙开�?
+                    // 3次短按: 蓝牙开关切换 (非阻塞: 仅上/断电, 不进入BLE_OTA)
                     if(g_lcd_active) lcd_ui_toggle_bluetooth();
+                    buzzer_beep(1, 200);
                     printf_debug("[SM] BUTTON: Bluetooth %s\r\n", g_bt_on ? "ON" : "OFF");
                     if(g_bt_on)
                     {
-                        ble_link_gpio_init();  /* PD2输入+上拉, 检测BLE连接状态 */
-                        ble_set_name_from_device_id(); /* AT指令设置BLE名称: 设备表号 */
-                        ble_ota_init();        /* 状态=WAIT_CONNECT, 启动60s超时 */
-                        app_state = STATE_BLE_OTA;
-                        printf_debug("[SM] Entering BLE_OTA mode (waiting PD2=LOW)\r\n");
-                        trea_delay_ms(1000);
-                        return;
+                        ble_link_gpio_init();           /* PD2输入+上拉 */
+                        ble_set_name_from_device_id();  /* AT指令设置BLE名称 */
+                        g_ble_on_hhmmss = rtc_get_hhmmss(); /* 记录开启时间, 用于60s超时 */
+                        printf_debug("[SM] BLE powered on, waiting connect via EXTI\r\n");
                     }
                     else
                     {
+                        ble_exti_disable();
                         ble_uart_deinit();
+                        printf_debug("[SM] BLE powered off\r\n");
                     }
                     break;
 				case 4:
@@ -1338,9 +1398,33 @@ static void do_wakeup(void)
 
     // debug配置已由主循环统一处理
 
-    if(counter0)
+    // === BLE连接唤醒: PD2 EXTI下降沿 (手机连接BLE模块) ===
+    if(ble_connect_wakeup_flag)
     {
-        printf_debug("[SM] WAKEUP: LPUART (downlink)\r\n");
+        ble_connect_wakeup_flag = 0;
+        ble_exti_disable();
+
+        if(g_bt_on && ble_link_is_connected())
+        {
+            printf_debug("[SM] WAKEUP: BLE connected (PD2=LOW), entering OTA mode\r\n");
+            ensure_full_init();
+            ble_uart_init();
+            ble_uart_rx_flush();
+            ble_ota_init();
+            g_ble_ota.state = BLE_OTA_IDLE;
+            g_ble_ota.last_rx_ms = trea_millis();
+            app_state = STATE_BLE_OTA;
+            return;
+        }
+        else
+        {
+            printf_debug("[SM] WAKEUP: BLE EXTI but not connected (glitch?)\r\n");
+        }
+    }
+
+    if(counter0 || ri_wakeup_flag)
+    {
+        printf_debug("[SM] WAKEUP: %s (downlink)\r\n", counter0 ? "LPUART" : "RI");
         app_state = STATE_DOWNLINK;
     }
     else if(rtc_alarm_flag)
@@ -1379,9 +1463,9 @@ static void check_upload_schedule(void)
         if((current_hour == 8 || current_hour == 18) && !vlp_uploaded_this_hour)
         {
             vlp_uploaded_this_hour = 1;
-            if(sensor_buf_count() > 0)
+            if(ee_hist_count() > 0)
             {
-                printf_debug("[SM] VLP trigger: hour=%d, uploading %d records\r\n", current_hour, sensor_buf_count());
+                printf_debug("[SM] VLP trigger: hour=%d, uploading %d records\r\n", current_hour, ee_hist_count());
                 ensure_full_init();
                 app_state = STATE_UPLOAD;
             }
@@ -1505,7 +1589,7 @@ static void do_collect(void)
     g_sensor.voltage = g_sensor.last_normal_voltage;
 
     printf_debug("[SM] COLLECT (buf=%d) V=%.2f S2:P=%.2f T=%.2f err=%d S1:P=%.2f T=%.2f err=%d (ADC=%d)\r\n",
-                 sensor_buf_count() + 1, g_sensor.voltage,
+                 ee_hist_count() + 1, g_sensor.voltage,
                  g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.raw.err,
                  g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.raw2.err,
                  g_need_adc_sampling);
@@ -1656,7 +1740,9 @@ static void do_collect(void)
     record.flags = 0;
     memset(record.reserved, 0, sizeof(record.reserved));
 
-    sensor_buf_push(&record);
+    ee_hist_push(record.pressure, record.temperature,
+                 record.pressure2, record.temperature2,
+                 record.voltage, record.flags);
     g_sensor.last_pressure_collect = g_sensor.raw.pressure;
     g_sensor.last_pressure_collect2 = g_sensor.raw2.pressure;
     wakeup_count++;
@@ -1736,6 +1822,9 @@ static void do_alarm(void)
                 EC801E_PublishAlarmStatus(result, g_sensor.voltage);
                 if(vr)
                     EC801E_PublishValveStatus(vr, g_valve_last_order);
+
+                // 用户端MQTT同步上报报警数据
+                user_mqtt_try_publish();
             }
             fourG_restore(was_online, ec_ok);
         }
@@ -1746,8 +1835,10 @@ static void do_alarm(void)
         record.flags = 0;
     }
 
-    // 存入缓冲�?
-    sensor_buf_push(&record);
+    // 存入EEPROM历史缓冲
+    ee_hist_push(record.pressure, record.temperature,
+                 record.pressure2, record.temperature2,
+                 record.voltage, record.flags);
     g_sensor.last_pressure_collect = g_sensor.raw.pressure;
     g_sensor.last_pressure_collect2 = g_sensor.raw2.pressure;
     wakeup_count++;
@@ -1756,11 +1847,10 @@ static void do_alarm(void)
     check_upload_schedule();
 }
 
-// ==================== 数据上报 (批量逐条, 三模�? ====================
+// ==================== 数据上报 (批量逐条, 三模式) ====================
 static void do_upload(void)
 {
     uint16_t n, i;
-    const SensorRecord_t *rec;
     int is_coldstart = 0;
 
     // === 窗口检�?(dot/VLP模式由do_collect已确认时间点, 直接通过) ===
@@ -1775,7 +1865,7 @@ static void do_upload(void)
     }
 
     printf_debug("[SM] UPLOAD: %d records (pattern=%s%s)\r\n",
-                 sensor_buf_count(), g_window.pattern,
+                 ee_hist_count(), g_window.pattern,
                  voltage_low_power ? " VLP" : "");
 
     // === 建立4G连接 ===
@@ -1816,31 +1906,63 @@ static void do_upload(void)
     // 4G连接成功后更新LCD信号强度
     lcd_update_csq();
 
-    // === 用户端MQTT: 预连接 (历史数据同步上报) ===
+    // === 用户端MQTT: 预连接 (历史数据同步上报, 含1次重试) ===
     uint8_t user_mqtt_on = 0;
     if(EC801E_UserMqtt_IsConfigured())
     {
         trea_delay_ms(500);
-        user_mqtt_on = (EC801E_UserMqtt_Connect() == EC_OK);
+        if(EC801E_UserMqtt_Connect() == EC_OK)
+        {
+            user_mqtt_on = 1;
+        }
+        else
+        {
+            printf_debug("[SM] UserMqtt: 1st connect failed, retry...\r\n");
+            trea_delay_ms(1000);
+            user_mqtt_on = (EC801E_UserMqtt_Connect() == EC_OK);
+            if(!user_mqtt_on)
+                printf_debug("[SM] UserMqtt: 2nd connect failed, skip user mqtt\r\n");
+        }
     }
 
-    // === 逐条上传 (双通道: 主平台id=0 + 用户端id=1) ===
-    while(sensor_buf_count() > 0)
+    // === 逐条上传 (双通道: 主平台id=0 + 用户端id=1, 从EEPROM读取) ===
+    while(ee_hist_count() > 0)
     {
+        EeHistRecord_t ee_rec;
+        SensorRecord_t rec;
+        uint8_t rd_ret;
+
         swdt_feed();
-        rec = sensor_buf_get(0);
-        if(rec)
+        rd_ret = ee_hist_read(0, &ee_rec);
+        if(rd_ret == 0)
         {
-            if(EC801E_PublishSingleRecord(rec) == EC_OK)
+            ee_hist_to_sensor_record(&ee_rec, &rec);
+
+            if(EC801E_PublishSingleRecord(&rec) == EC_OK)
             {
                 if(user_mqtt_on)
                 {
                     trea_delay_ms(300);
-                    EC801E_UserMqtt_PublishRecord(rec);
+                    if(EC801E_UserMqtt_PublishRecord(&rec) != EC_OK)
+                    {
+                        printf_debug("[SM] UserMqtt: publish failed, try reconnect\r\n");
+                        EC801E_UserMqtt_Disconnect();
+                        trea_delay_ms(500);
+                        if(EC801E_UserMqtt_Connect() == EC_OK)
+                        {
+                            trea_delay_ms(300);
+                            EC801E_UserMqtt_PublishRecord(&rec);
+                        }
+                        else
+                        {
+                            printf_debug("[SM] UserMqtt: reconnect failed, disable\r\n");
+                            user_mqtt_on = 0;
+                        }
+                    }
                 }
-                sensor_buf_pop();
+                ee_hist_pop();
 
-                if(sensor_buf_count() > 0)
+                if(ee_hist_count() > 0)
                     trea_delay_ms(one_by_one_delay);
             }
             else
@@ -1851,7 +1973,9 @@ static void do_upload(void)
         }
         else
         {
-            sensor_buf_pop();
+            // CRC校验失败或读取错误, 跳过损坏记录
+            printf_debug("[SM] UPLOAD: EEPROM read error (ret=%d), skip record\r\n", rd_ret);
+            ee_hist_pop();
         }
     }
 
@@ -1869,7 +1993,7 @@ static void do_upload(void)
 
     // 上传流程结束，复位唤醒周期统计计�?
     wakeup_count = 0;
-    printf_debug("[SM] UPLOAD finished, remaining records in buffer: %d\r\n", sensor_buf_count());
+    printf_debug("[SM] UPLOAD finished, remaining records in buffer: %d\r\n", ee_hist_count());
 
     // === RTC校准: 利用4G在线从网络同步时�?===
     {
@@ -1988,6 +2112,38 @@ static void do_ble_ota(void)
             ota_wdt_feed();
         }
     }
+	
+    /* 按键检测: 3连按关闭蓝牙 (与3连按开启对称) */
+    if(button_is_pressed())
+    {
+        uint8_t ble_press_count = 1;
+        uint16_t ble_wait;
+
+        while(button_is_pressed()) trea_delay_ms(20);
+        trea_delay_ms(30);
+
+        while(ble_press_count < 3)
+        {
+            uint8_t ble_got = 0;
+            for(ble_wait = 0; ble_wait < 500; ble_wait += 20)
+            {
+                trea_delay_ms(20);
+                if(button_is_pressed()) { ble_got = 1; break; }
+            }
+            if(!ble_got) break;
+            ble_press_count++;
+            while(button_is_pressed()) trea_delay_ms(20);
+            trea_delay_ms(30);
+        }
+
+        if(ble_press_count >= 3)
+        {
+            printf_debug("[SM] BLE_OTA: 3-press detected, turning off BLE\r\n");
+            g_bt_on = 0;
+            gpio_bit_reset(GPIOC, GPIO_PIN_12);
+            if(g_lcd_active) slcd_seg_icon_display(SLCD_ICON_LY, RESET);
+        }
+    }
 
     /* 退出条件: OTA错误/超时, 或蓝牙被关闭 */
     if(g_ble_ota.state == BLE_OTA_ERROR || !g_bt_on)
@@ -2019,11 +2175,12 @@ static void debug_check_cmd(void)
             const char *state_names[] = {"INIT","SLEEP","WAKEUP","COLLECT","UPLOAD","DOWNLINK","ALARM","BLE_OTA"};
             printf_debug("  state=%s wakeup=%d buf=%d\r\n",
                          (app_state <= STATE_BLE_OTA) ? state_names[app_state] : "?",
-                         wakeup_count, sensor_buf_count());
+                         wakeup_count, ee_hist_count());
             printf_debug("  P=%.2f T=%.2f V=%.2f last_Pc=%.2f last_Pr=%.2f\r\n",
                          g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, g_sensor.last_pressure_realtime);
             printf_debug("  valve=%d abnormal=%s\r\n", g_valve_last_order, g_abnormal_close);
             printf_debug("  4G: user_off=%d init_fail=%d weak_sig=%d\r\n", fourG_user_off, fourG_init_failed, fourG_weak_signal);
+            printf_debug("  BLE: on=%d\r\n", g_bt_on);
             printf_debug("  PT304D err=%d stat=0x%02X\r\n", g_sensor.raw.err, g_sensor.raw.stat_raw);
             continue;
         }
@@ -2063,11 +2220,16 @@ static void debug_check_cmd(void)
         if(strcmp(line_buf, "sim") == 0)
         {
             char csq[8] = {0}, iccid[32] = {0}, imei[24] = {0};
+            int rsrp = 0, sinr = 0;
+            uint8_t cereg = 0;
             EC801E_Wakeup();
             EC801E_QueryCSQ(csq, sizeof(csq));
+            EC801E_QueryQCSQ(&rsrp, &sinr);
+            EC801E_QueryCEREG(&cereg);
             EC801E_QueryICCID(iccid, sizeof(iccid));
             EC801E_QueryIMEI(imei, sizeof(imei));
-            printf_debug("  CSQ=%s ICCID=%s IMEI=%s\r\n", csq, iccid, imei);
+            printf_debug("  CSQ=%s RSRP=%d SINR=%d CEREG=%d\r\n", csq, rsrp, sinr, cereg);
+            printf_debug("  ICCID=%s IMEI=%s\r\n", iccid, imei);
             continue;
         }
         if(strcmp(line_buf, "restart") == 0)
@@ -2187,7 +2349,7 @@ static void debug_check_cmd(void)
         }
         if(strcmp(line_buf, "buf") == 0)
         {
-            printf_debug("  sensor_buf: %d records\r\n", sensor_buf_count());
+            printf_debug("  ee_hist: %d records\r\n", ee_hist_count());
             continue;
         }
         if(strcmp(line_buf, "time") == 0)
@@ -2209,6 +2371,9 @@ int main(void)
 
     // ==================== STATE_INIT ====================
     sys_init();
+	
+	PT304D_Init(PT304D_SENSOR_1);
+    PT304D_Init(PT304D_SENSOR_2);
     // 软件看门�? SysTick 已在 sys_init 内启�? 启用以保护后�?4G 联网/上报等阻塞流�?
     swdt_enable(SWDT_TIMEOUT_MS);
     com_lpuart_init();
@@ -2225,8 +2390,9 @@ int main(void)
     rtc_init_all();
     rtc_alarm_wakeup_init();
 	
-    PT304D_Init(PT304D_SENSOR_2);
-    sensor_buf_init();
+	
+	
+    ee_hist_init();
 
     // SLCD初始�?(必须在rtc_init_all之后, LXTAL已配�?
     if(g_lcd_enabled) { slcd_seg_configuration(); lcd_ui_init(); g_lcd_active = 1; g_lcd_on_hhmmss = rtc_get_hhmmss(); }
@@ -2292,6 +2458,7 @@ int main(void)
     ota_app_report_boot_status();
 
     // 首次采集+存入缓冲+上报
+	trea_delay_ms(50);
     PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
 	// 首次采集后刷新LCD显示
     if(g_lcd_active) lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
@@ -2306,7 +2473,9 @@ int main(void)
     rtc_get_time_str(init_record.timestamp, sizeof(init_record.timestamp));
     init_record.flags = 0;
     memset(init_record.reserved, 0, sizeof(init_record.reserved));
-    sensor_buf_push(&init_record);
+    ee_hist_push(init_record.pressure, init_record.temperature,
+                 init_record.pressure2, init_record.temperature2,
+                 init_record.voltage, init_record.flags);
     g_sensor.last_pressure_collect  = g_sensor.raw.pressure;
     g_sensor.last_pressure_realtime = g_sensor.raw.pressure;
     g_sensor.last_pressure_collect2  = g_sensor.raw2.pressure;
@@ -2343,12 +2512,22 @@ int main(void)
     }
     trea_delay_ms(500);
 
-    // �?2: 设备信息 (csq + soft-version + ICCID + IMEI)
+    // 包2: 设备信息 (csq + rsrp + sinr + cereg + soft-version + ICCID + IMEI)
     {
-        static char info_json[380];
+        static char info_json[512];
         char csq[8] = {0}, iccid[32] = {0}, imei[24] = {0};
+        char rsrp_str[8] = {0}, sinr_str[8] = {0}, cereg_str[4] = {0};
+        int rsrp = 0, sinr = 0;
+        uint8_t cereg = 0;
         EC801E_Wakeup();
         EC801E_QueryCSQ(csq, sizeof(csq));
+        if(EC801E_QueryQCSQ(&rsrp, &sinr) == EC_OK)
+        {
+            snprintf(rsrp_str, sizeof(rsrp_str), "%d", rsrp);
+            snprintf(sinr_str, sizeof(sinr_str), "%d", sinr);
+        }
+        EC801E_QueryCEREG(&cereg);
+        snprintf(cereg_str, sizeof(cereg_str), "%d", cereg);
         trea_delay_ms(200);
         EC801E_QueryICCID(iccid, sizeof(iccid));
         trea_delay_ms(200);
@@ -2357,12 +2536,17 @@ int main(void)
         rtc_get_time_str(info_ts, sizeof(info_ts));
         snprintf(info_json, sizeof(info_json),
             "[{\"id\":\"csq\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
+						"{\"id\":\"csq_csq\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
+            "{\"id\":\"csq_rsrp\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
+            "{\"id\":\"csq_sinr\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
             "{\"id\":\"soft-version\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
             "{\"id\":\"ICCID\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
             "{\"id\":\"IMEI\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"}]",
-            csq, info_ts, APP_FIRMWARE_VERSION, info_ts, iccid, info_ts, imei, info_ts);
+            csq, info_ts, csq, info_ts, rsrp_str, info_ts, sinr_str, info_ts, 
+            APP_FIRMWARE_VERSION, info_ts, iccid, info_ts, imei, info_ts);
         EC801E_PublishRawJson(info_json);
-        printf_debug("[SM] Device info:\r\n CSQ=%s\r\n ICCID=%s\r\n IMEI=%s\r\n", csq, iccid, imei);
+        printf_debug("[SM] Device info:\r\n CSQ=%s RSRP=%s SINR=%s CEREG=%s\r\n ICCID=%s\r\n IMEI=%s\r\n",
+                     csq, rsrp_str, sinr_str, cereg_str, iccid, imei);
     }
     trea_delay_ms(500);
 

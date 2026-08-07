@@ -4,7 +4,8 @@
 void IIC_Delay(void)
 {
     volatile uint16_t i;
-    for(i = 0; i < 100; i++);
+    for(i = 0; i < 150; i++);
+//	delay_us(300);
 }
 
 void IIC_Init(void)

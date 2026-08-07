@@ -16,8 +16,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#define OTA_CSQ_MIN  8   			// OTA最低信号要求 (CSQ<8 拒绝升级)
-#define OTA_vol_protection  3.1     // OTA最低电压要求 (value<OTA_vol_protection 拒绝升级)
+#define OTA_CSQ_MIN  10   			// OTA最低信号要求 (CSQ<10 拒绝升级)
+#define OTA_vol_protection  2.8     // OTA最低电压要求 (value<OTA_vol_protection 拒绝升级)
 
 // OTA upgrade 状态上报值 (id:upgrade)
 #define OTA_ST_UPGRADING     0   // 进行升级

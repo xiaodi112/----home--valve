@@ -71,7 +71,9 @@ EC_Status_t EC801E_PublishValveStatus(const char *valve_result, int last_order);
 EC_Status_t EC801E_PublishRawJson(const char *json_str);
 
 // 查询模块信息
-EC_Status_t EC801E_QueryCSQ(char *out, uint16_t size);      // 信号强度
+EC_Status_t EC801E_QueryCSQ(char *out, uint16_t size);      // 信号强度 (CSQ 0~31)
+EC_Status_t EC801E_QueryQCSQ(int *out_rsrp, int *out_sinr); // LTE信号质量 (RSRP dBm, SINR dB)
+EC_Status_t EC801E_QueryCEREG(uint8_t *out_stat);           // 网络注册状态 (1=本地,5=漫游)
 EC_Status_t EC801E_QueryICCID(char *out, uint16_t size);    // SIM卡号
 EC_Status_t EC801E_QueryIMEI(char *out, uint16_t size);     // 模块IMEI
 

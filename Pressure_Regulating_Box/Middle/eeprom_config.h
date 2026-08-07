@@ -375,6 +375,9 @@ void config_save_interval(void);
 // 保存MQTT配置到EEPROM
 void config_save_mqtt(void);
 
+// 从client_id推导topic_up
+void derive_topic_from_client_id(void);
+
 // 保存扩展配置到EEPROM (window/cycle/abnormal/valve_last_order)
 void config_save_ext(void);
 

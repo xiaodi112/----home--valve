@@ -87,11 +87,14 @@ void gpio_enter_low_power(uint8_t lpuart_enabled)
     rcu_periph_clock_enable(RCU_GPIOF);
 
     /* 2. GPIOA 配置
+     *    排除 PA1 (4G RI, EXTI唤醒) — 4G在线时保持INPUT
      *    排除 PA8/PA9/PA10 (SLCD COM0/COM1/COM2, LCD开启时保持AF)
      */
-    uint32_t gpioa_analog_pins = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 |
+    uint32_t gpioa_analog_pins = GPIO_PIN_0 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 |
                                  GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7 |
                                  GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_15;
+    if(!lpuart_enabled)
+        gpioa_analog_pins |= GPIO_PIN_1;  /* PA1: 4G断电时转Analog, 在线时保持INPUT(RI唤醒) */
     if(!g_lcd_active)
         gpioa_analog_pins |= (GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10);  /* PA8-10: SLCD COM0-2 */
     gpio_mode_set(GPIOA, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, gpioa_analog_pins);
@@ -175,4 +178,64 @@ void ble_link_gpio_init(void)
 uint8_t ble_link_is_connected(void)
 {
     return (gpio_input_bit_get(GPIOD, GPIO_PIN_2) == RESET) ? 1 : 0;
+}
+
+// ===================== PD2 蓝牙连接 EXTI 唤醒 =====================
+volatile uint8_t ble_connect_wakeup_flag = 0;
+
+// BLE开启时深休眠前调用: PD2 EXTI2 下降沿唤醒
+void ble_exti_init(void)
+{
+    rcu_periph_clock_enable(RCU_GPIOD);
+    rcu_periph_clock_enable(RCU_SYSCFG);
+
+    // PD2: 输入, 内部上拉 (空闲HIGH, 连接LOW)
+    gpio_mode_set(GPIOD, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPIO_PIN_2);
+
+    // EXTI2 → PD2, 下降沿触发
+    syscfg_exti_line_config(EXTI_SOURCE_GPIOD, EXTI_SOURCE_PIN2);
+    exti_init(EXTI_2, EXTI_INTERRUPT, EXTI_TRIG_FALLING);
+    exti_flag_clear(EXTI_2);
+
+    // GD32L23x: EXTI2独立中断
+    nvic_irq_enable(EXTI2_IRQn, 2);
+
+    ble_connect_wakeup_flag = 0;
+}
+
+void ble_exti_disable(void)
+{
+    exti_interrupt_disable(EXTI_2);
+    exti_flag_clear(EXTI_2);
+    nvic_irq_disable(EXTI2_IRQn);
+}
+
+// ===================== PA1 4G RI引脚 EXTI 唤醒 =====================
+// EC800E 收到服务器下行数据时 RI 脚产生低电平脉冲(~120ms)
+// PA1 下降沿中断唤醒 MCU, 与 LPUART 起始位唤醒互为冗余
+volatile uint8_t ri_wakeup_flag = 0;
+
+void ri_exti_init(void)
+{
+    rcu_periph_clock_enable(RCU_GPIOA);
+    rcu_periph_clock_enable(RCU_SYSCFG);
+
+    // PA1: 输入, 内部上拉 (RI空闲HIGH, 有数据时LOW)
+    gpio_mode_set(GPIOA, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPIO_PIN_1);
+
+    // EXTI1 → PA1, 下降沿触发
+    syscfg_exti_line_config(EXTI_SOURCE_GPIOA, EXTI_SOURCE_PIN1);
+    exti_init(EXTI_1, EXTI_INTERRUPT, EXTI_TRIG_FALLING);
+    exti_flag_clear(EXTI_1);
+
+    nvic_irq_enable(EXTI1_IRQn, 1);
+
+    ri_wakeup_flag = 0;
+}
+
+void ri_exti_disable(void)
+{
+    exti_interrupt_disable(EXTI_1);
+    exti_flag_clear(EXTI_1);
+    nvic_irq_disable(EXTI1_IRQn);
 }

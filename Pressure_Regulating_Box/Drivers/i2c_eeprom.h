@@ -12,7 +12,7 @@ void IIC_Start1(void);
 void IIC_Stop1(void);
 void IIC_Send_Byte1(uint8_t _ucByte);
 uint8_t IIC_Read_Byte1(uint8_t ack);
-uint8_t IIC_Wait_Ack1(void);
+uint8_t IIC_Wait_Ack1(uint16_t timeout);
 void IIC_Ack1(void);
 void IIC_NAck1(void);
 uint8_t IIC_CheckDevice1(uint8_t _Address);

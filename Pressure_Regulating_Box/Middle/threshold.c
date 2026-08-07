@@ -16,7 +16,7 @@
 
 // ==================== 阈值检查 ====================
 // 优先级:
-//   1. spupower.protect (VLP, 跟随 switch 开关)
+//   1. spupower.protect (VPROTECT, 仅报警; VLP模式由 main.c 门控)
 //   2. vpthreshold ppmax/ppmin + shock (压力极限)
 //   3. vpthreshold pmax/pmin + shock   (压力上下限)
 //   4. Tthreshold vhigh/vlow            (温度极限)
@@ -25,10 +25,10 @@
 //   7. vpthreshold mutation             (压力突变, 不受 shock 影响)
 ThresholdResult_t threshold_check(float pressure, float temperature, float voltage, float last_pressure, uint8_t check_voltage, uint8_t skip_mutation)
 {
-    // ---- 1. 电压保护(VLP) — 跟随 spupower.switch ----
+    // ---- 1. 电压保护(VPROTECT) — spupower.enabled 关闭时跳过, 不触发报警/VLP ----
     // voltage >= 0 守卫: ADC 超时返回 -1.0, 不可参与电压判定, 否则误触发 VPROTECT
     // 进入滞回: 已在VLP时用 protect+0.15 判断(由do_collect处理退出), 未在VLP时用 protect-0.1 防振荡
-    if(check_voltage && voltage >= 0.0f && g_spupower.enabled && voltage < g_spupower.protect - 0.1f)
+    if(g_spupower.enabled && check_voltage && voltage >= 0.0f && voltage < g_spupower.protect - 0.1f)
         return THRESHOLD_VPROTECT;
 
     // ---- 2/3. 压力检查 (含 shock 滞回带) ----
@@ -60,8 +60,8 @@ ThresholdResult_t threshold_check(float pressure, float temperature, float volta
             return THRESHOLD_TEMP_LOW;
     }
 
-    // ---- 6. 电压上下限 (spupower.switch=1 时; voltage>=0 守卫 ADC 无效值) ----
-    if(check_voltage && voltage >= 0.0f && g_spupower.enabled)
+    // ---- 6. 电压上下限 (spupower.enabled 关闭时跳过, 不触发报警)
+    if(g_spupower.enabled && check_voltage && voltage >= 0.0f)
     {
         if(voltage > g_spupower.high)
             return THRESHOLD_VOLT_HIGH;
@@ -104,12 +104,12 @@ const char* threshold_alarm_type_str(ThresholdResult_t result)
 }
 
 // ==================== 电压报警状态 (LY06 语义, 单一真源) ====================
-// -1=未知(ADC无效 voltage<0 或检测关闭), 0=正常, 1=报警
+// -1=未知(ADC无效 voltage<0), 0=正常, 1=报警
 // 报警条件: voltage > high || voltage < low || voltage < protect
 int threshold_voltage_alarm(float voltage)
 {
 //    if(voltage < 0.0f || !g_spupower.enabled)
-	if(voltage < 0.0f || !g_spupower.enabled)
+	if(voltage < 0.0f)
         return -1;
     if(voltage > g_spupower.high || voltage < g_spupower.low || voltage < g_spupower.protect)
         return 1;

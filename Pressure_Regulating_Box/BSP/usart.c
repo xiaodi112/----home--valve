@@ -304,15 +304,17 @@ void lpuart_wakeup_init(void)
 }
 
 // ===================== 【封�?】进入深休眠 =====================
-// 支持三种唤醒�? LPUART (counter0) / RTC闹钟 (rtc_alarm_flag) / 按键 (button_wakeup_flag)
+// 支持四种唤醒�? LPUART (counter0) / RTC闹钟 (rtc_alarm_flag) / 按键 (button_wakeup_flag) / 4G RI (ri_wakeup_flag)
 void enter_deepsleep_mode(uint8_t lpuart_enabled)
 {
     extern volatile uint8_t rtc_alarm_flag;
     extern volatile uint8_t button_wakeup_flag;
+    extern volatile uint8_t ri_wakeup_flag;
 
     counter0 = 0x00;
     rtc_alarm_flag = 0;
     button_wakeup_flag = 0;
+    ri_wakeup_flag = 0;
 
     // 软件看门狗: 进入深休眠前必须关闭 (深休眠期间 SysTick 停摆, 否则唤醒后计数错乱)
     // 所有进入深休眠的路径都经过本函数, 此处统一关闭可保证休眠期不被误复位
@@ -325,7 +327,7 @@ void enter_deepsleep_mode(uint8_t lpuart_enabled)
     pmu_to_deepsleepmode(PMU_LDNPDSP_LOWDRIVE, WFI_CMD, PMU_DEEPSLEEP);
 
     // 等待任意唤醒�?
-    while((0x00 == counter0) && (0 == rtc_alarm_flag) && (0 == button_wakeup_flag));
+    while((0x00 == counter0) && (0 == rtc_alarm_flag) && (0 == button_wakeup_flag) && (0 == ri_wakeup_flag));
 }
 
 // ===================== 【封�?】唤醒后系统重新初始�?=====================
@@ -337,11 +339,14 @@ void system_wakeup_reinit(void)
     my_systick_config();
     timer1_delay_init(); // 深休眠后 APB1 停摆, 必须重新启动 TIMER1 计数器
 
-    // 无论哪种唤醒源，都必须关闭LPUART唤醒模式和中�?
+    // 无论哪种唤醒源，都必须关闭LPUART唤醒模式和中断 + RI EXTI
     // 否则LPUART唤醒中断持续触发，无法再次进入深休眠
     lpuart_wakeup_disable(LPUART0);
     lpuart_interrupt_disable(LPUART0, LPUART_INT_WU);
     exti_flag_clear(EXTI_28);
+
+    // 关闭RI引脚EXTI (防止唤醒后RI持续低电平重复触发)
+    ri_exti_disable();
 
     // LPUART唤醒时：消费触发唤醒的字�?深休眠期间DMA未运�? 字节在RDATA�?
     if(counter0 != 0x00)

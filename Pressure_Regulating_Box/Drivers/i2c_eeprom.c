@@ -33,7 +33,9 @@
 
 static void IIC_Delay1(void)
 {
-   delay_us(300);
+	volatile uint8_t i;
+    for(i = 0; i < 150; i++);
+//   trea_delay_ms(3);
 }
 
 void IIC_Start1(void)
@@ -49,7 +51,10 @@ void IIC_Start1(void)
 
 void IIC_Stop1(void)
 {
-    IIC_SDA_0();
+    
+	IIC_SCL_0();
+	IIC_SDA_0();
+	IIC_Delay1();
     IIC_SCL_1();
     IIC_Delay1();
     IIC_SDA_1();
@@ -58,78 +63,84 @@ void IIC_Stop1(void)
 
 void IIC_Send_Byte1(uint8_t _ucByte)
 {
-    uint8_t i;
+    int8_t i;
 
-    for (i = 0; i < 8; i++)
+    for (i = 7; i >= 0; i--)
     {
-        if (_ucByte & 0x80)
-        {
-            IIC_SDA_1();
-        }
-        else
-        {
-            IIC_SDA_0();
-        }
+//        if (_ucByte & 0x80)
+//        {
+//            IIC_SDA_1();
+//        }
+//        else
+//        {
+//            IIC_SDA_0();
+//        }
+		IIC_SCL_0();
+		if(_ucByte & BIT(i)) IIC_SDA_1();
+		else IIC_SDA_0();
         IIC_Delay1();
         IIC_SCL_1();
         IIC_Delay1();
+	}
         IIC_SCL_0();
-        _ucByte <<= 1;
+        IIC_SDA_1();
         IIC_Delay1();
-    }
-    IIC_SDA_1();
-    IIC_Delay1();
 }
 
 uint8_t IIC_Read_Byte1(uint8_t ack)
 {
-    uint8_t i;
+    int8_t i;
     uint8_t value = 0;
 
     IIC_SDA_1();
-    for (i = 0; i < 8; i++)
+    for (i = 7; i >= 0; i--)
     {
-        value <<= 1;
-        IIC_SCL_1();
-        IIC_Delay1();
-        if (IIC_SDA_READ())
-        {
-            value++;
-        }
         IIC_SCL_0();
         IIC_Delay1();
+        IIC_SCL_1();
+        IIC_Delay1();
+        if(IIC_SDA_READ()) value |= BIT(i);
     }
-    if(ack == 0)
-        IIC_NAck1();
+
+    // 第9个时钟: 发送ACK/NACK
+    IIC_SCL_0();
+    if(ack)
+        IIC_SDA_0();    // ACK: SDA=0
     else
-        IIC_Ack1();
+        IIC_SDA_1();    // NACK: SDA=1
+    IIC_Delay1();
+    IIC_SCL_1();        // 从机在此上升沿采样ACK
+    IIC_Delay1();
+    IIC_SCL_0();
+    IIC_SDA_1();        // 释放SDA
+    IIC_Delay1();
+
     return value;
 }
 
-uint8_t IIC_Wait_Ack1(void)
+uint8_t IIC_Wait_Ack1(uint16_t timeout)
 {
-    uint8_t re = 1;
+    uint16_t wait = (timeout > 0) ? (uint16_t)timeout : 80;
 
     IIC_SDA_1();
     IIC_Delay1();
     IIC_SCL_1();
     IIC_Delay1();
 
-    // 仅 PT304D 传感器2(PB6/PB7) 使用; 80 次足以确认无应答, 降低离线阻塞与功耗
-    uint16_t timeout = 80;
-    while(IIC_SDA_READ() && timeout--)
+    while(IIC_SDA_READ() != 0 && wait--)
     {
         IIC_Delay1();
     }
 
-    if(!IIC_SDA_READ())
+    if(IIC_SDA_READ() != 0)
     {
-        re = 0;
+		IIC_SCL_1();
+        return  1;
     }
 
     IIC_SCL_0();
     IIC_Delay1();
-    return re;
+    return 0;
 }
 
 void IIC_Ack1(void)
@@ -186,7 +197,7 @@ uint8_t IIC_CheckDevice1(uint8_t _Address)
     IIC_GPIO_Init1();
     IIC_Start1();
     IIC_Send_Byte1((_Address << 1) | IIC_WR);
-    ucAck = IIC_Wait_Ack1();
+    ucAck = IIC_Wait_Ack1(0);
     IIC_Stop1();
 
     return ucAck;

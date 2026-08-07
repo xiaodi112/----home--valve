@@ -6,7 +6,7 @@
 #include <string.h>
 
 // 电机功能开关: 0=关闭(默认), 1=开启
-uint8_t g_motor_enabled = 0;
+uint8_t g_motor_enabled = 1;
 
 // ==================== 电机 GPIO 初始化 ====================
 void motor_init(void)

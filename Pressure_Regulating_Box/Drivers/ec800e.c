@@ -14,6 +14,7 @@
 #include "mygpio.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "main.h"
 #include "ota_app.h"
 #include "threshold.h"
@@ -333,7 +334,7 @@ static EC_Status_t mqtt_connect_to(const char *server, uint16_t port)
     }
 
     // 等待服务器握手完成
-    trea_delay_ms(3500);
+    trea_delay_ms(4000);
 
     // 查询连接状态 (state=3 表示已连接)
     if(EC_SendCmd("AT+QMTCONN?\r\n", "+QMTCONN: 0,3", APP_AT_TIMEOUT_SHORT) == EC_OK)
@@ -486,7 +487,7 @@ void EC801E_SetPSM(uint8_t mode)
 void EC801E_Wakeup(void)
 {
     gpio_set_4g_dtr(0);  // 硬件拉低 DTR (PA0) 强制唤醒模组
-    trea_delay_ms(150);  // 硬件拉低后，等待150ms以便模组及串口硬件完全就绪稳定
+    trea_delay_ms(160);  // 硬件拉低后，等待300ms以便模组及串口硬件完全就绪稳定
 	
     printf_debug("[EC] Module wakeup via DTR\r\n");
 }
@@ -590,11 +591,25 @@ EC_Status_t EC801E_EnsureConnected(void)
 {
     EC801E_Wakeup();
 
+	
     // 查询MQTT连接状态 (state=3表示已连接)
     if(EC_SendCmd("AT+QMTCONN?\r\n", "+QMTCONN: 0,3", 5000) == EC_OK)
     {
         printf_debug("[EC] MQTT still connected\r\n");
         return EC_OK;
+    }
+
+    // 重连前先检查网络注册状态, 未入网则无需尝试MQTT
+    {
+        uint8_t cereg_stat = 0;
+        if(EC801E_QueryCEREG(&cereg_stat) == EC_OK)
+        {
+            if(cereg_stat != 1 && cereg_stat != 5)
+            {
+                printf_debug("[EC] MQTT reconnect aborted: not registered (CEREG=%d)\r\n", cereg_stat);
+                return EC_ERROR;
+            }
+        }
     }
 
     printf_debug("[EC] MQTT disconnected, reconnecting...\r\n");
@@ -816,6 +831,62 @@ EC_Status_t EC801E_QueryCSQ(char *out, uint16_t size)
         return EC_OK;
     }
     return EC_ERROR;
+}
+
+// ==================== 查询LTE信号质量 (RSRP/SINR) ====================
+// 响应: +QCSQ: "LTE",-65,-93,15,-10  (rssi,rsrp,sinr,rsrq)
+// out_rsrp: dBm (覆盖, 典型 -44~-140, <-110弱)
+// out_sinr: dB  (信噪比, 典型 -20~30, <0差)
+// 返回: EC_OK=解析成功
+EC_Status_t EC801E_QueryQCSQ(int *out_rsrp, int *out_sinr)
+{
+    if(EC_SendCmd("AT+QCSQ\r\n", "OK", APP_AT_TIMEOUT_SHORT) != EC_OK)
+        return EC_ERROR;
+
+    // +QCSQ: "LTE",rssi,rsrp,sinr,rsrq
+    char *p = strstr(ec_rx_buf, "+QCSQ:");
+    if(!p) return EC_ERROR;
+
+    // 跳到 "LTE" 后面的逗号分隔数值
+    p = strstr(p, "\"LTE\"");
+    if(!p) return EC_ERROR;
+    p += 5;  // skip "LTE"
+
+    // 解析: ,rssi,rsrp,sinr,rsrq
+    int rssi = 0, rsrp = 0, sinr = 0, rsrq = 0;
+    if(sscanf(p, ",%d,%d,%d,%d", &rssi, &rsrp, &sinr, &rsrq) >= 3)
+    {
+        if(out_rsrp) *out_rsrp = rsrp;
+        if(out_sinr) *out_sinr = sinr;
+        printf_debug("[EC] QCSQ: RSSI=%d RSRP=%d SINR=%d RSRQ=%d\r\n", rssi, rsrp, sinr, rsrq);
+        return EC_OK;
+    }
+    return EC_ERROR;
+}
+
+// ==================== 查询网络注册状态 ====================
+// 返回: 注册状态 (0=未注册, 1=已注册本地, 2=搜网中, 3=被拒, 5=漫游)
+// out_stat: 输出注册状态值
+// 返回: EC_OK=查询成功
+EC_Status_t EC801E_QueryCEREG(uint8_t *out_stat)
+{
+    if(EC_SendCmd("AT+CEREG?\r\n", "OK", APP_AT_TIMEOUT_SHORT) != EC_OK)
+        return EC_ERROR;
+
+    // +CEREG: <n>,<stat>
+    char *p = strstr(ec_rx_buf, "+CEREG:");
+    if(!p) return EC_ERROR;
+
+    // 找第一个逗号后的数字
+    p = strchr(p, ',');
+    if(!p) return EC_ERROR;
+    p++;
+    uint8_t stat = (uint8_t)atoi(p);
+    if(out_stat) *out_stat = stat;
+    printf_debug("[EC] CEREG stat=%d (%s)\r\n", stat,
+        (stat == 1) ? "home" : (stat == 5) ? "roaming" :
+        (stat == 2) ? "searching" : (stat == 3) ? "denied" : "not reg");
+    return EC_OK;
 }
 
 // ==================== 查询SIM卡ICCID ====================
@@ -1204,14 +1275,15 @@ EC_Status_t EC801E_UserMqtt_Connect(void)
         printf_debug("[EC] UserMqtt: main MQTT not connected, skip\r\n");
         return EC_ERROR;
     }
-
+	trea_delay_ms(300);
     // keepalive 配置
     snprintf(s_cmd_buf, sizeof(s_cmd_buf), "AT+QMTCFG=\"keepalive\",1,600\r\n");
     EC_SendCmd(s_cmd_buf, "OK", APP_AT_TIMEOUT_SHORT);
-
+	trea_delay_ms(300);
     // recv/mode: URC模式(用户端只发布不订阅, 无需主动查询)
     EC_SendCmd("AT+QMTCFG=\"recv/mode\",1,0,1\r\n", "OK", APP_AT_TIMEOUT_SHORT);
 
+	trea_delay_ms(300);
     // 打开MQTT连接 id=1
     snprintf(s_cmd_buf, sizeof(s_cmd_buf),
              "AT+QMTOPEN=1,\"%s\",%d\r\n", g_user_mqtt.server, g_user_mqtt.port);
@@ -1233,17 +1305,22 @@ EC_Status_t EC801E_UserMqtt_Connect(void)
         return EC_ERROR;
     }
 
-    // 等待握手
-    trea_delay_ms(2000);
-
-    // 查询连接状态
-    if(EC_SendCmd("AT+QMTCONN?\r\n", "+QMTCONN: 1,3", APP_AT_TIMEOUT_SHORT) == EC_OK)
+    // 轮询等待握手完成 (最多5s, 每1s查一次)
     {
-        printf_debug("[EC] UserMqtt: connected to %s:%d\r\n", g_user_mqtt.server, g_user_mqtt.port);
-        return EC_OK;
+        uint8_t poll;
+        for(poll = 0; poll < 5; poll++)
+        {
+            trea_delay_ms(1000);
+            if(EC_SendCmd("AT+QMTCONN?\r\n", "+QMTCONN: 1,3", APP_AT_TIMEOUT_SHORT) == EC_OK)
+            {
+                printf_debug("[EC] UserMqtt: connected to %s:%d (poll %d)\r\n",
+                             g_user_mqtt.server, g_user_mqtt.port, poll + 1);
+                return EC_OK;
+            }
+        }
     }
 
-    printf_debug("[EC] UserMqtt: connect failed (state != 3)\r\n");
+    printf_debug("[EC] UserMqtt: connect failed after 5s polling\r\n");
     return EC_ERROR;
 }
 

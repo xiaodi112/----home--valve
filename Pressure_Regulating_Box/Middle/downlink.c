@@ -115,6 +115,9 @@ static const CmdMap s_cmd_map[] = {
     {"valve_get",         "valve_status",    "1",     NULL},
     {"closeoropen_get",   "closeoropen",     "",      NULL},
     {"closeoropen_set",   "closeoropen",     "1",     NULL},
+    // 表号
+    {"table_get",         "table",           "",      NULL},
+    {"table_set",         "table",           NULL,    "table\",\"value\""},
 };
 #define CMD_MAP_COUNT (sizeof(s_cmd_map) / sizeof(s_cmd_map[0]))
 
@@ -155,6 +158,8 @@ void publish_upload_summary(void)
     static char v_buf[8];
     static char va_buf[4];
 	static volatile char user_state = 0;
+	char rsrp_buf[8] = {0}, sinr_buf[8] = {0};
+	int rsrp = 0, sinr = 0;
     JsonBuilder jb;
 	
 	
@@ -166,7 +171,16 @@ void publish_upload_summary(void)
     // 2. 信号强度
     csq_buf[0] = '\0';
     EC801E_QueryCSQ(csq_buf, sizeof(csq_buf));
+	
+	 if(EC801E_QueryQCSQ(&rsrp, &sinr) == EC_OK)
+        {
+            snprintf(rsrp_buf, sizeof(rsrp_buf), "%d", rsrp);
+            snprintf(sinr_buf, sizeof(sinr_buf), "%d", sinr);
+        }
     jb_add_str(&jb, "csq", csq_buf, s_ts);
+	jb_add_str(&jb, "csq_csq", csq_buf, s_ts);
+	jb_add_str(&jb, "csq_rsrp", rsrp_buf, s_ts);
+    jb_add_str(&jb, "csq_sinr", sinr_buf, s_ts);
 
     // 4. 压力+温度状态
     {
@@ -640,7 +654,17 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
     else if(strcmp(id_val, "get_sim") == 0)
     {
         char iccid[32] = {0}, csq[8] = {0}, imei_buf[24] = {0};
+        char rsrp_buf[8] = {0}, sinr_buf[8] = {0}, cereg_buf[4] = {0};
+        int rsrp = 0, sinr = 0;
+        uint8_t cereg = 0;
         EC801E_QueryCSQ(csq, sizeof(csq));
+        if(EC801E_QueryQCSQ(&rsrp, &sinr) == EC_OK)
+        {
+            snprintf(rsrp_buf, sizeof(rsrp_buf), "%d", rsrp);
+            snprintf(sinr_buf, sizeof(sinr_buf), "%d", sinr);
+        }
+        EC801E_QueryCEREG(&cereg);
+        snprintf(cereg_buf, sizeof(cereg_buf), "%d", cereg);
         EC801E_QueryICCID(iccid, sizeof(iccid));
         EC801E_QueryIMEI(imei_buf, sizeof(imei_buf));
         if(EC801E_EnsureConnected() == EC_OK)
@@ -648,6 +672,10 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             rtc_get_time_str(ts_buf, sizeof(ts_buf));
             jb_begin(&jb, json_buf, sizeof(json_buf));
             jb_add_str(&jb, "csq", csq, ts_buf);
+			jb_add_str(&jb, "csq_csq", csq, ts_buf);
+            jb_add_str(&jb, "csq_rsrp", rsrp_buf, ts_buf);
+            jb_add_str(&jb, "csq_sinr", sinr_buf, ts_buf);
+            jb_add_str(&jb, "cereg", cereg_buf, ts_buf);
             jb_add_str(&jb, "soft-version", APP_FIRMWARE_VERSION, ts_buf);
             jb_add_str(&jb, "ICCID", iccid, ts_buf);
             jb_add_str(&jb, "IMEI", imei_buf, ts_buf);
@@ -1079,7 +1107,11 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
         const char *vs = valve_get_status();
         printf_debug("[SM] valve_get: %s\r\n", vs);
         if(EC801E_EnsureConnected() == EC_OK)
+        {
             EC801E_PublishResponse("valve_control", vs);
+            trea_delay_ms(300);
+            publish_feedback(25);
+        }
     }
     else if(strcmp(id_val, "closeoropen") == 0)
     {
@@ -1116,6 +1148,58 @@ static void process_downlink_cmd(const char *id_val, const char *cmd_val, const 
             EC801E_PublishRawJson(json_buf);
             trea_delay_ms(300);
             publish_feedback(cmd_val[0] != '\0' ? 22 : 21);
+        }
+    }
+    else if(strcmp(id_val, "table") == 0)
+    {
+        // ---- 表号 get/set ----
+        if(cmd_val[0] != '\0')
+        {
+            // SET: 替换 client_id 中第2段(设备ID/表号)
+            // 格式: "<前缀>&<表号>&<产品ID>&<序号>"
+            char new_id[MQTT_FIELD_MAX];
+            const char *src = g_mqtt.client_id;
+            const char *amp1 = strchr(src, '&');
+            if(amp1)
+            {
+                const char *amp2 = strchr(amp1 + 1, '&');
+                if(amp2)
+                {
+                    // 拼接: 前缀部分 + & + 新表号 + 后续(&产品ID&序号)
+                    uint16_t prefix_len = (uint16_t)(amp1 - src + 1); // 包含第一个&
+                    memcpy(new_id, src, prefix_len);
+                    new_id[prefix_len] = '\0';
+                    strncat(new_id, cmd_val, MQTT_FIELD_MAX - prefix_len - 1);
+                    strncat(new_id, amp2, MQTT_FIELD_MAX - strlen(new_id) - 1);
+                    new_id[MQTT_FIELD_MAX - 1] = '\0';
+                    strncpy(g_mqtt.client_id, new_id, MQTT_FIELD_MAX - 1);
+                    g_mqtt.client_id[MQTT_FIELD_MAX - 1] = '\0';
+                    derive_topic_from_client_id();
+                    config_save_mqtt();
+                    printf_debug("[SM] table set: %s\r\n", g_mqtt.client_id);
+                }
+            }
+        }
+        // 上报当前表号 (提取client_id第2段)
+        if(EC801E_EnsureConnected() == EC_OK)
+        {
+            char table_val[MQTT_FIELD_MAX] = {0};
+            const char *a1 = strchr(g_mqtt.client_id, '&');
+            if(a1)
+            {
+                const char *a2 = strchr(a1 + 1, '&');
+                uint16_t len = a2 ? (uint16_t)(a2 - a1 - 1) : (uint16_t)strlen(a1 + 1);
+                if(len >= MQTT_FIELD_MAX) len = MQTT_FIELD_MAX - 1;
+                memcpy(table_val, a1 + 1, len);
+                table_val[len] = '\0';
+            }
+            rtc_get_time_str(ts_buf, sizeof(ts_buf));
+            jb_begin(&jb, json_buf, sizeof(json_buf));
+            jb_add_str(&jb, "table", table_val, ts_buf);
+            jb_end(&jb);
+            EC801E_PublishRawJson(json_buf);
+            trea_delay_ms(300);
+            publish_feedback(cmd_val[0] != '\0' ? 27 : 26);
         }
     }
     else

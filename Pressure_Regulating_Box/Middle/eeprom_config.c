@@ -759,7 +759,7 @@ uint16_t config_get_keepalive(void)
 // �?clientId "<前缀>&<设备ID>&<产品ID>&<序号>" �?分隔提取
 // 前缀可变(S/E/...), 取seg[1]=设备ID, seg[2]=产品ID
 // 生成 topic_up = "/<产品ID>/<设备ID>/property/post"
-static void derive_topic_from_client_id(void)
+void derive_topic_from_client_id(void)
 {
     const char *p = g_mqtt.client_id;
     const char *seg[4] = {0};   // &分隔的段

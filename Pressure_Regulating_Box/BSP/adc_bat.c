@@ -1,7 +1,7 @@
 #include "adc_bat.h"
 
 // ADC参考电压 3.0V, 12位分辨率
-#define ADC_VREF        3.3f
+#define ADC_VREF        3.0f
 #define ADC_RESOLUTION  4095.0f
 
 // 分压比: R3=2M, R5=2M → V_BAT = V_ADC * (R3+R5)/R5 = V_ADC * 2
