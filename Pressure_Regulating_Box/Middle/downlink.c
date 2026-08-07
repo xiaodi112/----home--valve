@@ -9,7 +9,7 @@
 #include "eeprom_config.h"
 #include "app_config.h"
 #include "threshold.h"
-#include "sensor_buffer.h"
+#include "sensor_record.h"
 #include "PT_304_35.h"
 #include "main.h"
 #include "adc_bat.h"

@@ -15,13 +15,13 @@
 
 #define M24M01_BASE_ADDR   0xA0    // 基础设备地址 1010_00_0_0 (E2=0,E1=0)
 #define M24M01_PAGE_SIZE   32     // 页大�?56字节
-#define M24M01_TOTAL_SIZE  8192  // 总容�?28KB
+#define M24M01_TOTAL_SIZE  131072  // 总容�?28KB
 #define M24M01_WRITE_TIME  5       // 写周�?5ms
 
 // 根据17位地址计算设备地址字节（A16编入bit1�?
-#define M24M01_DEV_ADDR(full_addr)  (M24M01_BASE_ADDR)
+#define M24M01_DEV_ADDR(full_addr)  (M24M01_BASE_ADDR | ((((full_addr) >> 16) & 0x01) << 1))
 // 取高字节字地址 A15~A8
-#define M24M01_ADDR_HI(full_addr)   ((uint8_t)(((full_addr) >> 8) & 0x1F))
+#define M24M01_ADDR_HI(full_addr)   ((uint8_t)(((full_addr) >> 8) & 0xFF))
 // 取低字节字地址 A7~A0
 #define M24M01_ADDR_LO(full_addr)   ((uint8_t)((full_addr) & 0xFF))
 

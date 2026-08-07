@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include "gd32l23x.h"
 #include "PT_304_35.h"
-#include "sensor_buffer.h"
+#include "sensor_record.h"
 #include "threshold.h"
 
 // ==================== 状态码 ====================

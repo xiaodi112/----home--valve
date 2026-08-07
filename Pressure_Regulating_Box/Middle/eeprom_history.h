@@ -18,12 +18,34 @@
  */
 
 // ==================== 地址定义 ====================
-#define EE_HIST_BASE          0x0800   // 历史区起始地址
-#define EE_HIST_HEADER_ADDR   0x0800   // 管理头地址 (32B)
-#define EE_HIST_DATA_ADDR     0x0820   // 数据区起始地址
-#define EE_HIST_END_ADDR      0x1FFF   // EEPROM末尾
-#define EE_HIST_RECORD_SIZE   32       // 每条记录字节数 (= 页大小)
-#define EE_HIST_MAX_RECORDS   191      // (0x1FFF - 0x0820 + 1) / 32 = 191
+/* ==================== EEPROM partition (per chip) ====================
+ * AT24C64 (8KB) : config 0x000~0x7FF (2KB) + history 0x800~0x1FFF (6KB/191 rec)
+ * M24M01 (128KB): config 0x000~0xFFF (4KB) + static-leak reserved 0x1000~0x5AFF
+ *                 (600 rec x 32B) + history 0x5B00~0x1FFFF (~3367 rec)
+ */
+#define EE_HIST_RECORD_SIZE   32       /* record size = page size */
+
+#if defined(EEPROM_DRV_AT24C64)
+#define EE_HIST_BASE          0x0800
+#define EE_HIST_HEADER_ADDR   0x0800
+#define EE_HIST_DATA_ADDR     0x0820
+#define EE_HIST_END_ADDR      0x1FFF
+#define EE_HIST_MAX_RECORDS   191
+#else   /* M24M01: 128KB full range */
+#define EE_HIST_BASE          0x5B00   /* after config(4KB)+sideleak(600x32B) */
+#define EE_HIST_HEADER_ADDR   0x5B00
+#define EE_HIST_DATA_ADDR     0x5B20
+#define EE_HIST_END_ADDR      0x1FFFF
+#define EE_HIST_MAX_RECORDS   3367     /* (0x1FFFF-0x5B20+1)/32 */
+#endif
+
+/* Static leak reserved region (M24M01 only; feature not implemented yet) */
+#if defined(EEPROM_DRV_M24M01)
+#define EE_SIDELEAK_BASE      0x1000   /* after 4KB config */
+#define EE_SIDELEAK_RECORDS   600
+#define EE_SIDELEAK_SIZE      (EE_SIDELEAK_RECORDS * EE_HIST_RECORD_SIZE)
+#endif
+
 
 // ==================== 管理头 Magic ====================
 #define EE_HIST_MAGIC         0xDA7A   // "DATA" 谐音

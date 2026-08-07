@@ -10,6 +10,7 @@
  */
 
 #include "eeprom_config.h"
+#include "app_config.h"
 /* EEPROM chip driver selection (macro in app_config.h): M24M01 / AT24C64 */
 #if defined(EEPROM_DRV_AT24C64)
 #include "at24c64.h"

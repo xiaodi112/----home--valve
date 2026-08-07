@@ -10,6 +10,7 @@
  */
 
 #include "eeprom_history.h"
+#include "app_config.h"
 /* EEPROM chip driver selection (macro in app_config.h): M24M01 / AT24C64 */
 #if defined(EEPROM_DRV_AT24C64)
 #include "at24c64.h"
@@ -23,7 +24,7 @@
 #define EE_WRITE_BYTE(addr, data)     M24M01_WriteByte((addr), (data))
 #endif
 #include "tim.h"
-#include "sensor_buffer.h"
+#include "sensor_record.h"
 #include "usart.h"
 #include <string.h>
 #include <stdio.h>
@@ -117,7 +118,7 @@ static void get_bcd_timestamp(uint8_t *ts_bcd)
 }
 
 // ==================== 内部: 计算记录EEPROM地址 ====================
-static uint16_t record_addr(uint16_t slot)
+static uint32_t record_addr(uint16_t slot)
 {
     return EE_HIST_DATA_ADDR + (uint16_t)(slot * EE_HIST_RECORD_SIZE);
 }
@@ -126,10 +127,17 @@ static uint16_t record_addr(uint16_t slot)
 
 void ee_hist_init(void)
 {
-    // 每次上电清空历史区, 从第一条开始记录
-    // (EEPROM作为唯一存储, 上电即为新周期起点)
-    printf_debug("[EE_HIST] Power-on reset, formatting...\r\n");
-    history_format();
+    /* Power-on keeps existing history (power-loss resume);
+     * format only when header invalid (magic/CRC/range) */
+    if(header_load() == 0)
+    {
+        printf_debug("[EE_HIST] power-on, existing history kept (%d rec)\r\n", s_hdr.count);
+    }
+    else
+    {
+        printf_debug("[EE_HIST] header invalid, formatting...\r\n");
+        history_format();
+    }
     s_inited = 1;
 }
 
@@ -156,7 +164,7 @@ void ee_hist_push(float pressure, float temperature,
     rec.crc8 = crc8_calc((const uint8_t *)&rec, EE_HIST_RECORD_SIZE - 1);
 
     // 写入当前slot (恰好32字节 = 1页写入)
-    uint16_t addr = record_addr(s_hdr.head);
+    uint32_t addr = record_addr(s_hdr.head);
     EE_WRITE(addr, (const uint8_t *)&rec, EE_HIST_RECORD_SIZE);
 
     // 更新环形指针
@@ -182,7 +190,7 @@ uint8_t ee_hist_read(uint16_t index, EeHistRecord_t *out)
 
     // 计算实际slot
     uint16_t slot = (s_hdr.tail + index) % EE_HIST_MAX_RECORDS;
-    uint16_t addr = record_addr(slot);
+    uint32_t addr = record_addr(slot);
 
     EE_READ(addr, (uint8_t *)out, EE_HIST_RECORD_SIZE);
 

@@ -804,12 +804,12 @@
               <FileType>1</FileType>
               <FilePath>..\..\..\Drivers\ble_ota.c</FilePath>
             </File>
-          
-              <File>
-                <FileName>at24c64.c</FileName>
-                <FileType>1</FileType>
-                <FilePath>..\..\..\Drivers\at24c64.c</FilePath>
-              </File></Files>
+            <File>
+              <FileName>at24c64.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\Drivers\at24c64.c</FilePath>
+            </File>
+          </Files>
         </Group>
         <Group>
           <GroupName>::CMSIS</GroupName>

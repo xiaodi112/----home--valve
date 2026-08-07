@@ -35,7 +35,7 @@
 #include "main.h"
 #include "adc_bat.h"
 #include "i2c_sensor.h"
-#include "sensor_buffer.h"
+#include "sensor_record.h"
 #include "threshold.h"
 #include "ota_app.h"
 #include "slcd_seg.h"
