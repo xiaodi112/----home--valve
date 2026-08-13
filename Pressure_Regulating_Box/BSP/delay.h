@@ -1,4 +1,4 @@
-﻿#ifndef TREA_TIME_H
+#ifndef TREA_TIME_H
 #define TREA_TIME_H
 
 #include <stdint.h>

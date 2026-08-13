@@ -1,19 +1,19 @@
 /**
  * @file main.c
- * @brief 家用阀门物联网控制�?�?状态机驱动低功耗主程序
+ * @brief 家用阀门物联网控制器 + 状态机驱动低功耗主程序
  *
- * 架构: MQTT持久连接 + MCU深休�?+ LPUART唤醒接收下发
+ * 架构: MQTT持久连接 + MCU深休眠 + LPUART唤醒接收下发
  *
- * 状态机 (7个状�?:
- *   STATE_INIT     �?上电初始�?MQTT连接+订阅+首次上报 �?STATE_SLEEP
- *   STATE_SLEEP    �?设闹�?深休�?模块QSCLK保持MQTT) �?STATE_WAKEUP
- *   STATE_WAKEUP   �?恢复外设+判断唤醒�?
- *                     RTC闹钟 �?STATE_COLLECT
- *                     LPUART  �?STATE_DOWNLINK
- *   STATE_COLLECT  �?采集+阈值检�?存入缓冲�?�?STATE_UPLOAD/ALARM/SLEEP
- *   STATE_UPLOAD   �?批量逐条上报+清空缓冲�?�?STATE_SLEEP
- *   STATE_DOWNLINK �?读取+处理MQTT下发指令+立即上报结果 �?STATE_SLEEP
- *   STATE_ALARM    �?5次重采确�?报警上报 �?STATE_SLEEP
+ * 状态机 (7个状态):
+ *   STATE_INIT     → 上电初始化 → MQTT连接+订阅+首次上报 → STATE_SLEEP
+ *   STATE_SLEEP    → 设闹钟 → 深休眠 → 模块QSCLK保持MQTT) → STATE_WAKEUP
+ *   STATE_WAKEUP   → 恢复外设+判断唤醒源
+ *                     RTC闹钟 → STATE_COLLECT
+ *                     LPUART  → STATE_DOWNLINK
+ *   STATE_COLLECT  → 采集+阈值检查 → 存入缓冲区 → STATE_UPLOAD/ALARM/SLEEP
+ *   STATE_UPLOAD   → 批量逐条上报+清空缓冲区 → STATE_SLEEP
+ *   STATE_DOWNLINK → 读取+处理MQTT下发指令+立即上报结果 → STATE_SLEEP
+ *   STATE_ALARM    → 5次重采确认 → 报警上报 → STATE_SLEEP
  */
 
 #include "gd32l23x.h"
@@ -46,7 +46,7 @@
 #include "json_builder.h"
 #include "eeprom_history.h"
 
-// ==================== 状态定�?====================
+// ==================== 状态定义 ====================
 typedef enum {
     STATE_INIT = 0,
     STATE_SLEEP,
@@ -61,25 +61,25 @@ typedef enum {
 // ==================== 全局变量 ====================
 SensorContext_t g_sensor = { .last_pressure_collect = -1.0f, .last_pressure_realtime = -1.0f, .last_pressure_collect2 = -1.0f, .last_pressure_realtime2 = -1.0f, .prev_online = 1, .offline_cnt = 0, .online_cnt = 0, .prev_online2 = 1, .offline_cnt2 = 0, .online_cnt2 = 0, .last_normal_voltage = 3.6f };
 
-#define SENSOR_OFFLINE_DEBOUNCE  3   // 连续N次离线才确认状态变�?
-#define SENSOR_ONLINE_DEBOUNCE   2   // 连续N次上线才确认状态变�?(防接触不良抖�?
+#define SENSOR_OFFLINE_DEBOUNCE  3   // 连续N次离线才确认状态变化
+#define SENSOR_ONLINE_DEBOUNCE   2   // 连续N次上线才确认状态变化(防接触不良抖动)
 #define	one_by_one_delay		 900	//批量逐条延时
 
 static volatile uint16_t wakeup_count = 0;
 static AppState_t app_state = STATE_INIT;
 static uint8_t dot_uploaded_mask[3] = {0};
 static uint16_t dot_uploaded_day = 0xFFFF;  // RTC day of uploaded bitmap (cross-day reset)  // dot pattern: uploaded-hour bitmap
-// valve_alarm_closed / valve_pre_alarm_order 已移�?g_* 全局 (EEPROM 持久�? OTA 重启后可恢复), �?eeprom_config.h
-uint8_t voltage_low_power = 0;              // 低电压省电模�? �?:00/18:00上报
+// valve_alarm_closed / valve_pre_alarm_order 已移至 g_* 全局 (EEPROM 持久化, OTA 重启后可恢复), 见 eeprom_config.h
+uint8_t voltage_low_power = 0;              // 低电压省电模式; 8:00/18:00上报
 uint8_t fourG_user_off = 0;                 // 用户主动关机4G标志(阻止do_wakeup盲目恢复PD9)
 static uint8_t fourG_init_failed = 0;       // 4G注网失败标志(阻止do_sleep保持4G供电, 下次上报周期重试)
 static uint8_t fourG_weak_signal = 0;       // 弱信号断电标志(long模式下CSQ过低, 暂时按需冷启动)
 #define CSQ_WEAK_THRESHOLD  8               // CSQ<此值触发断电省电(8≈-97dBm)
-static uint8_t vlp_uploaded_this_hour = 0;  // 低电压模�? 防止同一小时重复上报
-ThresholdResult_t last_realtime_alarm = THRESHOLD_OK;          // 实时模式防重复报�?
-static uint32_t g_ble_on_hhmmss = 0;                          // BLE开启时的RTC时间 (HHMMSS), 用于60s未连接超时自动关闭�?
-static uint8_t g_is_minimal_wakeup = 0;            // 标志：是否为纯周期传感器采集的最简唤醒状�?
-uint8_t g_need_adc_sampling = 1;                   // 标志：当前周期是否需要进行电池电压采�?
+static uint8_t vlp_uploaded_this_hour = 0;  // 低电压模式: 防止同一小时重复上报
+ThresholdResult_t last_realtime_alarm = THRESHOLD_OK;          // 实时模式防重复报警
+static uint32_t g_ble_on_hhmmss = 0;                          // BLE开启时的RTC时间 (HHMMSS), 用于60s未连接超时自动关闭
+static uint8_t g_is_minimal_wakeup = 0;            // 标志：是否为纯周期传感器采集的最简唤醒状态
+uint8_t g_need_adc_sampling = 1;                   // 标志：当前周期是否需要进行电池电压采样
 static uint16_t last_grid_collect_min = 0xFFFF;    // 标志：上一次执行周期采集的分钟戳，防止在同一采集整点多次触发
 
 // ==================== 定时开关阀 当日执行标志 ====================
@@ -90,7 +90,7 @@ volatile uint8_t g_timing_pending = 0;   /* timing valve pending (set by RTC ISR
 volatile uint8_t g_timing_alarm_set = 0; /* current RTC alarm is a timing-valve alarm */
 
 // ==================== LCD 延时关闭 ====================
-uint8_t  g_lcd_active     = 0;      // LCD当前是否在显�?(运行�? 区别于产品开关g_lcd_enabled)
+uint8_t  g_lcd_active     = 0;      // LCD当前是否在显示(运行状态), 区别于产品开关g_lcd_enabled)
 static uint32_t g_lcd_on_hhmmss = 0; // LCD被点亮时的RTC时间 (HHMMSS格式)
 #define LCD_DISPLAY_TIMEOUT_SEC  60  // LCD持续显示秒数
 
@@ -119,7 +119,7 @@ void lcd_shutdown(void)
     slcd_disable();
 //    rcu_periph_clock_disable(RCU_SLCD);
 
-    // 将SLCD全部COM/SEG引脚设为模拟输入, 与无LCD产品状态完全一�?
+    // 将SLCD全部COM/SEG引脚设为模拟输入, 与无LCD产品状态完全一致
     rcu_periph_clock_enable(RCU_GPIOA);
     rcu_periph_clock_enable(RCU_GPIOB);
     rcu_periph_clock_enable(RCU_GPIOC);
@@ -138,6 +138,8 @@ void lcd_shutdown(void)
 
 static void lcd_check_timeout(void)
 {
+#if LCD_LOCK_ENABLED
+    /* LCD常亮模式: 取消60s超时, 不再lcd_shutdown关闭 */
     if(!g_lcd_active) return;
     uint32_t now_sec = hhmmss_to_seconds(rtc_get_hhmmss());
     uint32_t on_sec  = hhmmss_to_seconds(g_lcd_on_hhmmss);
@@ -145,19 +147,23 @@ static void lcd_check_timeout(void)
     if(now_sec >= on_sec)
         elapsed = now_sec - on_sec;
     else
-        elapsed = (86400 - on_sec) + now_sec;  // 跨午�?
+        elapsed = (86400 - on_sec) + now_sec;  // 跨午夜
     if(elapsed >= LCD_DISPLAY_TIMEOUT_SEC)
         lcd_shutdown();
+#else
+    /* LCD常亮模式: 常亮不超时, 保持开启 */
+    (void)0;
+#endif
 }
 
 // ==================== 模块共享 JSON 上报缓冲 ====================
-// 多处 pressure_status / temp_status / rtu_have 上报顺序使用, 共用一�?RAM, 节省 ~1.7KB
-// 每个 publish 块完整执�?(生成时间戳→snprintf→PublishRawJson) 后下一块再�? 不嵌�?
-static char s_status_json[384];   // ps_json / ts_json / rtu_json 公用 (4字段rtu�?80字节)
+// 多处 pressure_status / temp_status / rtu_have 上报顺序使用, 共用一块RAM, 节省 ~1.7KB
+// 每个 publish 块完整执行(生成时间戳→snprintf→PublishRawJson) 后下一块再用, 不嵌套
+static char s_status_json[384];   // ps_json / ts_json / rtu_json 公用 (4字段rtu上报80字节)
 static char s_status_ts[32];      // ps_ts / ts_ts / rtu_ts / rt_ts 公用
 
-// 单字段状态上�? 生成时间�?�?构建 [{"id","value","ts","remark"}] �?PublishRawJson
-// �?csq / pressure_status / temp_status 等单字段上报共用
+// 单字段状态上报: 生成时间戳→构建 [{"id","value","ts","remark"}] →PublishRawJson
+// 如 csq / pressure_status / temp_status 等单字段上报共用
 static void publish_status_field(const char *id, const char *value)
 {
     rtc_get_time_str(s_status_ts, sizeof(s_status_ts));
@@ -166,14 +172,14 @@ static void publish_status_field(const char *id, const char *value)
     EC801E_PublishRawJson(s_status_json);
 }
 
-// 传感器在�?离线消抖状态机 (进气�?raw + 出气�?raw2 共用; do_collect/do_realtime_check 复用)
-// 更新 offline_cnt/offline_cnt2; 消抖通过后更�?prev_online/prev_online2.
-// 返回: 1 = 发生经消抖确认的状态变�? 0 = 无变�?
+// 传感器在线/离线消抖状态机 (进气端raw + 出气端raw2 共用; do_collect/do_realtime_check 复用)
+// 更新 offline_cnt/offline_cnt2; 消抖通过后更新 prev_online/prev_online2.
+// 返回: 1 = 发生经消抖确认的状态变化 0 = 无变化
 static uint8_t sensor_debounce_update(uint8_t cur_online, uint8_t cur_online2)
 {
     uint8_t state_changed = 0;
 
-    // --- 进气�?(raw, PT304D #2) ---
+    // --- 进气端(raw, PT304D #2) ---
     if(cur_online && !g_sensor.prev_online)
     {
         g_sensor.offline_cnt = 0;
@@ -194,7 +200,7 @@ static uint8_t sensor_debounce_update(uint8_t cur_online, uint8_t cur_online2)
         g_sensor.online_cnt  = cur_online ? g_sensor.online_cnt : 0;
     }
 
-    // --- 出气�?(raw2, PT304D #1) --- 仅双传感器时参与消抖
+    // --- 出气端(raw2, PT304D #1) --- 仅双传感器时参与消抖
     if(g_sensor_count >= 2)
     {
         if(cur_online2 && !g_sensor.prev_online2)
@@ -220,7 +226,7 @@ static uint8_t sensor_debounce_update(uint8_t cur_online, uint8_t cur_online2)
 
     if(state_changed)
     {
-        // 仅在消抖通过后更�?prev 状�?
+        // 仅在消抖通过后更新 prev 状态
         if(cur_online != g_sensor.prev_online &&
            (cur_online  ? (g_sensor.online_cnt  >= SENSOR_ONLINE_DEBOUNCE)
                         : (g_sensor.offline_cnt >= SENSOR_OFFLINE_DEBOUNCE)))
@@ -245,7 +251,7 @@ static uint8_t sensor_debounce_update(uint8_t cur_online, uint8_t cur_online2)
 // ==================== 硬件恢复 ====================
 static void sys_init(void)
 {
-    /* 重定位中断向量表�?App 区起址 (Bootloader 跳转后必须设�? Cortex-M23 支持 VTOR) */
+    /* 重定位中断向量表至 App 区起址 (Bootloader 跳转后必须设置, Cortex-M23 支持 VTOR) */
     SCB->VTOR = OTA_APP_ADDR;
 
     systick_config();
@@ -267,17 +273,17 @@ static void sys_init(void)
     IIC_Init();
 	IIC_GPIO_Init1();
     adc_bat_init();
-    // PB5 (V4G_EN 4G电源) 状态由上方条件逻辑控制，此处不做覆�?
-    // PA5 (M_SLP 电机使能) �?valve_execute() 按需控制，此处不提前开�?
-    // PD4 (I2C 电子开�? 默认保持 LOW; 由各采集点按需 set/reset
+    // PB5 (V4G_EN 4G电源) 状态由上方条件逻辑控制，此处不做覆盖
+    // PA5 (M_SLP 电机使能) 由 valve_execute() 按需控制，此处不提前开启
+    // PD4 (I2C 电子开关) 默认保持 LOW; 由各采集点按需 set/reset
 
-    debug_rx_init();   // USART0 RX中断缓冲初始�?
+    debug_rx_init();   // USART0 RX中断缓冲初始化
 }
 
 // ==================== 前向声明 ====================
 static void ensure_full_init(void);
 
-// ==================== LCD信号强度更新 (4G在线时调�? 同时上报本端平台) ====================
+// ==================== LCD信号强度更新 (4G在线时调用, 同时上报本端平台) ====================
 static void lcd_update_csq(void)
 {
     char csq_buf[8] = {0};
@@ -591,12 +597,14 @@ static void vtiming_execute_and_report(const char *action)
     fourG_restore(was_online, ec_ok);
 }
 
-// ==================== 实时路径: 配置唤醒�?深休�?====================
+// ==================== 实时路径: 配置唤醒→深休眠 ====================
 static void realtime_enter_sleep(void)
 {
     uint8_t lpuart_enabled = 0;
 
-    gpio_bit_reset(GPIOD, GPIO_PIN_4);
+#if IIC_SWITCH_ENABLED
+    gpio_bit_reset(SW_IIC_GPIO_PORT, SW_IIC_GPIO_PIN);
+#endif
     rtc_alarm_wakeup_init();
     rtc_set_next_alarm_sec(g_real_frequency);
     g_timing_alarm_set = 0;   /* realtime alarm, timing handled per-cycle */
@@ -619,8 +627,8 @@ static void realtime_enter_sleep(void)
 }
 
 // ==================== 实时采集最小化唤醒路径 ====================
-// 仅初始化 SysTick + I2C + PD4, 采集传感�? 判断异常
-// 异常时立即重采确�? 确认后启4G上报; 正常则直接回�?
+// 仅初始化 SysTick + I2C + PD4, 采集传感器, 判断异常
+// 异常时立即重采确认, 确认后启4G上报; 正常则直接回睡
 // ==================== ==================== ====================
 static void do_realtime_check(void)
 {
@@ -632,18 +640,23 @@ static void do_realtime_check(void)
     // === 最小初始化 (时钟恢复) ===
     system_wakeup_reinit();
 
-    // 软件看门�? 实时采集路径�?do_sleep 循环直接调用(不经主循环分�?, 需独立使能
-    // SysTick 已由 system_wakeup_reinit 重新配置; 回睡�?enter_deepsleep_mode 会关�?
+    // 软件看门狗: 实时采集路径由 do_sleep 循环直接调用(不经主循环分发), 需独立使能
+    // SysTick 已由 system_wakeup_reinit 重新配置; 回睡时 enter_deepsleep_mode 会关闭
     swdt_enable(SWDT_TIMEOUT_MS);
 
-    // === 采集 (仅传感器, 不读ADC; PD4/IIC �?CollectAll 内部管理) ===
+    // === 采集 (仅传感器, 不读ADC; PD4/IIC 由 CollectAll 内部管理) ===
     PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
 
-    // === LCD超时检�?+ 采样周期刷新显示 ===
+    // === LCD超时检查 + 采样周期刷新显示 ===
     lcd_check_timeout();
+#if LCD_LOCK_ENABLED
     if(g_lcd_active) lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
+#else
+    /* LCD常亮模式: 每个采集周期自动翻一页 */
+    if(g_lcd_active) { lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage); lcd_ui_next_page(); }
+#endif
 
-    // === 传感器在�?离线状态变化检�?(带消�? 进气�?出气�? ===
+    // === 传感器在线/离线状态变化检查(带消抖, 进气端/出气端) ===
     {
         uint8_t cur_online  = (g_sensor.raw.err  == PT304D_OK) ? 1 : 0;
         uint8_t cur_online2 = (g_sensor.raw2.err == PT304D_OK) ? 1 : 0;
@@ -674,7 +687,7 @@ static void do_realtime_check(void)
                 fourG_restore(was_online, ec_ok);
             }
 
-            // 进气端离线时跳过阈值检�? 直接回睡
+            // 进气端离线时跳过阈值检查, 直接回睡
             if(!cur_online)
             {
                 g_sensor.last_pressure_realtime = g_sensor.raw.pressure;
@@ -685,25 +698,25 @@ static void do_realtime_check(void)
         }
         else if(!cur_online)
         {
-            // 持续离线(含消抖期�?, 不重复上�? 直接回睡
+            // 持续离线(含消抖期间), 不重复上报, 直接回睡
             realtime_enter_sleep();
             return;
         }
     }
 
-    // === 三重异常检�?===
-    // 实时路径不采 ADC: 传哨�?-1.0f (配合 check_voltage=0 + threshold_check 守卫) 明确"未采集电�?
+    // === 三重异常检查 ===
+    // 实时路径不采 ADC: 传入哨兵值-1.0f (配合 check_voltage=0 + threshold_check 守卫) 明确"未采集电压"
     // skip_mutation=1: 恢复判定时跳过突变检测, 避免压力回归正常时的变化量触发虚假突变报警
     result     = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, -1.0f, g_sensor.last_pressure_realtime, 0, 1);
     if(result == THRESHOLD_OK && g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
         result = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_realtime2, 1);
     sensor_err = (g_sensor.raw.err != PT304D_OK);
 
-    // === 正常 �?检查报警恢�?�?更新压力 �?直接回睡 ===
+    // === 正常 → 检查报警恢复 → 更新压力 → 直接回睡 ===
     if(result == THRESHOLD_OK && !sensor_err)
     {
-        // 报警恢复: 之前自动关阀, 现传感器正常 �?恢复阀门到关阀前状�?
-        // (�?do_collect 末尾恢复逻辑一�? 实时模式无需等待下一采集周期)
+        // 报警恢复: 之前自动关阀, 现传感器正常 → 恢复阀门到关阀前状态
+        // (与 do_collect 末尾恢复逻辑一致, 实时模式无需等待下一采集周期)
         if(g_valve_alarm_closed && !voltage_low_power)
         {
             const char *restore_action = (g_valve_pre_alarm_order == 1) ? "open" : "close";
@@ -743,7 +756,7 @@ static void do_realtime_check(void)
         }
 
         if(last_realtime_alarm != THRESHOLD_OK)
-            last_realtime_alarm = THRESHOLD_OK;   // 恢复正常, 清除防重复标�?
+            last_realtime_alarm = THRESHOLD_OK;   // 恢复正常, 清除防重复标记
 
         // 静态限值正常后, 补充突变检测 (skip_mutation=0)
         // 恢复上报已完成, 此处仅检测是否存在新的纯突变异常
@@ -771,7 +784,7 @@ static void do_realtime_check(void)
         return;
     }
 
-    // === 异常 �?立即重采确认 (3�? ===
+    // === 异常 → 立即重采确认 (3次) ===
     for(i = 0; i < APP_ALARM_RECHECK_COUNT; i++)
     {
         trea_delay_ms(APP_ALARM_RECHECK_DELAY_MS);
@@ -791,14 +804,14 @@ static void do_realtime_check(void)
 
     if(!still_abnormal)
     {
-        // 偶发抖动 �?回睡
+        // 偶发抖动 → 回睡
         g_sensor.last_pressure_realtime = g_sensor.raw.pressure;
         g_sensor.last_pressure_realtime2 = g_sensor.raw2.pressure;
         realtime_enter_sleep();
         return;
     }
 
-    // === 确认异常 �?记录防重复标�?===
+    // === 确认异常 → 记录防重复标记 ===
     last_realtime_alarm = result;
 
     // === 异常关阀 (安全动作, 不依赖4G通信) ===
@@ -844,33 +857,37 @@ static void do_sleep(void)
 
 
     gpio_bit_reset(GPIOA, GPIO_PIN_5);
-    gpio_bit_reset(GPIOD, GPIO_PIN_4);
+#if IIC_SWITCH_ENABLED
+    gpio_bit_reset(SW_IIC_GPIO_PORT, SW_IIC_GPIO_PIN);
+#endif
 
     gpio_bit_reset(GPIOA, GPIO_PIN_2);
     gpio_bit_reset(GPIOA, GPIO_PIN_3);
     gpio_bit_reset(GPIOC, GPIO_PIN_4);
     gpio_bit_reset(GPIOC, GPIO_PIN_5);
     gpio_bit_reset(GPIOB, GPIO_PIN_8);
-    // PB9 = SLCD COM3, 不关�?
+    // PB9 = SLCD COM3, 不关闭
     // PB6/PB7(I2C总线2 SCL/SDA): 不主动拉低, 由 gpio_enter_low_power 切 Analog
     // 避免在传感器断电过程中产生异常 I2C 信号导致下次上电后总线锁死
 
+#if MOTOR_DRV_MODE == 0
     gpio_bit_reset(GPIOA, GPIO_PIN_6);
     gpio_bit_reset(GPIOA, GPIO_PIN_7);
+#endif
 
-    // 4G电源管理: 根据window pattern决定PB5(V4G_EN)状�?
-    // 低电压省电模�? 强制4G断电
+    // 4G电源管理: 根据window pattern决定PB5(V4G_EN)状态
+    // 低电压省电模式: 强制4G断电
     if(voltage_low_power)
     {
         gpio_bit_reset(GPIOB, GPIO_PIN_5);
     }
     else if(strcmp(g_window.pattern, "long") == 0)
     {
-        // long模式: 窗口内或end_result=1时保�?G (用户主动关机/弱信号除外)
+        // long模式: 窗口内或end_result=1时保持4G (用户主动关机/弱信号除外)
         if(!fourG_user_off && !fourG_init_failed && !fourG_weak_signal && (config_is_active_window() || g_window.end_result == 1))
             fourG_keep_on = 1;
         else
-            gpio_bit_reset(GPIOB, GPIO_PIN_5);  // long+er=0+窗口�?user_off/weak_signal: 4G断电
+            gpio_bit_reset(GPIOB, GPIO_PIN_5);  // long+er=0+窗口外: user_off/weak_signal: 4G断电
     }
     else
     {
@@ -878,8 +895,9 @@ static void do_sleep(void)
         gpio_bit_reset(GPIOB, GPIO_PIN_5);
     }
 
-    // === LCD 延时关闭: LCD仍在显示�? 先短休眠�?0秒超时再关闭 ===
-    // 实时模式(1-10s唤醒)�?do_realtime_check �?lcd_check_timeout() 自然处理, 此处跳过
+#if LCD_LOCK_ENABLED
+    // === LCD 延时关闭: LCD仍在显示时, 先短休眠, 60秒超时再关闭 ===
+    // 实时模式(1-10s唤醒): do_realtime_check + lcd_check_timeout() 自然处理, 此处跳过
     if(g_lcd_active && !g_real_enabled)
     {
         uint32_t now_sec = hhmmss_to_seconds(rtc_get_hhmmss());
@@ -916,8 +934,9 @@ static void do_sleep(void)
         lcd_shutdown();
         printf_debug("[SM] LCD off after timeout\r\n");
     }
+#endif /* LCD_LOCK_ENABLED */
 
-    // 设置RTC闹钟（紧贴深休眠前，防止闹钟时间已过�?
+    // 设置RTC闹钟（紧贴深休眠前，防止闹钟时间已过期）
     rtc_alarm_wakeup_init();
 
     // 定时阀门: 计算最近一个未执行的阀门事件距当前的秒数
@@ -987,7 +1006,7 @@ static void do_sleep(void)
         ri_exti_init();
     }
 
-    // PA12按键唤醒: 始终启用(用于手动开�?G)
+    // PA12按键唤醒: 始终启用(用于手动开启4G)
     button_exti_init();
 
     // BLE连接事件未处理(与按键同时唤醒), 回到WAKEUP处理
@@ -1016,7 +1035,7 @@ static void do_sleep(void)
         }
     }
 
-    // 深休眠前禁用DMA(深休眠期间DMA时钟被门�? 需清理状�?
+    // 深休眠前禁用DMA(深休眠期间DMA时钟被门控, 需清理状态)
     lpuart_dma_rx_disable();
 
     if(g_real_enabled)
@@ -1034,7 +1053,7 @@ static void do_sleep(void)
     // 实时采集循环: RTC秒级唤醒 → 检查是否到采集网格 → 否则最小采集回睡
     while(g_real_enabled && rtc_alarm_flag && !counter0 && !ri_wakeup_flag && !button_wakeup_flag && !ble_connect_wakeup_flag)
     {
-        // 最小时钟恢�?�?读RTC判断是否到达正常采集网格
+        // 最小时钟恢复 → 读RTC判断是否到达正常采集网格
         system_wakeup_reinit();
         rtc_register_sync_wait();
 
@@ -1044,7 +1063,7 @@ static void do_sleep(void)
                              + (uint16_t)((now_hhmmss / 100) % 100);
             uint8_t cur_sec = (uint8_t)(now_hhmmss % 100);
 
-            // 到达正常采集网格 (整分钟�?s容差, 且当前分钟未执行过采�? �?退出循�? 走完整STATE_WAKEUP
+            // 到达正常采集网格 (整分钟+5s容差, 且当前分钟未执行过采集 → 退出循环, 走完整STATE_WAKEUP
             if(g_interval.collect_interval_min > 0 &&
                (cur_min % g_interval.collect_interval_min) == 0 &&
                cur_sec < 6 &&
@@ -1094,17 +1113,17 @@ static void do_sleep(void)
             }
         }
 
-        // 非采集网�?�?最小化实时采集 (内部: 采集→判断→[可能上报]→设闹钟→深休眠→唤醒后返回)
+        // 非采集网格 → 最小化实时采集 (内部: 采集→判断→[可能上报]→设闹钟→深休眠→唤醒后返回)
         do_realtime_check();
-        // do_realtime_check 返回�? 新的唤醒标志已置�? while再次判断
+        // do_realtime_check 返回后, 新的唤醒标志已置位, while再次判断
     }
 
-    // 唤醒后立即转�?WAKEUP 状�?
+    // 唤醒后立即转入 WAKEUP 状态
     app_state = STATE_WAKEUP;
 }
 
 // ==================== 按键单按（短按）处理 ====================
-// 当用户短�?PA12（小�?秒释放）时调用。打印配置、当前实时传感器数据，并连接 4G 平台完整上报当时的状态�?
+// 当用户短按 PA12（小于1秒释放）时调用。打印配置、当前实时传感器数据，并连接 4G 平台完整上报当时的状态。
 static void do_button_short_press(void)
 {
     printf_debug("\r\n==================================================\r\n");
@@ -1194,7 +1213,7 @@ static void do_wakeup(void)
         
         system_wakeup_reinit();
         
-        // 极简采集初始�? Systick、Debug 串口发�? PD4(SW_IIC)/IIC 引脚�?PT304D_CollectAll 内部初始�?
+        // 极简采集初始化: Systick、Debug 串口发送, PD4(SW_IIC)/IIC 引脚由 PT304D_CollectAll 内部初始化
         systick_config();
 //        my_systick_config();
         trea_uart_init();
@@ -1211,9 +1230,9 @@ static void do_wakeup(void)
     }
     else if(button_wakeup_flag && counter0 == 0 && ri_wakeup_flag == 0)
     {
-        // === 按键唤醒 (快速检测路�?: 最小初始化, 跳过 sys_init() �?1s 延时 ===
-        // GPIO 状态在深休眠期间保�? PD0 仍为输入上拉, button_is_pressed() 可直接使�?
-        // 需要完整外设时�?ensure_full_init() 按需升级
+        // === 按键唤醒 (快速检测路径: 最小初始化, 跳过 sys_init() 的1s 延时 ===
+        // GPIO 状态在深休眠期间保持, PD0 仍为输入上拉, button_is_pressed() 可直接使用
+        // 需要完整外设时由 ensure_full_init() 按需升级
         g_is_minimal_wakeup = 1;
         g_need_adc_sampling = 1;
         
@@ -1234,25 +1253,25 @@ static void do_wakeup(void)
         system_wakeup_reinit();
         sys_init();
         
-        // 禁用按键EXTI(唤醒后立即禁止抨动重复触�?
+        // 禁用按键EXTI(唤醒后立即禁止抖动重复触发)
         button_exti_disable();
         
         // PB5(V4G_EN 4G电源)恢复: gpio_init默认PB5=LOW
-        // 低电压省电模�? 不恢�?G
-        // 用户主动关机: 不恢�?G(等待按键重新开�?
-        // 弱信号模式: 不恢�?G(下次上报冷启动)
-        // long模式: 窗口内或end_result=1时恢�?G供电
+        // 低电压省电模式: 不恢复4G
+        // 用户主动关机: 不恢复4G(等待按键重新开机)
+        // 弱信号模式: 不恢复4G(下次上报冷启动)
+        // long模式: 窗口内或end_result=1时恢复4G供电
         if(!voltage_low_power && !fourG_user_off && !fourG_init_failed && !fourG_weak_signal &&
            strcmp(g_window.pattern, "long") == 0 &&
            (config_is_active_window() || g_window.end_result == 1))
             gpio_bit_set(GPIOB, GPIO_PIN_5);
-        // 其余情况(VLP/user_off/weak_signal/short/dot/long+er=0+窗口�?: PB5保持LOW
+        // 其余情况(VLP/user_off/weak_signal/short/dot/long+er=0+窗口外): PB5保持LOW
         
         rtc_show_time();
         printf_debug("\r\n");
     }
 
-    // === 按键唤醒: 连按检�?+ 长按4G开�?===
+    // === 按键唤醒: 连按检测 + 长按4G开机 ===
     if(button_wakeup_flag)
     {
         printf_debug("[SM] WAKEUP: BUTTON\r\n");
@@ -1265,7 +1284,7 @@ static void do_wakeup(void)
 
         button_wakeup_flag = 0;
 
-        // LCD从关闭恢�? 本次按键仅激活屏�? 不做UI操作(翻页�?
+        // LCD从关闭恢复: 本次按键仅激活屏幕, 不做UI操作(翻页)
         if(lcd_was_off && g_lcd_active)
         {
             buzzer_beep(1, 200);
@@ -1274,27 +1293,27 @@ static void do_wakeup(void)
             return;
         }
 
-        // 消抖延时: �?0ms等机械前沿抖动结�?
+        // 消抖延时: 20ms等机械前沿抖动结束
         trea_delay_ms(20);
 
-        // 确认当前按键状�?
+        // 确认当前按键状态
         uint8_t is_short_press = 0;
 
         if(!button_is_pressed())
         {
-            // 20ms内已松开 �?短按
+            // 20ms内已松开 → 短按
             is_short_press = 1;
         }
         else
         {
-            // 按键仍持�? 检查是否长�?4s)
+            // 按键仍按住, 检查是否长按4s)
             uint8_t i;
             for(i = 0; i < 40; i++)
             {
                 trea_delay_ms(100);
                 if(!button_is_pressed())
                 {
-                    // 4s内松开 �?短按
+                    // 4s内松开 → 短按
                     is_short_press = 1;
                     break;
                 }
@@ -1312,7 +1331,7 @@ static void do_wakeup(void)
                 trea_delay_ms(20);
             trea_delay_ms(30);  // 松手消抖
 
-            // 500ms窗口内检测后续按�?
+            // 500ms窗口内检测后续按键
             while(press_count < 4)
             {
                 uint8_t got_press = 0;
@@ -1327,7 +1346,7 @@ static void do_wakeup(void)
                 }
 
                 if(!got_press)
-                    break;  // 500ms内无新按�? 结束计数
+                    break;  // 500ms内无新按键, 结束计数
 
                 press_count++;
                 // 等待本次按键松手
@@ -1388,17 +1407,17 @@ static void do_wakeup(void)
             return;
         }
 
-        // === 长按4s确认 �?4G开机联�?(需完整外设) ===
+        // === 长按4s确认 → 4G开机联网(需完整外设) ===
         ensure_full_init();
         printf_debug("[SM] BUTTON: 4s confirmed, powering on 4G\r\n");
         fourG_user_off = 0;  // 清除用户关机标志
         fourG_weak_signal = 0;  // 手动开机清除弱信号标志
         com_lpuart_init();
         trea_delay_ms(100);
-        EC801E_PowerOn();         // PD9 拉高 (idempotent, �?HIGH 时不影响)
+        EC801E_PowerOn();         // PD9 拉高 (idempotent, 已HIGH 时不影响)
         EC801E_InitAndConnect();
 
-        // 验证4G模块AT响应 + 上报开机状�?
+        // 验证4G模块AT响应 + 上报开机状态
         if(EC801E_EnsureConnected() == EC_OK)
         {
             fourG_init_failed = 0;  // 手动开机成功, 清除失败标志
@@ -1417,7 +1436,7 @@ static void do_wakeup(void)
             trea_delay_ms(100);
         trea_delay_ms(50);
 
-        // === 统一等待 20s 接收下行指令 (所有模�? ===
+        // === 统一等待 20s 接收下行指令 (所有模式) ===
         printf_debug("[SM] BUTTON: %s mode, waiting 20s for downlink...\r\n",
                      g_window.pattern);
         trea_delay_ms(20000);
@@ -1432,7 +1451,7 @@ static void do_wakeup(void)
         // === 模式相关收尾 ===
         if(strcmp(g_window.pattern, "long") == 0)
         {
-            // long模式: 保持4G在线 (do_sleep �?fourG_keep_on 路径接管)
+            // long模式: 保持4G在线 (do_sleep 的 fourG_keep_on 路径接管)
             EC801E_SetPSM(1);
             printf_debug("[SM] BUTTON: long mode, keep 4G online (PSM)\r\n");
         }
@@ -1504,10 +1523,10 @@ static void ensure_full_init(void)
 }
 
 // ==================== 上报调度判断 (do_collect / do_alarm 共用) ====================
-// 根据当前模式和时间判断是否需要批量上报历史数�? 设置 app_state
+// 根据当前模式和时间判断是否需要批量上报历史数据, 设置 app_state
 static void check_upload_schedule(void)
 {
-    // === 低电压省电模�? 覆盖正常上报调度, �?:00/18:00上报 ===
+    // === 低电压省电模式: 覆盖正常上报调度, 8:00/18:00上报 ===
     if(voltage_low_power)
     {
         uint32_t now_hhmmss = rtc_get_hhmmss();
@@ -1536,7 +1555,7 @@ static void check_upload_schedule(void)
         return;
     }
 
-    // 判断是否需要上�?(正常模式, 基于时间对齐)
+    // 判断是否需要上报(正常模式, 基于时间对齐)
     if(strcmp(g_window.pattern, "dot") == 0)
     {
         // dot pattern: any configured hour in 24h bitmap triggers upload once per day
@@ -1583,7 +1602,7 @@ static void check_upload_schedule(void)
     }
 }
 
-// ==================== 采集传感�?+ 阈值检�?====================
+// ==================== 采集传感器 + 阈值检查 ====================
 static void do_collect(void)
 {
     SensorRecord_t record;
@@ -1635,7 +1654,7 @@ static void do_collect(void)
         }
     }
 
-    // 记录本次正常周期采集的分钟戳，防止秒级高频实时监测循环在同一分钟内多次唤醒采�?
+    // 记录本次正常周期采集的分钟戳，防止秒级高频实时监测循环在同一分钟内多次唤醒采样
     {
         uint32_t now_hhmmss = rtc_get_hhmmss();
         last_grid_collect_min = (uint16_t)(now_hhmmss / 10000) * 60
@@ -1651,11 +1670,17 @@ static void do_collect(void)
                  g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.raw2.err,
                  g_need_adc_sampling);
 
-    // 实时模式关闭�? 采集周期兼作 LCD 刷新 (实时模式开启时�?do_realtime_check 刷新)
+    // 实时模式关闭时, 采集周期兼作 LCD 刷新 (实时模式开启时由 do_realtime_check 刷新)
+#if LCD_LOCK_ENABLED
     if(g_lcd_active && !g_real_enabled)
         lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
+#else
+    /* LCD常亮模式: 每个采集周期自动翻一页 */
+    if(g_lcd_active && !g_real_enabled)
+    { lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage); lcd_ui_next_page(); }
+#endif
 
-    // ========== 传感器状态变化检�?(带消�? 进气�?出气�? ==========
+    // ========== 传感器状态变化检查(带消抖, 进气端/出气端) ==========
     {
         uint8_t cur_online  = (g_sensor.raw.err  == PT304D_OK) ? 1 : 0;
         uint8_t cur_online2 = (g_sensor.raw2.err == PT304D_OK) ? 1 : 0;
@@ -1682,7 +1707,7 @@ static void do_collect(void)
                 fourG_restore(was_online, ec_ok);
             }
 
-            // 进气端离线时跳过阈值检查和数据缓存, 直接回休�?
+            // 进气端离线时跳过阈值检查和数据缓存, 直接回休眠
             if(!cur_online)
             {
                 app_state = STATE_SLEEP;
@@ -1691,7 +1716,7 @@ static void do_collect(void)
         }
         else if(!cur_online)
         {
-            // 持续离线(含消抖期�? �?不重复上�? 跳过采集直接回休�?
+            // 持续离线(含消抖期) → 不重复上报, 跳过采集直接回休眠
             printf_debug("[SM] SENSOR still OFFLINE (cnt=%d/%d cnt2=%d/%d), skip\r\n",
                          g_sensor.offline_cnt, SENSOR_OFFLINE_DEBOUNCE,
                          g_sensor.offline_cnt2, SENSOR_OFFLINE_DEBOUNCE);
@@ -1700,7 +1725,7 @@ static void do_collect(void)
         }
     }
 
-    // 阈值检�?
+    // 阈值检查
     result = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, 0, 0);
     // 第二路阈值检查 (仅在双传感器且第二路在线时)
     if(result == THRESHOLD_OK && g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
@@ -1708,7 +1733,7 @@ static void do_collect(void)
 
     if(result != THRESHOLD_OK)
     {
-        // 低电压省电模�? 已进入过VPROTECT报警, 后续VPROTECT不再重复报警
+        // 低电压省电模式: 已进入过VPROTECT报警, 后续VPROTECT不再重复报警
         if(voltage_low_power && result == THRESHOLD_VPROTECT)
         {
             printf_debug("[SM] VLP: still low voltage, skip alarm\r\n");
@@ -1716,7 +1741,7 @@ static void do_collect(void)
         }
         else
         {
-            // 首次VPROTECT会进入ALARM(关阀+报警), 同时标记低电压模�?
+            // 首次VPROTECT会进入ALARM(关阀+报警), 同时标记低电压模式
             if(result == THRESHOLD_VPROTECT && !voltage_low_power)
             {
                 voltage_low_power = 1;
@@ -1730,15 +1755,15 @@ static void do_collect(void)
         }
     }
 
-    // 低电压恢�? 以下任一条件触发退�?VLP
+    // 低电压恢复: 以下任一条件触发退出VLP
     //   (a) 电压回到 vprotect 以上 (正常恢复)
-    //   (b) spupower.switch 被用户关�?(不再执行电压检�? 不能残留 VLP 状态锁�?
+    //   (b) spupower.switch 被用户关闭(不再执行电压检查, 不能残留 VLP 状态锁定)
     if(voltage_low_power && (!g_spupower.enabled || g_sensor.voltage >= g_spupower.protect + 0.15f))
     {
         voltage_low_power = 0;
         config_save_ext();
         vlp_uploaded_this_hour = 0;
-        vlp_just_exited = 1;     // 标记: 本次 collect �?VLP 已退�? 需�?normal 上报
+        vlp_just_exited = 1;     // 标记: 本次 collect 时 VLP 已退出, 需 normal 上报
         if(!g_spupower.enabled)
             printf_debug("[SM] VLP: spupower disabled by user, exiting low power mode\r\n");
         else
@@ -1746,8 +1771,8 @@ static void do_collect(void)
                          g_sensor.voltage, g_spupower.protect);
     }
 
-    // 恢复正常上报: (a) 之前报警自动关阀 �?还原阀�?+ alarm:normal
-    //               (b) VLP 刚退�?�?alarm:normal (即使没触发关阀, 也通知平台脱离低压保护)
+    // 恢复正常上报: (a) 之前报警自动关阀 → 还原阀门 + alarm:normal
+    //               (b) VLP 刚退出 → alarm:normal (即使没触发关阀, 也通知平台脱离低压保护)
     // 共享 4G 启停, 避免重复 cold-start
     if((g_valve_alarm_closed || vlp_just_exited) && !voltage_low_power)
     {
@@ -1755,7 +1780,7 @@ static void do_collect(void)
         const char *restore_action = NULL;
         const char *vr = NULL;
 
-        // (a) 阀门恢�?(仅当之前自动关阀时执�?
+        // (a) 阀门恢复(仅当之前自动关阀时执行)
         if(g_valve_alarm_closed)
         {
             restore_action = (g_valve_pre_alarm_order == 1) ? "open" : "close";
@@ -1763,7 +1788,7 @@ static void do_collect(void)
                          restore_action, g_valve_pre_alarm_order);
             vr = valve_execute(restore_action, 0);
             g_valve_alarm_closed = 0;
-            config_save_ext();   // 持久�? 清除恢复标志
+            config_save_ext();   // 持久化, 清除恢复标志
         }
         else if(vlp_just_exited)
         {
@@ -1787,7 +1812,7 @@ static void do_collect(void)
         }
     }
 
-    // 正常: 存入缓冲�?
+    // 正常: 存入缓冲区
     record.pressure = g_sensor.raw.pressure;
     record.temperature = g_sensor.raw.temperature;
     record.pressure2 = g_sensor.raw2.pressure;
@@ -1844,7 +1869,7 @@ static void do_alarm(void)
         }
     }
 
-    // 构造记�?
+    // 构造记录
     record.pressure = g_sensor.raw.pressure;
     record.temperature = g_sensor.raw.temperature;
     record.pressure2 = g_sensor.raw2.pressure;
@@ -1858,7 +1883,7 @@ static void do_alarm(void)
         // 确认报警
         record.flags = SENSOR_FLAG_ALARM;
 
-        // 判断报警类型 (�?do_realtime_check/downlink 共用 threshold_alarm_type_str)
+        // 判断报警类型 (与 do_realtime_check/downlink 共用 threshold_alarm_type_str)
         alarm_type = threshold_alarm_type_str(result);
 
         printf_debug("[SM] *** ALARM CONFIRMED: %s ***\r\n", alarm_type);
@@ -1910,7 +1935,7 @@ static void do_upload(void)
     uint16_t n, i;
     int is_coldstart = 0;
 
-    // === 窗口检�?(dot/VLP模式由do_collect已确认时间点, 直接通过) ===
+    // === 窗口检查(dot/VLP模式由do_collect已确认时间点, 直接通过) ===
     if(!voltage_low_power && strcmp(g_window.pattern, "dot") != 0)
     {
         if(!config_is_active_window())
@@ -2055,11 +2080,11 @@ static void do_upload(void)
     publish_upload_summary();
     printf_debug("[SM] upload summary published\r\n");
 
-    // 上传流程结束，复位唤醒周期统计计�?
+    // 上传流程结束，复位唤醒周期统计计数
     wakeup_count = 0;
     printf_debug("[SM] UPLOAD finished, remaining records in buffer: %d\r\n", ee_hist_count());
 
-    // === RTC校准: 利用4G在线从网络同步时�?===
+    // === RTC校准: 利用4G在线从网络同步时间 ===
     {
         trea_delay_ms(200);
         EC_Status_t sync_ret = EC801E_SyncTime();
@@ -2143,7 +2168,7 @@ static void do_downlink(void)
     app_state = STATE_SLEEP;
 }
 
-// ==================== BLE OTA 状态处�?====================
+// ==================== BLE OTA 状态处理 ====================
 static void do_ble_ota(void)
 {
     /* 第一阶段: 等待手机连接BLE (PD2=LOW) */
@@ -2177,6 +2202,7 @@ static void do_ble_ota(void)
         }
     }
 	
+#if BUTTON_ENABLED
     /* 按键检测: 3连按关闭蓝牙 (与3连按开启对称) */
     if(button_is_pressed())
     {
@@ -2208,6 +2234,7 @@ static void do_ble_ota(void)
             if(g_lcd_active) slcd_seg_icon_display(SLCD_ICON_LY, RESET);
         }
     }
+#endif
 
     /* 退出条件: OTA错误/超时, 或蓝牙被关闭 */
     if(g_ble_ota.state == BLE_OTA_ERROR || !g_bt_on)
@@ -2304,7 +2331,7 @@ static void debug_check_cmd(void)
         }
         if(strncmp(line_buf, "valve:", 6) == 0)
         {
-            const char *action = line_buf + 6;  // "open" �?"close"
+            const char *action = line_buf + 6;  // "open" 或 "close"
             const char *result = valve_execute(action, 1);
             // 用户主动操作清除报警恢复标志
             if(g_valve_alarm_closed)
@@ -2422,29 +2449,29 @@ static void debug_check_cmd(void)
             continue;
         }
 
-        // ---- 不需要硬件上下文的命�? 交给eeprom_config.c处理 ----
+        // ---- 不需要硬件上下文的命令, 交给eeprom_config.c处理 ----
         if(config_parse_and_apply(line_buf) == 0)
             printf_debug("[DBG] Unknown: %s\r\n", line_buf);
     }
 }
 
-// ==================== 主函�?====================
+// ==================== 主函数 ====================
 int main(void)
 {
-    SensorRecord_t init_record;		//单条传感器记�?
+    SensorRecord_t init_record;		//单条传感器记录
 
     // ==================== STATE_INIT ====================
     sys_init();
-	
+	// ==================== 传感器初始化 ====================
 	PT304D_Init(PT304D_SENSOR_1);
     PT304D_Init(PT304D_SENSOR_2);
-    // 软件看门�? SysTick 已在 sys_init 内启�? 启用以保护后�?4G 联网/上报等阻塞流�?
+    // 软件看门狗: SysTick 已在 sys_init 内启用, 启用以保护后续 4G 联网/上报等阻塞流程
     swdt_enable(SWDT_TIMEOUT_MS);
     com_lpuart_init();
     lpuart_wakeup_init();
 	printf_debug("\r\n[OTA] yes%s \r\n", APP_FIRMWARE_VERSION);
 	
-	// 4G开�?+ 注网 + MQTT连接 + keepalive + 时间同步 + QSCLK
+	// 4G开机 + 注网 + MQTT连接 + keepalive + 时间同步 + QSCLK
     EC801E_PowerOn();
 	
     config_load_all();
@@ -2457,9 +2484,18 @@ int main(void)
 	
 	
     ee_hist_init();
-
-    // SLCD初始�?(必须在rtc_init_all之后, LXTAL已配�?
+	
+	// SLCD初始化(必须在rtc_init_all之后, LXTAL已配置)
     if(g_lcd_enabled) { slcd_seg_configuration(); lcd_ui_init(); g_lcd_active = 1; g_lcd_on_hhmmss = rtc_get_hhmmss(); }
+	
+	// 首次采集+存入缓冲+上报
+//	trea_delay_ms(50);
+    PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
+	// 首次采集后刷新LCD显示
+    sensor_sample_voltage(1, g_sensor.last_normal_voltage);
+    if(g_lcd_active) lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
+
+    
 
     printf_debug("\r\n[OTA] yes%s \r\n", APP_FIRMWARE_VERSION);
 	
@@ -2488,13 +2524,11 @@ int main(void)
     // 4G开机前检查debug串口是否有待处理命令
     config_check_cmd();
 
-    // 4G开�?+ 注网 + MQTT连接 + keepalive + 时间同步 + QSCLK
+	// 4G开机 + 注网 + MQTT连接 + keepalive + 时间同步 + QSCLK
     uint8_t init_4g_ok = (EC801E_InitAndConnect() == EC_OK);
 
     if(init_4g_ok)
     {
-//        // InitAndConnect末尾启用了QSCLK休眠, 这里先禁用以确保后续AT查询成功
-//        trea_delay_ms(300);
 
         // 4G连接完成, 检查debug串口命令
         config_check_cmd();
@@ -2508,7 +2542,7 @@ int main(void)
         lcd_update_csq();
 
         // 联网成功蜂鸣提示
-        buzzer_beep(2, 200);
+        buzzer_beep(1, 200);
     }
     else
     {
@@ -2519,15 +2553,10 @@ int main(void)
     // OTA前检查debug串口命令
     config_check_cmd();
 
-    // === OTA 启动回执: �?InfoBlock 显示上次升级 SUCCESS/FAILED, 上报 mqttUpgradeReply ===
+    // === OTA 启动回执: 用 InfoBlock 显示上次升级 SUCCESS/FAILED, 上报 mqttUpgradeReply ===
     ota_app_report_boot_status();
 
-    // 首次采集+存入缓冲+上报
-	trea_delay_ms(50);
-    PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
-	// 首次采集后刷新LCD显示
-    sensor_sample_voltage(1, g_sensor.last_normal_voltage);
-    if(g_lcd_active) lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
+    
     trea_delay_ms(50);
 
     init_record.pressure = g_sensor.raw.pressure;
@@ -2563,7 +2592,7 @@ int main(void)
     EC801E_PublishSensorData(&g_sensor.raw, g_sensor.voltage);
     trea_delay_ms(500);
 
-    // �?1: restart=1 + valve_last_order
+    // 包1: restart=1 + valve_last_order
     {
         char v_order[4];
         snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
@@ -2575,7 +2604,7 @@ int main(void)
             boot_ts);
         EC801E_PublishRawJson(boot_json);
     }
-    trea_delay_ms(500);
+    trea_delay_ms(300);
 
     // 包2: 设备信息 (csq + rsrp + sinr + cereg + soft-version + ICCID + IMEI)
     {
@@ -2601,7 +2630,7 @@ int main(void)
         rtc_get_time_str(info_ts, sizeof(info_ts));
         snprintf(info_json, sizeof(info_json),
             "[{\"id\":\"csq\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
-						"{\"id\":\"csq_csq\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
+			"{\"id\":\"csq_csq\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
             "{\"id\":\"csq_rsrp\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
             "{\"id\":\"csq_sinr\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
             "{\"id\":\"soft-version\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
@@ -2613,16 +2642,16 @@ int main(void)
         printf_debug("[SM] Device info:\r\n CSQ=%s RSRP=%s SINR=%s CEREG=%s\r\n ICCID=%s\r\n IMEI=%s\r\n",
                      csq, rsrp_str, sinr_str, cereg_str, iccid, imei);
     }
-    trea_delay_ms(500);
+//    trea_delay_ms(500);
 
-    // �?3: 传感器在线状�?(进气+出气�?字段)
+    // 包3: 传感器在线状态(进气+出气)字段
     {
 //        publish_sensor_status();   // rtu_have/status × 2 (与状态机各处共用)
 		publish_upload_summary();
         g_sensor.prev_online  = (g_sensor.raw.err  == PT304D_OK) ? 1 : 0;
         g_sensor.prev_online2 = (g_sensor.raw2.err == PT304D_OK) ? 1 : 0;
     }
-    trea_delay_ms(500);
+//    trea_delay_ms(500);
 
 
     // === 用户端MQTT发布 (id=1, 连接已在启动阶段建立) ===
@@ -2634,6 +2663,8 @@ int main(void)
         EC801E_UserMqtt_Disconnect();
     }
 
+	// 开机成功蜂鸣提示
+    buzzer_beep(2, 200);
 init_skip_report:
     if(init_4g_ok)
     {
@@ -2658,14 +2689,14 @@ init_skip_report:
     // 初始化完成，进入休眠
     app_state = STATE_SLEEP;
 
-    // ==================== 状态机主循�?====================
+    // ==================== 状态机主循环 ====================
     while(1)
     {
         // ISR置位后立即响应debug串口配置命令
         if(debug_rx_line_ready())
             debug_check_cmd();
 
-        // 软件看门�? 每次状态分发前重新使能并复位计�?(活跃处理阶段保护)
+        // 软件看门狗: 每次状态分发前重新使能并复位计数(活跃处理阶段保护)
         // 深休眠由 enter_deepsleep_mode() 内部 swdt_disable() 关闭, 休眠期不计时
         swdt_enable(SWDT_TIMEOUT_MS);
 

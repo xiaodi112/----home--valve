@@ -1,4 +1,4 @@
-﻿#ifndef MYGPIO__H
+#ifndef MYGPIO__H
 #define MYGPIO__H
 
 #include "gd32l23x.h"

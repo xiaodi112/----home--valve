@@ -645,7 +645,7 @@ EC_Status_t EC801E_InitAndConnect(void)
 
     // 软件复位模块射频+协议栈, 清除残留TCP/MQTT/PDP状态
     EC_SendCmd("AT+CFUN=1,1\r\n", "OK", APP_AT_TIMEOUT_SHORT);
-    trea_delay_ms(5000);  // 等待模块复位完成
+    trea_delay_ms(4000);  // 等待模块复位完成
 
     // 确认模块已就绪 (复位后AT可能需数秒才响应)
     if(EC_SendCmdRetry("AT\r\n", "OK", APP_AT_TIMEOUT_SHORT, APP_EC_MAX_RETRY) != EC_OK)

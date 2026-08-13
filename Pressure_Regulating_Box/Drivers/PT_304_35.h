@@ -2,6 +2,7 @@
 #define PT_304_35__H
 
 #include "gd32l23x.h"
+#include "app_config.h"
 #include "i2c_eeprom.h"
 #include "i2c_sensor.h"
 #include "delay.h"
@@ -13,15 +14,15 @@
  * - 只开一个: 两路传感器都用同一协议
  * - 两个都开: 每路独立选择协议 (由 PT304D_S1_DRIVER / PT304D_S2_DRIVER 绑定)
  *****************************************************************************/
-#define PT304D_DRV_7BYTE         // 7字节协议: 发0xAA指令+读7字节 (addr=0x00, 24bit)
-//#define PT304D_DRV_4BYTE       // 4字节协议: 直接读4字节       (addr=0x28, 14bit)
+//#define PT304D_DRV_7BYTE         // 7字节协议: 发0xAA指令+读7字节 (addr=0x00, 24bit)
+#define PT304D_DRV_4BYTE       // 4字节协议: 直接读4字节       (addr=0x28, 14bit)
 
 /*****************************************************************************
  * 每路传感器驱动绑定（仅两个驱动都启用时有效）
  * 值: 7 = 使用7字节协议, 4 = 使用4字节协议
  *****************************************************************************/
-#define PT304D_S1_DRIVER   7     // S1(出气端, PC0/PC1) 使用的驱动协议
-#define PT304D_S2_DRIVER   7     // S2(进气端, PB6/PB7) 使用的驱动协议
+#define PT304D_S1_DRIVER   4     // S1(出气端, PC0/PC1) 使用的驱动协议
+#define PT304D_S2_DRIVER   4     // S2(进气端, PB6/PB7) 使用的驱动协议
 
 /*****************************************************************************
  * 每路传感器量程配置 (单位: Pa)
@@ -29,16 +30,16 @@
  *****************************************************************************/
 #define PT304D_S1_FS       35000.0f    // S1 满量程 (Pa): 35kPa
 //#define PT304D_S2_FS       600000.0f   // S2 满量程 (Pa): 600kPa
-#define PT304D_S2_FS     35000.0f    // S2 满量程 (Pa): 35kPa (立管阀单路使用)
+#define PT304D_S2_FS       35000.0f    // S2 满量程 (Pa): 35kPa (立管阀单路使用)
 
 /************************** 双传感器索引定义 **************************/
 #define PT304D_SENSOR_1    0   // 传感器1: PC0/PC1 总线 (与M24M01 共用), 使用 IIC_xxx()   出气端
 #define PT304D_SENSOR_2    1   // 传感器2: PB6/PB7 总线 (独立),            使用 IIC_xxx1() 进气端（立管阀单路使用）
 
-/************************** SW_IIC 统一电源开关(PD4) **************************/
-#define PT304D_SW_IIC_PORT   GPIOD
-#define PT304D_SW_IIC_PIN    GPIO_PIN_4
-#define PT304D_PWRUP_DELAY_MS  150     // PD4 上电后等待传感器稳定时间 (ms)
+/************************** SW_IIC 统一电源开关(PD4/PD5) **************************/
+#define PT304D_SW_IIC_PORT   SW_IIC_GPIO_PORT
+#define PT304D_SW_IIC_PIN    SW_IIC_GPIO_PIN
+#define PT304D_PWRUP_DELAY_MS  100     // PD4 上电后等待传感器稳定时间 (ms)
 
 /************************** 7字节协议参数 (0xAA指令型) **************************/
 #ifdef PT304D_DRV_7BYTE

@@ -347,11 +347,11 @@ void slcd_seg_configuration(void)
     /* Remap SEG28-SEG31 as segment outputs (default: reserved for COM4-COM7) */
     slcd_com_seg_remap(ENABLE);
     /* SLCD voltage source select */
-    slcd_voltage_source_select(SLCD_VOLTAGE_INTERNAL);
+    slcd_voltage_source_select(SLCD_VOLTAGE_EXTERNAL);
     /* SLCD dead time duration config */
     slcd_dead_time_config(SLCD_DEADTIME_PERIOD_0);
     /* enable the permanent high drive */
-    slcd_high_drive_config(ENABLE);
+    slcd_high_drive_config(ENABLE);//DISABLE
 
     /* wait for SLCD CFG register synchronization */
     while(!slcd_flag_get(SLCD_FLAG_SYN));
@@ -371,7 +371,7 @@ void slcd_seg_configuration(void)
 void slcd_seg_flush(void)
 {
     while(slcd_flag_get(SLCD_FLAG_UPR));
-    /* COM重映射: Glass COM4↔COM1, COM3↔COM2
+    /* COM重映射: Glass COM4<->COM1, COM3<->COM2
      * SLCD COM0→Glass COM4(shadow[3]), COM1→COM3(shadow[2]),
      * COM2→COM2(shadow[1]), COM3→COM1(shadow[0]) */
     SLCD_DATA0 = s_shadow[3];

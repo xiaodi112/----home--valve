@@ -123,7 +123,7 @@ static const CmdMap s_cmd_map[] = {
 // ==================== 传感器状态上报 (公共函数, 仅rtu在线状态) ====================
 void publish_sensor_status(void)
 {
-    static char s_json[360];
+    static char s_json[200];
     static char s_ts[32];
     JsonBuilder jb;
 
@@ -229,9 +229,18 @@ void publish_upload_summary(void)
 	
     // 6. 用户端IP / 主IP / 副IP
 	{
-		jb_add_str(&jb, "user_ip", g_user_mqtt.server, s_ts);
-		jb_add_str(&jb, "first_ip", g_mqtt.server, s_ts);
-		jb_add_str(&jb, "scend_ip", g_mqtt.server2, s_ts);
+		char ip_str[48];
+		
+		snprintf(ip_str, sizeof(ip_str), "%s.%d",
+                     g_user_mqtt.server[0] ? g_user_mqtt.server : "0.0.0.0", g_user_mqtt.port);
+		jb_add_str(&jb, "user_ip", ip_str, s_ts);
+		
+		snprintf(ip_str, sizeof(ip_str), "%s.%d", g_mqtt.server, g_mqtt.port);
+		jb_add_str(&jb, "first_ip", ip_str, s_ts);
+		
+		snprintf(ip_str, sizeof(ip_str), "%s.%d",
+                     g_mqtt.server2[0] ? g_mqtt.server2 : "0.0.0.0", g_mqtt.port2);
+		jb_add_str(&jb, "scend_ip", ip_str, s_ts);
 	}
 
 

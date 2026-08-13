@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file  boot_main.c
  * @brief Bootloader 主入口
  *
@@ -276,13 +276,8 @@ int main(void)
 
     /* SystemInit 已在 startup 中调用, 时钟已就绪 */
     boot_delay_ms(10);
+    /* I2C 电源开关由 App 管理 (app_config.h: IIC_SWITCH_ENABLED / IIC_SWITCH_PIN_SELECT), BL 不干预 */
 
-    /* 显式拉低 PD4(SW_IIC), 确保 I2C 电子开关断电
-     * 防止 App→Reset→BL 跳转路径中 PD4 浮空导致 M24M01 供电异常 */
-    rcu_periph_clock_enable(RCU_GPIOD);
-    gpio_mode_set(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_4);
-    gpio_output_options_set(GPIOD, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_4);
-    gpio_bit_reset(GPIOD, GPIO_PIN_4);
 
     /* 初始化调试串口 */
     boot_uart_init();

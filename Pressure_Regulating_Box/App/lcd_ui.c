@@ -12,12 +12,14 @@ uint8_t g_bt_on = 0;
 uint8_t g_last_csq = 99;
 
 // ==================== 内部缓存 ====================
+#if !LCD_SINGLE_SENSOR
 static float s_inlet_pressure = 0.0f;
 static float s_inlet_temp = 0.0f;
+static PT304D_Status s_inlet_err = PT304D_ERR_I2C;
+#endif
 static float s_outlet_pressure = 0.0f;
 static float s_outlet_temp = 0.0f;
 static float s_voltage = 0.0f;
-static PT304D_Status s_inlet_err = PT304D_ERR_I2C;
 static PT304D_Status s_outlet_err = PT304D_ERR_I2C;
 static uint32_t s_page_change_sec = 0;
 
@@ -201,7 +203,11 @@ static inline void lcd_ui_display_temp(float c)          { lcd_ui_display_value(
 // ==================== 初始化 ====================
 void lcd_ui_init(void)
 {
+#if LCD_SINGLE_SENSOR
+    g_lcd_page = LCD_PAGE_OUTLET_PRESSURE;
+#else
     g_lcd_page = LCD_PAGE_INLET_PRESSURE;
+#endif
 //    g_last_csq = 99;
 
     slcd_seg_clear_all();
@@ -217,20 +223,45 @@ void lcd_ui_refresh(PT304D_Data *inlet, PT304D_Data *outlet, float voltage)
     uint8_t need_redraw = 0;
 
     // 空闲超时20s自动回默认页
+#if LCD_SINGLE_SENSOR
+    if(g_lcd_page != LCD_PAGE_OUTLET_PRESSURE)
+#else
     if(g_lcd_page != LCD_PAGE_INLET_PRESSURE)
+#endif
     {
         uint32_t now_sec = hhmmss_to_total_sec(rtc_get_hhmmss());
         int32_t elapsed = (int32_t)(now_sec - s_page_change_sec);
         if(elapsed < 0) elapsed += 86400;
         if(elapsed >= 20)
         {
+#if LCD_SINGLE_SENSOR
+            g_lcd_page = LCD_PAGE_OUTLET_PRESSURE;
+#else
             g_lcd_page = LCD_PAGE_INLET_PRESSURE;
+#endif
             lcd_ui_display_page();
             return;
         }
     }
 
+    /* LCD常亮模式(LCD_LOCK_ENABLED=0): 常亮不超时, 页面由采集周期每次刷新后自动进行翻页 */
+
     // 缓存数据并检测变化
+#if LCD_SINGLE_SENSOR
+    if(inlet != NULL)
+    {
+        if(s_outlet_pressure != inlet->pressure ||
+           s_outlet_temp    != inlet->temperature ||
+           s_outlet_err     != inlet->err)
+        {
+            s_outlet_pressure = inlet->pressure;
+            s_outlet_temp = inlet->temperature;
+            s_outlet_err = inlet->err;
+            if(g_lcd_page == LCD_PAGE_OUTLET_PRESSURE || g_lcd_page == LCD_PAGE_OUTLET_TEMP)
+                need_redraw = 1;
+        }
+    }
+#else
     if(inlet != NULL)
     {
         if(s_inlet_pressure != inlet->pressure ||
@@ -257,6 +288,7 @@ void lcd_ui_refresh(PT304D_Data *inlet, PT304D_Data *outlet, float voltage)
                 need_redraw = 1;
         }
     }
+#endif
     if(s_voltage != voltage)
     {
         s_voltage = voltage;
@@ -345,6 +377,7 @@ static void lcd_ui_display_page(void)
 
     switch(g_lcd_page)
     {
+#if !LCD_SINGLE_SENSOR
         case LCD_PAGE_INLET_PRESSURE:
             if(s_inlet_err != PT304D_OK) {
                 slcd_seg_string_atomic_display("-EEr-");
@@ -367,6 +400,7 @@ static void lcd_ui_display_page(void)
             if(s_inlet_err == PT304D_OK) slcd_seg_icon_display(SLCD_ICON_S12, SET);
             break;
 
+#endif
         case LCD_PAGE_OUTLET_PRESSURE:
             if(s_outlet_err != PT304D_OK) {
                 slcd_seg_string_atomic_display("-EEr-");
@@ -447,3 +481,4 @@ static void lcd_ui_update_common_icons(void)
     // 蓝牙
     slcd_seg_icon_display(SLCD_ICON_LY, g_bt_on ? SET : RESET);
 }
+

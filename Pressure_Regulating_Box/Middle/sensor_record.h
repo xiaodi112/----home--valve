@@ -5,22 +5,22 @@
 
 /**
  * @file sensor_record.h
- * @brief ´«¸ĞÆ÷¼ÇÂ¼½á¹¹¶¨Òå (EEPROM ÀúÊ· / ÉÏ±¨½Ó¿Ú¹²ÓÃ)
+ * @brief ä¼ æ„Ÿå™¨è®°å½•ç»“æ„å®šä¹‰ (EEPROM å†å² / ä¸ŠæŠ¥æ¥å£å…±ç”¨)
  */
 
-/* ¼ÇÂ¼±êÖ¾Î» */
-#define SENSOR_FLAG_ALARM        0x01   /* ±¨¾¯¼ÇÂ¼ */
+/* è®°å½•æ ‡å¿—ä½ */
+#define SENSOR_FLAG_ALARM        0x01   /* æŠ¥è­¦è®°å½• */
 
-/* µ¥Ìõ´«¸ĞÆ÷¼ÇÂ¼ (44 ×Ö½Ú) */
+/* å•æ¡ä¼ æ„Ÿå™¨è®°å½• (44 å­—èŠ‚) */
 typedef struct {
-    float pressure;             /* PT304D #2 Ñ¹Á¦ (Pa) - PB6/PB7 ¶ÀÁ¢×ÜÏß */
-    float temperature;          /* PT304D #2 ÎÂ¶È (C) */
-    float pressure2;            /* PT304D #1 Ñ¹Á¦ (Pa) - PC0/PC1 ¹²ÓÃ×ÜÏß */
-    float temperature2;         /* PT304D #1 ÎÂ¶È (C) */
-    float voltage;              /* µç³ØµçÑ¹ (V) */
+    float pressure;             /* PT304D #2 å‹åŠ› (Pa) - PB6/PB7 ç‹¬ç«‹æ€»çº¿ */
+    float temperature;          /* PT304D #2 æ¸©åº¦ (C) */
+    float pressure2;            /* PT304D #1 å‹åŠ› (Pa) - PC0/PC1 å…±ç”¨æ€»çº¿ */
+    float temperature2;         /* PT304D #1 æ¸©åº¦ (C) */
+    float voltage;              /* ç”µæ± ç”µå‹ (V) */
     char  timestamp[20];        /* "20xx-xx-xx xx:xx:xx" */
     uint8_t flags;              /* SENSOR_FLAG_xxx */
-    uint8_t reserved[3];        /* ¶ÔÆëµ½ 4 ×Ö½Ú */
+    uint8_t reserved[3];        /* å¯¹é½åˆ° 4 å­—èŠ‚ */
 } SensorRecord_t;
 
 #endif /* SENSOR_RECORD_H */

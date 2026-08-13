@@ -4,34 +4,34 @@
 #include "stdint.h"
 
 /*
- * AT24C64 (64Kbit = 8K Bytes) ¹Ø¼ü²ÎÊı:
- * - ÈİÁ¿: 8K Bytes (0x0000 ~ 0x1FFF)
- * - 13 Î»µØÖ·: A12~A0 (2 ×Ö½Ú×ÖµØÖ·: ¸ß×Ö½Ú A12~A8, µÍ×Ö½Ú A7~A0)
- * - Éè±¸µØÖ·: 1010 A2 A1 A0 R/W (A2/A1/A0 ½ÓµØ = 0xA0)
- * - Ò³´óĞ¡: 32 ×Ö½Ú (Ò³±ß½ç = addr & ~0x1F)
- * - Ğ´ÖÜÆÚ: ×î³¤ 5ms (ACK ÂÖÑ¯µÈ´ı)
+ * AT24C64 (64Kbit = 8K Bytes) å…³é”®å‚æ•°:
+ * - å®¹é‡: 8K Bytes (0x0000 ~ 0x1FFF)
+ * - 13 ä½åœ°å€: A12~A0 (2 å­—èŠ‚å­—åœ°å€: é«˜å­—èŠ‚ A12~A8, ä½å­—èŠ‚ A7~A0)
+ * - è®¾å¤‡åœ°å€: 1010 A2 A1 A0 R/W (A2/A1/A0 æ¥åœ° = 0xA0)
+ * - é¡µå¤§å°: 32 å­—èŠ‚ (é¡µè¾¹ç•Œ = addr & ~0x1F)
+ * - å†™å‘¨æœŸ: æœ€é•¿ 5ms (ACK è½®è¯¢ç­‰å¾…)
  */
 
-#define AT24C64_BASE_ADDR   0xA0    /* »ù´¡Éè±¸µØÖ· 1010_000_0 */
-#define AT24C64_PAGE_SIZE   32      /* Ò³´óĞ¡: 32 ×Ö½Ú */
-#define AT24C64_TOTAL_SIZE  8192    /* ×ÜÈİÁ¿: 8KB */
-#define AT24C64_WRITE_TIME  5       /* Ğ´ÖÜÆÚ: 5ms */
+#define AT24C64_BASE_ADDR   0xA0    /* åŸºç¡€è®¾å¤‡åœ°å€ 1010_000_0 */
+#define AT24C64_PAGE_SIZE   32      /* é¡µå¤§å°: 32 å­—èŠ‚ */
+#define AT24C64_TOTAL_SIZE  8192    /* æ€»å®¹é‡: 8KB */
+#define AT24C64_WRITE_TIME  5       /* å†™å‘¨æœŸ: 5ms */
 
-/* 13 Î»µØÖ·: ¸ß 5 Î» (A12~A8) ·ÅÈë×ÖµØÖ·¸ß×Ö½ÚµÍ 5 Î» */
+/* 13 ä½åœ°å€: é«˜ 5 ä½ (A12~A8) æ”¾å…¥å­—åœ°å€é«˜å­—èŠ‚ä½ 5 ä½ */
 #define AT24C64_ADDR_HI(full_addr)  ((uint8_t)(((full_addr) >> 8) & 0x1F))
 #define AT24C64_ADDR_LO(full_addr)  ((uint8_t)((full_addr) & 0xFF))
 
-/* Ğ´µ¥×Ö½Ú */
+/* å†™å•å­—èŠ‚ */
 uint8_t AT24C64_WriteByte(uint32_t addr, uint8_t data);
-/* Ò³Ğ´ (×î¶à 32 ×Ö½Ú, ²»¿É¿çÒ³) */
+/* é¡µå†™ (æœ€å¤š 32 å­—èŠ‚, ä¸å¯è·¨é¡µ) */
 uint8_t AT24C64_WritePage(uint32_t addr, const uint8_t *data, uint16_t len);
-/* ÈÎÒâ³¤¶ÈĞ´ (×Ô¶¯·ÖÒ³, Ö§³Ö¿çÒ³) */
+/* ä»»æ„é•¿åº¦å†™ (è‡ªåŠ¨åˆ†é¡µ, æ”¯æŒè·¨é¡µ) */
 uint8_t AT24C64_Write(uint32_t addr, const uint8_t *data, uint16_t len);
-/* Ëæ»ú¶Á (ÈÎÒâµØÖ·, ÈÎÒâ³¤¶È) */
+/* éšæœºè¯» (ä»»æ„åœ°å€, ä»»æ„é•¿åº¦) */
 uint8_t AT24C64_Read(uint32_t addr, uint8_t *buf, uint16_t len);
-/* ACK ÂÖÑ¯µÈ´ıĞ´ÖÜÆÚÍê³É */
+/* ACK è½®è¯¢ç­‰å¾…å†™å‘¨æœŸå®Œæˆ */
 uint8_t AT24C64_WaitReady(uint32_t addr, uint16_t timeout_ms);
-/* ¶ÁĞ´Õï¶Ï²âÊÔ (Í¨¹ıµ÷ÊÔ´®¿ÚÊä³ö½á¹û) */
+/* è¯»å†™è¯Šæ–­æµ‹è¯• (é€šè¿‡è°ƒè¯•ä¸²å£è¾“å‡ºç»“æœ) */
 void AT24C64_Test(void);
 
 #endif /* AT24C64_H */

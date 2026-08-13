@@ -3,13 +3,21 @@
 
 #include <stdint.h>
 #include "PT_304_35.h"
+#include "app_config.h"
 
 // ==================== LCD 页面定义 ====================
 typedef enum {
+#if LCD_SINGLE_SENSOR
+    /* 一个传感器: 6页 */
+    LCD_PAGE_OUTLET_PRESSURE = 0,   // 进口压力 (KPa)
+    LCD_PAGE_OUTLET_TEMP,           // 进口温度 (℃)
+#else
+    /* 两个传感器: 8页 */
     LCD_PAGE_INLET_PRESSURE = 0,   // 进口压力 (KPa)
     LCD_PAGE_INLET_TEMP,           // 进口温度 (℃)
     LCD_PAGE_OUTLET_PRESSURE,      // 出口压力 (KPa)
     LCD_PAGE_OUTLET_TEMP,          // 出口温度 (℃)
+#endif
     LCD_PAGE_BATTERY_VOLTAGE,      // 电池电压 (V)
     LCD_PAGE_TIME_YEAR,            // 时间-年 (2026)
     LCD_PAGE_TIME_MONTHDAY,        // 时间-月日 (06-24)

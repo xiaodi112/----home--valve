@@ -2,6 +2,7 @@
 #define EEPROM_HISTORY_H
 
 #include <stdint.h>
+#include "app_config.h"
 
 /**
  * @file eeprom_history.h

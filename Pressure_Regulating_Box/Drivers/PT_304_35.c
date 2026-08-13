@@ -5,16 +5,20 @@
 /************************** PD4 SW_IIC 内部辅助 **************************/
 static void pt304d_sw_iic_on(void)
 {
+#if IIC_SWITCH_ENABLED
     rcu_periph_clock_enable(RCU_GPIOD);
     gpio_mode_set(PT304D_SW_IIC_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, PT304D_SW_IIC_PIN);
     gpio_output_options_set(PT304D_SW_IIC_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, PT304D_SW_IIC_PIN);
     gpio_bit_set(PT304D_SW_IIC_PORT, PT304D_SW_IIC_PIN);
     trea_delay_ms(PT304D_PWRUP_DELAY_MS);
+#endif
 }
 
 static void pt304d_sw_iic_off(void)
 {
+#if IIC_SWITCH_ENABLED
     gpio_bit_reset(PT304D_SW_IIC_PORT, PT304D_SW_IIC_PIN);
+#endif
 }
 
 /************************** 量程辅助: 根据 sensor_idx 返回满量程 (Pa) **************************/

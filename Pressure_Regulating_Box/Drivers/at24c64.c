@@ -1,53 +1,60 @@
 #include "at24c64.h"
+#include "app_config.h"
 #include "i2c_sensor.h"
 #include "delay.h"
 #include "usart.h"
 #include "gd32l23x.h"
 #include <string.h>
 
-/* ===================== I2C µç×Ó¿ª¹Ø PD4 (SW_IIC) ¹ÜÀí =====================
- * PD4 = SW_IIC µç×Ó¿ª¹Ø (TPS22918), ¿ØÖÆËùÓĞ I2C Éè±¸µçÔ´
- * Ä¬ÈÏ LOW ½ÚÄÜ; Ã¿´Î EEPROM ¶Á/Ğ´Ç°×Ô¶¯ set + 20ms ÉÏµçÎÈ¶¨, ²Ù×÷ºó reset
- * ½Ó¿Úµ÷ÓÃÕßÎŞĞè¹ØĞÄ PD4 ×´Ì¬ (Óë´«¸ĞÆ÷²É¼¯Â·¾¶µÄ PD4 ×´Ì¬¶ÀÁ¢)
+/* ===================== I2C ç”µå­å¼€å…³ PD4 (SW_IIC) ç®¡ç† =====================
+ * PD4 = SW_IIC ç”µå­å¼€å…³ (TPS22918), æ§åˆ¶æ‰€æœ‰ I2C è®¾å¤‡ç”µæº
+ * é»˜è®¤ LOW èŠ‚èƒ½; æ¯æ¬¡ EEPROM è¯»/å†™å‰è‡ªåŠ¨ set + 20ms ä¸Šç”µç¨³å®š, æ“ä½œå reset
+ * æ¥å£è°ƒç”¨è€…æ— éœ€å…³å¿ƒ PD4 çŠ¶æ€ (ä¸ä¼ æ„Ÿå™¨é‡‡é›†è·¯å¾„çš„ PD4 çŠ¶æ€ç‹¬ç«‹)
  */
+#if IIC_SWITCH_ENABLED
 static uint8_t s_pwr_init_done = 0;
 
+#endif
 static inline void at24c64_pwr_on(void)
 {
+#if IIC_SWITCH_ENABLED
     rcu_periph_clock_enable(RCU_GPIOD);
-    gpio_mode_set(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_4);
-    gpio_output_options_set(GPIOD, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_4);
+    gpio_mode_set(SW_IIC_GPIO_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, SW_IIC_GPIO_PIN);
+    gpio_output_options_set(SW_IIC_GPIO_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, SW_IIC_GPIO_PIN);
 
     if(!s_pwr_init_done) {
         s_pwr_init_done = 1;
-        gpio_bit_reset(GPIOD, GPIO_PIN_4);
+        gpio_bit_reset(SW_IIC_GPIO_PORT, SW_IIC_GPIO_PIN);
         trea_delay_ms(50);
     }
 
-    gpio_bit_set(GPIOD, GPIO_PIN_4);
-    trea_delay_ms(20);   /* EEPROM ÉÏµçÎÈ¶¨ (ÊÖ²áµäĞÍ 1ms, ÁôÓàÁ¿) */
-    IIC_Init();          /* ÖØĞÂÅäÖÃ PC0/PC1 GPIO + ×ÜÏßËÀËø»Ö¸´ (Óë´«¸ĞÆ÷¹²ÓÃ×ÜÏß) */
+    gpio_bit_set(SW_IIC_GPIO_PORT, SW_IIC_GPIO_PIN);
+    trea_delay_ms(20);   /* EEPROM ä¸Šç”µç¨³å®š (æ‰‹å†Œå…¸å‹ 1ms, ç•™ä½™é‡) */
+#endif
+    IIC_Init();          /* é‡æ–°é…ç½® PC0/PC1 GPIO + æ€»çº¿æ­»é”æ¢å¤ (ä¸ä¼ æ„Ÿå™¨å…±ç”¨æ€»çº¿) */
 }
 
 static inline void at24c64_pwr_off(void)
 {
-    gpio_bit_reset(GPIOD, GPIO_PIN_4);
+#if IIC_SWITCH_ENABLED
+    gpio_bit_reset(SW_IIC_GPIO_PORT, SW_IIC_GPIO_PIN);
+#endif
 }
 
 /*
- * AT24C64 Çı¶¯ (ÑÏ¸ñÆ¥Åä¹æ¸ñÊé)
+ * AT24C64 é©±åŠ¨ (ä¸¥æ ¼åŒ¹é…è§„æ ¼ä¹¦)
  *
- * µØÖ·»úÖÆ: 13 Î»µØÖ· = 2 ×Ö½Ú×ÖµØÖ· (¸ß×Ö½Ú A12~A8, µÍ×Ö½Ú A7~A0)
- *   Éè±¸µØÖ·×Ö½Ú: 1010 A2 A1 A0 R/W  (A2/A1/A0 = 0)
- *   ·¢ËÍ×ÖµØÖ·: ÏÈ¸ß×Ö½Ú ÔÙµÍ×Ö½Ú
+ * åœ°å€æœºåˆ¶: 13 ä½åœ°å€ = 2 å­—èŠ‚å­—åœ°å€ (é«˜å­—èŠ‚ A12~A8, ä½å­—èŠ‚ A7~A0)
+ *   è®¾å¤‡åœ°å€å­—èŠ‚: 1010 A2 A1 A0 R/W  (A2/A1/A0 = 0)
+ *   å‘é€å­—åœ°å€: å…ˆé«˜å­—èŠ‚ å†ä½å­—èŠ‚
  *
- * Ò³Ğ´¹æÔò: Ã¿Ò³ 32 ×Ö½Ú, Ò³±ß½ç = addr & ~0x1F
- *   Ğ´Èë²»¿É¿çÒ³, ¿çÒ³Ê±µØÖ·»Ø¾íµ½Ò³Ê×
+ * é¡µå†™è§„åˆ™: æ¯é¡µ 32 å­—èŠ‚, é¡µè¾¹ç•Œ = addr & ~0x1F
+ *   å†™å…¥ä¸å¯è·¨é¡µ, è·¨é¡µæ—¶åœ°å€å›å·åˆ°é¡µé¦–
  *
- * Ğ´ÖÜÆÚ: Ã¿´ÎĞ´²Ù×÷ºóĞèµÈ´ı×î³¤ 5ms (ACK ÂÖÑ¯)
+ * å†™å‘¨æœŸ: æ¯æ¬¡å†™æ“ä½œåéœ€ç­‰å¾…æœ€é•¿ 5ms (ACK è½®è¯¢)
  */
 
-/* ===================== ACKÂÖÑ¯µÈ´ıĞ´ÖÜÆÚÍê³É ===================== */
+/* ===================== ACKè½®è¯¢ç­‰å¾…å†™å‘¨æœŸå®Œæˆ ===================== */
 uint8_t AT24C64_WaitReady(uint32_t addr, uint16_t timeout_ms)
 {
     uint8_t dev_byte = AT24C64_BASE_ADDR;
@@ -68,7 +75,7 @@ uint8_t AT24C64_WaitReady(uint32_t addr, uint16_t timeout_ms)
     return 1;
 }
 
-/* ===================== Ğ´µ¥×Ö½Ú ===================== */
+/* ===================== å†™å•å­—èŠ‚ ===================== */
 uint8_t AT24C64_WriteByte(uint32_t addr, uint8_t data)
 {
     uint8_t dev_byte = AT24C64_BASE_ADDR;
@@ -100,7 +107,7 @@ uint8_t AT24C64_WriteByte(uint32_t addr, uint8_t data)
     return ret;
 }
 
-/* ===================== Ò³Ğ´ (²»¿É¿çÒ³, µ÷ÓÃÕß±£Ö¤) ===================== */
+/* ===================== é¡µå†™ (ä¸å¯è·¨é¡µ, è°ƒç”¨è€…ä¿è¯) ===================== */
 uint8_t AT24C64_WritePage(uint32_t addr, const uint8_t *data, uint16_t len)
 {
     uint8_t dev_byte = AT24C64_BASE_ADDR;
@@ -136,7 +143,7 @@ uint8_t AT24C64_WritePage(uint32_t addr, const uint8_t *data, uint16_t len)
     return ret;
 }
 
-/* ===================== ÈÎÒâ³¤¶ÈĞ´ (×Ô¶¯·ÖÒ³) ===================== */
+/* ===================== ä»»æ„é•¿åº¦å†™ (è‡ªåŠ¨åˆ†é¡µ) ===================== */
 uint8_t AT24C64_Write(uint32_t addr, const uint8_t *data, uint16_t len)
 {
     uint16_t offset = 0;
@@ -144,7 +151,7 @@ uint8_t AT24C64_Write(uint32_t addr, const uint8_t *data, uint16_t len)
 
     while(offset < len)
     {
-        /* µ±Ç°Ò³Ê£Óà¿ÉĞ´×Ö½ÚÊı (Ò³´óĞ¡ 32) */
+        /* å½“å‰é¡µå‰©ä½™å¯å†™å­—èŠ‚æ•° (é¡µå¤§å° 32) */
         uint16_t page_remain = AT24C64_PAGE_SIZE - ((addr + offset) % AT24C64_PAGE_SIZE);
         uint16_t left = len - offset;
         uint16_t chunk = (left < page_remain) ? left : page_remain;
@@ -157,7 +164,7 @@ uint8_t AT24C64_Write(uint32_t addr, const uint8_t *data, uint16_t len)
     return 0;
 }
 
-/* ===================== Ëæ»ú¶Á (ÈÎÒâµØÖ·¡¢ÈÎÒâ³¤¶È) ===================== */
+/* ===================== éšæœºè¯» (ä»»æ„åœ°å€ã€ä»»æ„é•¿åº¦) ===================== */
 uint8_t AT24C64_Read(uint32_t addr, uint8_t *buf, uint16_t len)
 {
     uint8_t dev_byte = AT24C64_BASE_ADDR;
@@ -169,28 +176,28 @@ uint8_t AT24C64_Read(uint32_t addr, uint8_t *buf, uint16_t len)
 
     at24c64_pwr_on();
 
-    /* µÚÒ»²½: Dummy Write ÉèÖÃ¶ÁÆğÊ¼µØÖ· (2 ×Ö½Ú) */
+    /* ç¬¬ä¸€æ­¥: Dummy Write è®¾ç½®è¯»èµ·å§‹åœ°å€ (2 å­—èŠ‚) */
     IIC_Start();
-    IIC_Send_Byte(dev_byte | 0x00);          /* Éè±¸µØÖ· + Ğ´Î» */
+    IIC_Send_Byte(dev_byte | 0x00);          /* è®¾å¤‡åœ°å€ + å†™ä½ */
     if(IIC_Wait_Ack(1000) != 0) { IIC_Stop(); at24c64_pwr_off(); return 2; }
 
-    IIC_Send_Byte(addr_hi);                  /* ×ÖµØÖ·¸ß×Ö½Ú A12~A8 */
+    IIC_Send_Byte(addr_hi);                  /* å­—åœ°å€é«˜å­—èŠ‚ A12~A8 */
     if(IIC_Wait_Ack(1000) != 0) { IIC_Stop(); at24c64_pwr_off(); return 3; }
 
-    IIC_Send_Byte(addr_lo);                  /* ×ÖµØÖ·µÍ×Ö½Ú A7~A0 */
+    IIC_Send_Byte(addr_lo);                  /* å­—åœ°å€ä½å­—èŠ‚ A7~A0 */
     if(IIC_Wait_Ack(1000) != 0) { IIC_Stop(); at24c64_pwr_off(); return 4; }
 
-    /* µÚ¶ş²½: ÖØ¸´ÆğÊ¼ + ¶ÁÊı¾İ */
+    /* ç¬¬äºŒæ­¥: é‡å¤èµ·å§‹ + è¯»æ•°æ® */
     IIC_Start();
-    IIC_Send_Byte(dev_byte | 0x01);          /* Éè±¸µØÖ· + ¶ÁÎ» */
+    IIC_Send_Byte(dev_byte | 0x01);          /* è®¾å¤‡åœ°å€ + è¯»ä½ */
     if(IIC_Wait_Ack(1000) != 0) { IIC_Stop(); at24c64_pwr_off(); return 5; }
 
     for(i = 0; i < len; i++)
     {
         if(i == len - 1)
-            buf[i] = IIC_Read_Byte(0);       /* ×îºó×Ö½Ú: NACK */
+            buf[i] = IIC_Read_Byte(0);       /* æœ€åå­—èŠ‚: NACK */
         else
-            buf[i] = IIC_Read_Byte(1);       /* ÆäÓà: ACK (¼ÌĞø¶Á) */
+            buf[i] = IIC_Read_Byte(1);       /* å…¶ä½™: ACK (ç»§ç»­è¯») */
     }
 
     IIC_Stop();
@@ -198,7 +205,7 @@ uint8_t AT24C64_Read(uint32_t addr, uint8_t *buf, uint16_t len)
     return 0;
 }
 
-/* ===================== Õï¶Ï²âÊÔ ===================== */
+/* ===================== è¯Šæ–­æµ‹è¯• ===================== */
 void AT24C64_Test(void)
 {
     uint8_t ret, val;
@@ -208,13 +215,13 @@ void AT24C64_Test(void)
 
     at24c64_pwr_on();
 
-    // ¶ÁÈ¡Î´Ğ´¹ıµÄµØÖ· (¿ÕÆ¬Ó¦Îª 0xFF)
+    // è¯»å–æœªå†™è¿‡çš„åœ°å€ (ç©ºç‰‡åº”ä¸º 0xFF)
     test_addr = 0x1FF0;
     ret = AT24C64_Read(test_addr, &val, 1);
     printf_debug("[DiagC] Read virgin addr=0x%04lX: ret=%d val=0x%02X (expect 0xFF)\r\n",
                  (unsigned long)test_addr, ret, val);
 
-    // µ¥×Ö½ÚĞ´ + ¶Á (µÍµØÖ·Çø)
+    // å•å­—èŠ‚å†™ + è¯» (ä½åœ°å€åŒº)
     test_addr = 0x0050;
     printf_debug("[DiagD] WriteByte addr=0x%04lX data=0xA5\r\n", (unsigned long)test_addr);
     ret = AT24C64_WriteByte(test_addr, 0xA5);

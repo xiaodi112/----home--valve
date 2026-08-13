@@ -1,4 +1,4 @@
-﻿#ifndef THRESHOLD_H
+#ifndef THRESHOLD_H
 #define THRESHOLD_H
 
 #include <stdint.h>

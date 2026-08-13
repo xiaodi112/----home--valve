@@ -1,12 +1,12 @@
 /**
  * @file eeprom_config.c
- * @brief AT24C16 EEPROM ÅäÖÃ´æ´¢ + Debug´®¿ÚÅäÖÃÃüÁî½âÎö
+ * @brief AT24C16 EEPROM é…ç½®å­˜å‚¨ + Debugä¸²å£é…ç½®å‘½ä»¤è§£æ
  *
- * Ö§³ÖµÄDebug´®¿ÚÃüÁî:
- *   ¼ä¸ôÅäÖÃ: {collect:0.5,upload:1.0}
- *   MQTTÅäÖÃ: {clientId:xxx,username:xxx,passwd:xxx,IP:x.x.x.x,port:1883}
- *   ÓÃ»§¶ËMQTT: {umqtt_server:x.x.x.x,umqtt_port:13000,umqtt_user:xxx,umqtt_pass:xxx,umqtt_client:xxx,umqtt_topic:/155/xxx/property/post}
- *   ²éÑ¯ÓÃ»§¶ËMQTT: umqtt_get
+ * æ”¯æŒçš„Debugä¸²å£å‘½ä»¤:
+ *   é—´éš”é…ç½®: {collect:0.5,upload:1.0}
+ *   MQTTé…ç½®: {clientId:xxx,username:xxx,passwd:xxx,IP:x.x.x.x,port:1883}
+ *   ç”¨æˆ·ç«¯MQTT: {umqtt_server:x.x.x.x,umqtt_port:13000,umqtt_user:xxx,umqtt_pass:xxx,umqtt_client:xxx,umqtt_topic:/155/xxx/property/post}
+ *   æŸ¥è¯¢ç”¨æˆ·ç«¯MQTT: umqtt_get
  */
 
 #include "eeprom_config.h"
@@ -96,7 +96,7 @@ void window_dottime_to_str(const uint8_t *mask, char *buf, uint16_t buf_size)
 }
 
 
-// ==================== È«¾ÖÔËĞĞÊ±Åä??====================
+// ==================== å…¨å±€è¿è¡Œæ—¶é…ç½® ====================
 AppInterval_t              g_interval;
 MqttConfig_t               g_mqtt;
 WindowConfig_t             g_window;
@@ -104,30 +104,30 @@ CycleConfig_t              g_collect_cycle;
 CycleConfig_t              g_report_cycle;
 char                       g_abnormal_close[16];
 uint8_t                    g_valve_last_order;
-uint8_t                    g_valve_alarm_closed = 0;    // ±¨¾¯×Ô¶¯¹Ø·§±êÖ¾ (EEPROM³Ö¾Ã?? OTAÖØÆôºó¿É»Ö¸´)
-uint8_t                    g_valve_pre_alarm_order = 0; // ¹Ø·§Ç°·§ÃÅ×´??(EEPROM³Ö¾Ã??
-uint8_t                    g_real_enabled   = 0;   // ÊµÊ±²É¼¯¿ª??(Ä¬ÈÏ¹Ø±Õ)
-uint8_t                    g_real_frequency = 5;   // ÊµÊ±²É¼¯ÆµÂÊ (Ä¬ÈÏ5??
-uint8_t           		   g_lcd_enabled    = APP_DEFAULT_LCD_ENABLED;   // LCDÏÔÊ¾¿ª??
-uint8_t                    g_sensor_count   = APP_DEFAULT_SENSOR_COUNT;   // ´«¸ĞÆ÷Êı??(Ä¬ÈÏË«Â·)
+uint8_t                    g_valve_alarm_closed = 0;    // æŠ¥è­¦è‡ªåŠ¨å…³é˜€æ ‡å¿— (EEPROMæŒä¹…åŒ–, OTAé‡å¯åå¯æ¢å¤)
+uint8_t                    g_valve_pre_alarm_order = 0; // å…³é˜€å‰é˜€é—¨çŠ¶æ€(EEPROMæŒä¹…åŒ–)
+uint8_t                    g_real_enabled   = 0;   // å®æ—¶é‡‡é›†å¼€å…³(é»˜è®¤å…³é—­)
+uint8_t                    g_real_frequency = 5;   // å®æ—¶é‡‡é›†é¢‘ç‡ (é»˜è®¤5ç§’)
+uint8_t           		   g_lcd_enabled    = APP_DEFAULT_LCD_ENABLED;   // LCDæ˜¾ç¤ºå¼€å…³
+uint8_t                    g_sensor_count   = APP_DEFAULT_SENSOR_COUNT;   // ä¼ æ„Ÿå™¨æ•°é‡(é»˜è®¤åŒè·¯)
 uint16_t                   g_keepalive_sec  = APP_MQTT_KEEPALIVE;
-TempThresholdConfig_t      g_tthreshold;            // ½øÆø¶ËÎÂ¶ÈãĞ??
-TempThresholdConfig_t      g_tthreshold2;           // ³öÆø¶ËÎÂ¶ÈãĞ??
-ValveDelayConfig_t         g_vdelay;                // ·§ÃÅ¶¯×÷ÑÓ??
-VoltagePowerConfig_t       g_spupower;              // µçÑ¹¼ì??
-PressureThresholdConfig_t  g_pthreshold;            // ½øÆø¶ËÑ¹Á¦ãĞ??
-PressureThresholdConfig_t  g_pthreshold2;           // ³öÆø¶ËÑ¹Á¦ãĞ??
-UserMqttConfig_t           g_user_mqtt;             // ÓÃ»§¶ËMQTTÅäÖÃ
-ValveTimingConfig_t        g_valve_timing;          // ¶¨Ê±¿ª¹Ø·§ÅäÖÃ
+TempThresholdConfig_t      g_tthreshold;            // è¿›æ°”ç«¯æ¸©åº¦é˜ˆå€¼
+TempThresholdConfig_t      g_tthreshold2;           // å‡ºæ°”ç«¯æ¸©åº¦é˜ˆå€¼
+ValveDelayConfig_t         g_vdelay;                // é˜€é—¨åŠ¨ä½œå»¶æ—¶
+VoltagePowerConfig_t       g_spupower;              // ç”µå‹æ£€æµ‹
+PressureThresholdConfig_t  g_pthreshold;            // è¿›æ°”ç«¯å‹åŠ›é˜ˆå€¼
+PressureThresholdConfig_t  g_pthreshold2;           // å‡ºæ°”ç«¯å‹åŠ›é˜ˆå€¼
+UserMqttConfig_t           g_user_mqtt;             // ç”¨æˆ·ç«¯MQTTé…ç½®
+ValveTimingConfig_t        g_valve_timing;          // å®šæ—¶å¼€å…³é˜€é…ç½®
 
-// ==================== Ä£¿é¹²Ïí ÅäÖÃÃüÁîĞĞ»º??====================
-// config_enter_setup_mode (ÉÏµçÅäÖÃ½×¶Î) ??config_check_cmd (ÔËĞĞÆÚÖ÷Ñ­»·) »¥³âµ÷ÓÃ
-// ²»²¢?? ²»Ç¶?? ¿É¹²ÏíÍ¬Ò»??512B »º³å ½ÚÊ¡ 512B RAM
+// ==================== æ¨¡å—å…±äº« é…ç½®å‘½ä»¤è¡Œç¼“å†² ====================
+// config_enter_setup_mode (ä¸Šç”µé…ç½®é˜¶æ®µ) ä¸ config_check_cmd (è¿è¡ŒæœŸä¸»å¾ªç¯) äº’æ–¥è°ƒç”¨
+// ä¸å¹¶å‘ ä¸åµŒå¥— å¯å…±äº«åŒä¸€å— 512B ç¼“å†² èŠ‚çœ 512B RAM
 static char s_cfg_line_buf[512];
 
-// ==================== ÄÚ²¿¹¤¾ß ====================
+// ==================== å†…éƒ¨å·¥å…· ====================
 
-// ´ÓEEPROM¶Áfloat
+// ä»EEPROMè¯»float
 static float ee_read_float(uint16_t addr)
 {
     float val = 0;
@@ -135,20 +135,20 @@ static float ee_read_float(uint16_t addr)
     return val;
 }
 
-// Ğ´floatµ½EEPROM
+// å†™floatåˆ°EEPROM
 static void ee_write_float(uint16_t addr, float val)
 {
     EE_WRITE(addr, (const uint8_t *)&val, sizeof(float));
 }
 
-// ´ÓEEPROM¶Á×Ö·û´®
+// ä»EEPROMè¯»å­—ç¬¦ä¸²
 static void ee_read_string(uint16_t addr, char *buf, uint16_t max_len)
 {
     EE_READ(addr, (uint8_t *)buf, max_len);
-    buf[max_len - 1] = '\0';  // È·±£ÖÕÖ¹
+    buf[max_len - 1] = '\0';  // ç¡®ä¿ç»ˆæ­¢
 }
 
-// Ğ´×Ö·û´®µ½EEPROM£¨º¬ÖÕÖ¹·û£©
+// å†™å­—ç¬¦ä¸²åˆ°EEPROMï¼ˆå«ç»ˆæ­¢ç¬¦ï¼‰
 static void ee_write_string(uint16_t addr, const char *str, uint16_t max_len)
 {
     uint16_t len = (uint16_t)strlen(str) + 1;
@@ -156,11 +156,11 @@ static void ee_write_string(uint16_t addr, const char *str, uint16_t max_len)
     EE_WRITE(addr, (const uint8_t *)str, len);
 }
 
-// ´Ó×Ö·û´®ÖĞÌáÈ¡key:value¶ÔµÄvalue
-// ÊäÈë: src = "clientId:abc,username:def", key = "clientId"
-// Êä³ö: out = "abc", ·µ»Ø1³É¹¦
-// ?? ±ØĞë´øµ¥´Ê±ß????Ç°Ò»×Ö·û±ØĞë??{ , : »ò×Ö·û´®ÆğÊ¼,
-//     ·ÀÖ¹ "pmax" ??"ppmax:5000" ÄÚ²¿×Ó´®ÎóÆ¥??//     (Í¬Ñù¹æ±Ü high/vhigh, low/vlow, pmin/ppmin µÈÇ°×º³åÍ»)
+// ä»å­—ç¬¦ä¸²ä¸­æå–key:valueå¯¹çš„value
+// è¾“å…¥: src = "clientId:abc,username:def", key = "clientId"
+// è¾“å‡º: out = "abc", è¿”å›1æˆåŠŸ
+// åŒ¹é…å¿…é¡»å¸¦å•è¯è¾¹ç•Œ: å‰ä¸€å­—ç¬¦å¿…é¡»æ˜¯ { , : æˆ–å­—ç¬¦ä¸²èµ·å§‹,
+//     é˜²æ­¢ "pmax" è¯¯åŒ¹é… "ppmax:5000" å†…éƒ¨å­ä¸²//     (åŒæ ·è§„é¿ high/vhigh, low/vlow, pmin/ppmin ç­‰å‰ç¼€å†²çª)
 static int extract_field(const char *src, const char *key, char *out, uint16_t out_size)
 {
     char search_key[32];
@@ -170,12 +170,12 @@ static int extract_field(const char *src, const char *key, char *out, uint16_t o
     const char *p = src;
     while((p = strstr(p, search_key)) != NULL)
     {
-        // µ¥´Ê±ß½ç¼ì?? pÇ°ÃæµÄ×Ö·û±ØĞëÊÇ·Ö¸ô·û»ò×Ö·û´®Æğ??
+        // å•è¯è¾¹ç•Œæ£€æŸ¥: på‰é¢çš„å­—ç¬¦å¿…é¡»æ˜¯åˆ†éš”ç¬¦æˆ–å­—ç¬¦ä¸²èµ·å§‹
 if(p == src || *(p - 1) == '{' || *(p - 1) == ',' || *(p - 1) == ':' || *(p - 1) == ' ')
         {
-            break;  // ÃüÖĞÕæÕıµÄ×Ö??
+            break;  // å‘½ä¸­çœŸæ­£çš„å…³é”®è¯
         }
-        p += 1;  // Ìø¹ıµ±Ç°Î»ÖÃ¼ÌĞøËÑË÷
+        p += 1;  // è·³è¿‡å½“å‰ä½ç½®ç»§ç»­æœç´¢
         }
     if(!p) return 0;
 
@@ -189,7 +189,7 @@ if(p == src || *(p - 1) == '{' || *(p - 1) == ',' || *(p - 1) == ':' || *(p - 1)
     return (i > 0) ? 1 : 0;
 }
 
-// ==================== ÖÜÆÚÀàĞÍ¹¤¾ßº¯Êı ====================
+// ==================== å‘¨æœŸç±»å‹å·¥å…·å‡½æ•° ====================
 CycleType_t cycle_type_from_str(const char *str)
 {
     if(strcmp(str, "sec") == 0)    return CYCLE_SEC;
@@ -197,7 +197,7 @@ CycleType_t cycle_type_from_str(const char *str)
     if(strcmp(str, "hour") == 0)   return CYCLE_HOUR;
     if(strcmp(str, "day") == 0)    return CYCLE_DAY;
     if(strcmp(str, "week") == 0)   return CYCLE_WEEK;
-    return CYCLE_MINUTE;  // Ä¬ÈÏ
+    return CYCLE_MINUTE;  // é»˜è®¤
 }
 
 const char* cycle_type_to_str(CycleType_t type)
@@ -227,7 +227,7 @@ uint32_t cycle_to_seconds(const CycleConfig_t *cfg)
     }
 }
 
-// ==================== Òì³£¹Ø·§¹¤¾ßº¯Êı ====================
+// ==================== å¼‚å¸¸å…³é˜€å·¥å…·å‡½æ•° ====================
 AbnormalClose_t abnormal_from_str(const char *str)
 {
     if(strcmp(str, "high") == 0)           return ABNORMAL_HIGH;
@@ -239,7 +239,7 @@ AbnormalClose_t abnormal_from_str(const char *str)
     if(strcmp(str, "all") == 0)            return ABNORMAL_ALL;
     if(strcmp(str, "temph") == 0)          return ABNORMAL_TEMP_HIGH;
     if(strcmp(str, "templ") == 0)          return ABNORMAL_TEMP_LOW;
-    /* ?? µçÑ¹±¨¾¯ (voltage_high/low) ²»²ÎÓë²ß?? Ö»ÉÏ±¨²»¶¯·§ */
+    /* æ³¨: ç”µå‹æŠ¥è­¦ (voltage_high/low) ä¸å‚ä¸ç­–ç•¥, åªä¸ŠæŠ¥ä¸åŠ¨é˜€ */
     return ABNORMAL_NONE;
 }
 
@@ -262,8 +262,8 @@ const char* abnormal_to_str(AbnormalClose_t ac)
 
 int abnormal_should_close_valve(AbnormalClose_t policy, ThresholdResult_t result)
 {
-    // µçÑ¹±¨¾¯ VPROTECT/VOLT_HIGH/VOLT_LOW: Ö»ÉÏ±¨²»¶¯·§
-    // Ö»ÓĞÑ¹Á¦ºÍÎÂ¶È±¨¾¯ĞèÒª×Ô¶¯¹Ø·§
+    // ç”µå‹æŠ¥è­¦ VPROTECT/VOLT_HIGH/VOLT_LOW: åªä¸ŠæŠ¥ä¸åŠ¨é˜€
+    // åªæœ‰å‹åŠ›å’Œæ¸©åº¦æŠ¥è­¦éœ€è¦è‡ªåŠ¨å…³é˜€
     int is_high  = (result == THRESHOLD_OVER_LIMIT || result == THRESHOLD_VERY_HIGH);
     int is_low   = (result == THRESHOLD_UNDER_LIMIT || result == THRESHOLD_VERY_LOW);
     int is_mut   = (result == THRESHOLD_MUTATION);
@@ -285,7 +285,7 @@ int abnormal_should_close_valve(AbnormalClose_t policy, ThresholdResult_t result
     }
 }
 
-// ==================== ÖØĞÂ¼ÆËã¼ä¸ô ====================
+// ==================== é‡æ–°è®¡ç®—é—´éš” ====================
 void config_recalc_interval(void)
 {
     if(g_interval.collect_interval_hours < 0.01f)
@@ -306,12 +306,12 @@ void config_recalc_interval(void)
         g_interval.upload_every_n = 1;
 }
 
-// ==================== ´ÓEEPROM¼ÓÔØÈ«²¿ÅäÖÃ ====================
+// ==================== ä»EEPROMåŠ è½½å…¨éƒ¨é…ç½® ====================
 void config_load_all(void)
 {
     uint8_t magic = 0;
 
-    // --- ¼ÓÔØ¼ä¸ôÅäÖÃ ---
+    // --- åŠ è½½é—´éš”é…ç½® ---
     EE_READ(EE_ADDR_INTERVAL_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_INTERVAL)
     {
@@ -330,7 +330,7 @@ void config_load_all(void)
     }
     config_recalc_interval();
 
-    // --- ¼ÓÔØMQTTÅäÖÃ ---
+    // --- åŠ è½½MQTTé…ç½® ---
     EE_READ(EE_ADDR_MQTT_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_MQTT)
     {
@@ -349,7 +349,7 @@ void config_load_all(void)
     }
     else
     {
-        // Ê¹ÓÃ±àÒëÊ±Ä¬ÈÏ??(MQTT ĞèÓÃ»§ÏÂ·¢ clientId/server, ¹Ê²» save)
+        // ä½¿ç”¨ç¼–è¯‘æ—¶é»˜è®¤å€¼(MQTT éœ€ç”¨æˆ·ä¸‹å‘ clientId/server, æ•…ä¸ save)
 strncpy(g_mqtt.client_id, APP_DEFAULT_MQTT_CLIENT_ID, MQTT_FIELD_MAX - 1);
         strncpy(g_mqtt.username,  APP_DEFAULT_MQTT_USER,      MQTT_FIELD_MAX - 1);
         strncpy(g_mqtt.password,  APP_DEFAULT_MQTT_PASS,      MQTT_FIELD_MAX - 1);
@@ -365,7 +365,7 @@ strncpy(g_mqtt.client_id, APP_DEFAULT_MQTT_CLIENT_ID, MQTT_FIELD_MAX - 1);
 
     }
 
-    // --- ¼ÓÔØÑ¹Á¦ãĞ??vpthreshold) + ĞÄÌøÅäÖÃ ---
+    // --- åŠ è½½å‹åŠ›é˜ˆå€¼(vpthreshold) + å¿ƒè·³é…ç½® ---
 EE_READ(EE_ADDR_VPTH_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_VPTH)
     {
@@ -386,7 +386,7 @@ EE_READ(EE_ADDR_VPTH_MAGIC, &magic, 1);
     }
     else
     {
-        // Ê×´ÎÆô¶¯: ÇåÁãÄ¬ÈÏ (switch=0, ãĞ??0)
+        // é¦–æ¬¡å¯åŠ¨: æ¸…é›¶é»˜è®¤ (switch=0, é˜ˆå€¼0)
 g_pthreshold.enabled  = DEF_VP_SWITCH;
         g_pthreshold.ppmax    = DEF_VP_PPMAX;
         g_pthreshold.pmax     = DEF_VP_PMAX;
@@ -402,7 +402,7 @@ g_pthreshold.enabled  = DEF_VP_SWITCH;
         config_save_vpthreshold();
     }
 
-    // --- ¼ÓÔØÎÂ¶ÈãĞ??Tthreshold) ---
+    // --- åŠ è½½æ¸©åº¦é˜ˆå€¼(Tthreshold) ---
 EE_READ(EE_ADDR_TTH_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_TTH)
     {
@@ -429,7 +429,7 @@ EE_READ(EE_ADDR_TTH_MAGIC, &magic, 1);
         config_save_tthreshold();
     }
 
-    // --- ¼ÓÔØµçÑ¹¼ì??spupower) ---
+    // --- åŠ è½½ç”µå‹æ£€æµ‹(spupower) ---
 EE_READ(EE_ADDR_SPUP_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_SPUP)
     {
@@ -453,7 +453,7 @@ EE_READ(EE_ADDR_SPUP_MAGIC, &magic, 1);
         config_save_spupower();
     }
 
-    // --- ¼ÓÔØ·§ÃÅ¶¯×÷ÑÓ??valve_delay) ---
+    // --- åŠ è½½é˜€é—¨åŠ¨ä½œå»¶æ—¶(valve_delay) ---
 EE_READ(EE_ADDR_VDLY_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_VDLY)
     {
@@ -472,7 +472,7 @@ EE_READ(EE_ADDR_VDLY_MAGIC, &magic, 1);
         config_save_vdelay();
     }
 
-    // --- ¼ÓÔØ³öÆø¶ËÑ¹Á¦ãĞ??vpthreshold2) ---
+    // --- åŠ è½½å‡ºæ°”ç«¯å‹åŠ›é˜ˆå€¼(vpthreshold2) ---
 EE_READ(EE_ADDR_VPTH2_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_VPTH2)
     {
@@ -502,7 +502,7 @@ EE_READ(EE_ADDR_VPTH2_MAGIC, &magic, 1);
         config_save_vpthreshold2();
     }
 
-    // --- ¼ÓÔØ³öÆø¶ËÎÂ¶ÈãĞ??Tthreshold2) ---
+    // --- åŠ è½½å‡ºæ°”ç«¯æ¸©åº¦é˜ˆå€¼(Tthreshold2) ---
 EE_READ(EE_ADDR_TTH2_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_TTH2)
     {
@@ -527,7 +527,7 @@ EE_READ(EE_ADDR_TTH2_MAGIC, &magic, 1);
         config_save_tthreshold2();
     }
 
-    // --- ¼ÓÔØÓÃ»§¶ËMQTTÅäÖÃ ---
+    // --- åŠ è½½ç”¨æˆ·ç«¯MQTTé…ç½® ---
 EE_READ(EE_ADDR_UMQTT_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_UMQTT)
     {
@@ -538,7 +538,7 @@ EE_READ(EE_ADDR_UMQTT_MAGIC, &magic, 1);
         ee_read_string(EE_ADDR_UMQTT_CLIENT_ID, g_user_mqtt.client_id, MQTT_FIELD_MAX);
         ee_read_string(EE_ADDR_UMQTT_TOPIC_UP,  g_user_mqtt.topic_up,  MQTT_TOPIC_MAX);
         if(g_user_mqtt.port == 0 || g_user_mqtt.port == 0xFFFF) g_user_mqtt.port = 13000;
-        // topic_up: ÓÅÏÈÊ¹ÓÃEEPROMÖĞ´æ´¢µÄ×Ô¶¨ÒåÖ÷?? Îª¿ÕÔò´Óclient_id»ØÍËÆ´½Ó
+        // topic_up: ä¼˜å…ˆä½¿ç”¨EEPROMä¸­å­˜å‚¨çš„è‡ªå®šä¹‰ä¸»é¢˜, ä¸ºç©ºåˆ™ä»client_idå›é€€æ‹¼æ¥
 if(g_user_mqtt.topic_up[0] == '\0' || g_user_mqtt.topic_up[0] == (char)0xFF)
         {
             if(g_user_mqtt.client_id[0])
@@ -555,7 +555,7 @@ if(g_user_mqtt.topic_up[0] == '\0' || g_user_mqtt.topic_up[0] == (char)0xFF)
         printf_debug("[CFG] No UMQTT config (user platform disabled)\r\n");
     }
 
-    // --- ¼ÓÔØ¶¨Ê±¿ª¹Ø·§ÅäÖÃ (ValveTiming) ---
+    // --- åŠ è½½å®šæ—¶å¼€å…³é˜€é…ç½® (ValveTiming) ---
     EE_READ(EE_ADDR_VTIMING_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_VTIMING)
     {
@@ -572,7 +572,7 @@ if(g_user_mqtt.topic_up[0] == '\0' || g_user_mqtt.topic_up[0] == (char)0xFF)
         printf_debug("[CFG] No VTIMING config (disabled)\r\n");
     }
 
-    // --- ¼ÓÔØÀ©Õ¹ÅäÖÃ (window/cycle/abnormal/valve) ---
+    // --- åŠ è½½æ‰©å±•é…ç½® (window/cycle/abnormal/valve) ---
 EE_READ(EE_ADDR_EXT_MAGIC, &magic, 1);
     if(magic == EE_MAGIC_EXT)
     {
@@ -605,7 +605,7 @@ EE_READ(EE_ADDR_EXT_MAGIC, &magic, 1);
         if(voltage_low_power > 1) voltage_low_power = 0;
         if(g_real_enabled > 1)   g_real_enabled = 0;
         if(g_real_frequency < 1 || g_real_frequency > 10) g_real_frequency = 5;
-        // ·À»¤: Î´Ğ´¹ıµÄ×Ö½Ú??0xFF, ÊÓÎª 0
+        // é˜²æŠ¤: æœªå†™è¿‡çš„å­—èŠ‚ä¸º0xFF, è§†ä¸º 0
 if(g_valve_alarm_closed    > 1) g_valve_alarm_closed    = 0;
         if(g_valve_pre_alarm_order > 1) g_valve_pre_alarm_order = 0;
     char dot_str[64]; window_dottime_to_str(g_window.dottime_mask, dot_str, sizeof(dot_str));
@@ -618,7 +618,7 @@ if(g_valve_alarm_closed    > 1) g_valve_alarm_closed    = 0;
                      g_abnormal_close, g_valve_last_order);
         printf_debug("[CFG] EXT: real_enabled=%d real_frequency=%ds lcd=%d sensor_count=%d\r\n",
                      g_real_enabled, g_real_frequency, g_lcd_enabled, g_sensor_count);
-        // ext´æÔÚ?? ÓÃcycleÅäÖÃ¸²¸Çg_intervalµÄÖÜ??±£Ö¤Á½Ì×Êı¾İÒ»??
+        // extå­˜åœ¨æ—¶, ç”¨cycleé…ç½®è¦†ç›–g_intervalçš„å‘¨æœŸ, ä¿è¯ä¸¤å¥—æ•°æ®ä¸€è‡´
 g_interval.collect_interval_hours = (float)cycle_to_seconds(&g_collect_cycle) / 3600.0f;
         g_interval.upload_interval_hours  = (float)cycle_to_seconds(&g_report_cycle)  / 3600.0f;
         config_recalc_interval();
@@ -643,7 +643,7 @@ g_interval.collect_interval_hours = (float)cycle_to_seconds(&g_collect_cycle) / 
         g_sensor_count       = APP_DEFAULT_SENSOR_COUNT;
         g_valve_alarm_closed = 0;
         g_valve_pre_alarm_order = 0;
-        // ext ²»´æÔÚÊ±Í¬²½ g_interval (±£Ö¤Á½Ì×Êı¾İÒ»??
+        // ext ä¸å­˜åœ¨æ—¶åŒæ­¥ g_interval (ä¿è¯ä¸¤å¥—æ•°æ®ä¸€è‡´)
 g_interval.collect_interval_hours = (float)cycle_to_seconds(&g_collect_cycle) / 3600.0f;
         g_interval.upload_interval_hours  = (float)cycle_to_seconds(&g_report_cycle)  / 3600.0f;
         config_recalc_interval();
@@ -659,7 +659,7 @@ g_interval.collect_interval_hours = (float)cycle_to_seconds(&g_collect_cycle) / 
     }
 }
 
-// ==================== ±£´æ¼ä¸ôÅäÖÃµ½EEPROM ====================
+// ==================== ä¿å­˜é—´éš”é…ç½®åˆ°EEPROM ====================
 void config_save_interval(void)
 {
     uint8_t magic = EE_MAGIC_INTERVAL;
@@ -671,7 +671,7 @@ void config_save_interval(void)
                  g_interval.collect_interval_hours, g_interval.upload_interval_hours);
 }
 
-// ==================== ±£´æÀ©Õ¹ÅäÖÃµ½EEPROM ====================
+// ==================== ä¿å­˜æ‰©å±•é…ç½®åˆ°EEPROM ====================
 void config_save_ext(void)
 {
     uint8_t magic = EE_MAGIC_EXT;
@@ -697,7 +697,7 @@ void config_save_ext(void)
     printf_debug("[CFG] EXT saved\r\n");
 }
 
-// ==================== ±£´æMQTTÅäÖÃµ½EEPROM ====================
+// ==================== ä¿å­˜MQTTé…ç½®åˆ°EEPROM ====================
 void config_save_mqtt(void)
 {
     uint8_t magic = EE_MAGIC_MQTT;
@@ -715,8 +715,8 @@ void config_save_mqtt(void)
                  g_mqtt.server2[0] ? g_mqtt.server2 : "(none)", g_mqtt.port2);
 }
 
-// ==================== ±£´æÑ¹Á¦ãĞ??vpthreshold) + ĞÄÌø ====================
-// Ğ´ÈëË³Ğò: Êı¾İ ??×î??magic, Ô­×ÓÌá½»ÓïÒå ??µôµçÊ±Èô magic Î´Ğ´ÔòÏÂ´ÎÆô¶¯ÓÃÄ¬ÈÏ?
+// ==================== ä¿å­˜å‹åŠ›é˜ˆå€¼(vpthreshold) + å¿ƒè·³ ====================
+// å†™å…¥é¡ºåº: æ•°æ®å…ˆäº magic, åŸå­æäº¤è¯­ä¹‰; æ‰ç”µæ—¶è‹¥ magic æœªå†™åˆ™ä¸‹æ¬¡å¯åŠ¨ç”¨é»˜è®¤å€¼
 void config_save_vpthreshold(void)
 {
     EE_WRITE_BYTE(EE_ADDR_VPTH_ENABLED, g_pthreshold.enabled);
@@ -727,15 +727,15 @@ void config_save_vpthreshold(void)
     ee_write_float(EE_ADDR_VPTH_MUTATION, g_pthreshold.mutation);
     ee_write_float(EE_ADDR_VPTH_SHOCK,    g_pthreshold.shock);
     EE_WRITE(EE_ADDR_KEEPALIVE_SEC, (const uint8_t *)&g_keepalive_sec, 2);
-    EE_WRITE_BYTE(EE_ADDR_VPTH_MAGIC, EE_MAGIC_VPTH);  // ×îºóĞ´, ±ê¼ÇÇøÊı¾İÓĞ??
+    EE_WRITE_BYTE(EE_ADDR_VPTH_MAGIC, EE_MAGIC_VPTH);  // æœ€åå†™, æ ‡è®°åŒºæ•°æ®æœ‰æ•ˆ
     printf_debug("[CFG] VPTH saved: en=%d ppmax=%.1f pmax=%.1f ppmin=%.1f pmin=%.1f mut=%.1f shock=%.1f ka=%d\r\n",
                  g_pthreshold.enabled, g_pthreshold.ppmax, g_pthreshold.pmax,
                  g_pthreshold.ppmin, g_pthreshold.pmin,
                  g_pthreshold.mutation, g_pthreshold.shock, g_keepalive_sec);
 }
 
-// ==================== ±£´æÎÂ¶ÈãĞ??Tthreshold) ====================
-// Ğ´ÈëË³Ğò: Êı¾İ ??×î??magic, Ô­×ÓÌá½»ÓïÒå
+// ==================== ä¿å­˜æ¸©åº¦é˜ˆå€¼(Tthreshold) ====================
+// å†™å…¥é¡ºåº: æ•°æ®å…ˆäº magic, åŸå­æäº¤è¯­ä¹‰
 void config_save_tthreshold(void)
 {
     EE_WRITE_BYTE(EE_ADDR_TTH_ENABLED, g_tthreshold.enabled);
@@ -743,39 +743,39 @@ void config_save_tthreshold(void)
     ee_write_float(EE_ADDR_TTH_LOW,   g_tthreshold.low);
     ee_write_float(EE_ADDR_TTH_VHIGH, g_tthreshold.vhigh);
     ee_write_float(EE_ADDR_TTH_VLOW,  g_tthreshold.vlow);
-    EE_WRITE_BYTE(EE_ADDR_TTH_MAGIC, EE_MAGIC_TTH);  // ×îºóĞ´
+    EE_WRITE_BYTE(EE_ADDR_TTH_MAGIC, EE_MAGIC_TTH);  // æœ€åå†™
     printf_debug("[CFG] TTH saved: en=%d high=%.1f low=%.1f vhigh=%.1f vlow=%.1f\r\n",
                  g_tthreshold.enabled, g_tthreshold.high, g_tthreshold.low,
                  g_tthreshold.vhigh, g_tthreshold.vlow);
 }
 
-// ==================== ±£´æµçÑ¹¼ì??spupower) ====================
-// Ğ´ÈëË³Ğò: Êı¾İ ??×î??magic, Ô­×ÓÌá½»ÓïÒå
+// ==================== ä¿å­˜ç”µå‹æ£€æµ‹(spupower) ====================
+// å†™å…¥é¡ºåº: æ•°æ®å…ˆäº magic, åŸå­æäº¤è¯­ä¹‰
 void config_save_spupower(void)
 {
     EE_WRITE_BYTE(EE_ADDR_SPUP_ENABLED, g_spupower.enabled);
     ee_write_float(EE_ADDR_SPUP_HIGH,    g_spupower.high);
     ee_write_float(EE_ADDR_SPUP_LOW,     g_spupower.low);
     ee_write_float(EE_ADDR_SPUP_PROTECT, g_spupower.protect);
-    EE_WRITE_BYTE(EE_ADDR_SPUP_MAGIC, EE_MAGIC_SPUP);  // ×îºóĞ´
+    EE_WRITE_BYTE(EE_ADDR_SPUP_MAGIC, EE_MAGIC_SPUP);  // æœ€åå†™
     printf_debug("[CFG] SPUP saved: en=%d high=%.2f low=%.2f protect=%.2f\r\n",
                  g_spupower.enabled, g_spupower.high, g_spupower.low, g_spupower.protect);
 }
 
-// ==================== ±£´æ·§ÃÅ¶¯×÷ÑÓ??valve_delay) ====================
-// Ğ´ÈëË³Ğò: Êı¾İ ??×î??magic, Ô­×ÓÌá½»ÓïÒå
-// Ç¿ÖÆ clamp delay_ms ??[0, VDLY_DELAY_MS_MAX] ±£»¤µç»ú²»¶Â×ª¹ı?
+// ==================== ä¿å­˜é˜€é—¨åŠ¨ä½œå»¶æ—¶(valve_delay) ====================
+// å†™å…¥é¡ºåº: æ•°æ®å…ˆäº magic, åŸå­æäº¤è¯­ä¹‰
+// å¼ºåˆ¶ clamp delay_ms åˆ° [0, VDLY_DELAY_MS_MAX] ä¿æŠ¤ç”µæœºä¸å µè½¬è¿‡é•¿
 void config_save_vdelay(void)
 {
     if(g_vdelay.delay_ms > VDLY_DELAY_MS_MAX) g_vdelay.delay_ms = VDLY_DELAY_MS_MAX;
     EE_WRITE_BYTE(EE_ADDR_VDLY_ENABLED, g_vdelay.enabled);
     EE_WRITE(EE_ADDR_VDLY_DELAY_MS, (const uint8_t *)&g_vdelay.delay_ms, 2);
-    EE_WRITE_BYTE(EE_ADDR_VDLY_MAGIC, EE_MAGIC_VDLY);  // ×îºóĞ´
+    EE_WRITE_BYTE(EE_ADDR_VDLY_MAGIC, EE_MAGIC_VDLY);  // æœ€åå†™
     printf_debug("[CFG] VDLY saved: en=%d delay_ms=%d\r\n",
                  g_vdelay.enabled, g_vdelay.delay_ms);
 }
 
-// ==================== ±£´æ³öÆø¶ËÑ¹Á¦ãĞ??vpthreshold2) ====================
+// ==================== ä¿å­˜å‡ºæ°”ç«¯å‹åŠ›é˜ˆå€¼(vpthreshold2) ====================
 void config_save_vpthreshold2(void)
 {
     EE_WRITE_BYTE(EE_ADDR_VPTH2_ENABLED, g_pthreshold2.enabled);
@@ -792,7 +792,7 @@ void config_save_vpthreshold2(void)
                  g_pthreshold2.mutation, g_pthreshold2.shock);
 }
 
-// ==================== ±£´æ³öÆø¶ËÎÂ¶ÈãĞ??Tthreshold2) ====================
+// ==================== ä¿å­˜å‡ºæ°”ç«¯æ¸©åº¦é˜ˆå€¼(Tthreshold2) ====================
 void config_save_tthreshold2(void)
 {
     EE_WRITE_BYTE(EE_ADDR_TTH2_ENABLED, g_tthreshold2.enabled);
@@ -806,7 +806,7 @@ void config_save_tthreshold2(void)
                  g_tthreshold2.vhigh, g_tthreshold2.vlow);
 }
 
-// ==================== ±£´æÓÃ»§¶ËMQTTÅäÖÃ ====================
+// ==================== ä¿å­˜ç”¨æˆ·ç«¯MQTTé…ç½® ====================
 void config_save_user_mqtt(void)
 {
     EE_WRITE_BYTE(EE_ADDR_UMQTT_MAGIC, EE_MAGIC_UMQTT);
@@ -815,13 +815,13 @@ void config_save_user_mqtt(void)
     ee_write_string(EE_ADDR_UMQTT_USERNAME,  g_user_mqtt.username,  MQTT_FIELD_MAX);
     ee_write_string(EE_ADDR_UMQTT_PASSWORD,  g_user_mqtt.password,  MQTT_FIELD_MAX);
     ee_write_string(EE_ADDR_UMQTT_CLIENT_ID, g_user_mqtt.client_id, MQTT_FIELD_MAX);
-    // topic_up ´æÈëEEPROM, Ö§³Ö×Ô¶¨ÒåÖ÷??
+    // topic_up å­˜å…¥EEPROM, æ”¯æŒè‡ªå®šä¹‰ä¸»é¢˜
 ee_write_string(EE_ADDR_UMQTT_TOPIC_UP,  g_user_mqtt.topic_up,  MQTT_TOPIC_MAX);
     printf_debug("[CFG] UMQTT saved: %s@%s:%d topic=%s\r\n",
                  g_user_mqtt.client_id, g_user_mqtt.server, g_user_mqtt.port, g_user_mqtt.topic_up);
 }
 
-// ==================== ±£´æ¶¨Ê±¿ª¹Ø·§ÅäÖÃ ====================
+// ==================== ä¿å­˜å®šæ—¶å¼€å…³é˜€é…ç½® ====================
 void config_save_valve_timing(void)
 {
     EE_WRITE_BYTE(EE_ADDR_VTIMING_SWITCH, g_valve_timing.enabled);
@@ -832,7 +832,7 @@ void config_save_valve_timing(void)
                  g_valve_timing.enabled, g_valve_timing.open_time, g_valve_timing.close_time);
 }
 
-// ==================== »ñÈ¡ĞÄÌø??(·ÀÎŞĞ§?? ====================
+// ==================== è·å–å¿ƒè·³å€¼(é˜²æ— æ•ˆå€¼) ====================
 uint16_t config_get_keepalive(void)
 {
     if(g_keepalive_sec < 30)
@@ -840,14 +840,14 @@ uint16_t config_get_keepalive(void)
     return g_keepalive_sec;
 }
 
-// ==================== Topic×Ô¶¯ÍÆµ¼ ====================
-// ??clientId "<Ç°×º>&<Éè±¸ID>&<²úÆ·ID>&<ĞòºÅ>" ??·Ö¸ôÌáÈ¡
-// Ç°×º¿É±ä(S/E/...), È¡seg[1]=Éè±¸ID, seg[2]=²úÆ·ID
-// Éú³É topic_up = "/<²úÆ·ID>/<Éè±¸ID>/property/post"
+// ==================== Topicè‡ªåŠ¨æ¨å¯¼ ====================
+// ä» clientId "<å‰ç¼€>&<è®¾å¤‡ID>&<äº§å“ID>&<åºå·>" æŒ‰åˆ†éš”æå–
+// å‰ç¼€å¯å˜(S/E/...), å–seg[1]=è®¾å¤‡ID, seg[2]=äº§å“ID
+// ç”Ÿæˆ topic_up = "/<äº§å“ID>/<è®¾å¤‡ID>/property/post"
 void derive_topic_from_client_id(void)
 {
     const char *p = g_mqtt.client_id;
-    const char *seg[4] = {0};   // &·Ö¸ôµÄ¶Î
+    const char *seg[4] = {0};   // &åˆ†éš”çš„æ®µ
     int seg_count = 0;
     seg[seg_count++] = p;
 
@@ -860,10 +860,10 @@ void derive_topic_from_client_id(void)
         p++;
     }
 
-    // seg[0]=Ç°×º(S/E/...), seg[1]=Éè±¸ID, seg[2]=²úÆ·ID, seg[3]=ĞòºÅ
+    // seg[0]=å‰ç¼€(S/E/...), seg[1]=è®¾å¤‡ID, seg[2]=äº§å“ID, seg[3]=åºå·
 if(seg_count >= 3)
     {
-        // ÌáÈ¡Éè±¸ID (seg[1]µ½ÏÂÒ»??)
+        // æå–è®¾å¤‡ID (seg[1]åˆ°ä¸‹ä¸€æ®µ)
 char device_id[MQTT_FIELD_MAX] = {0};
         char product_id[MQTT_FIELD_MAX] = {0};
         uint16_t i;
@@ -886,8 +886,8 @@ char device_id[MQTT_FIELD_MAX] = {0};
     }
 }
 
-// ==================== ½âÎöMQTTÃüÁî ====================
-// ¸ñÊ½: {clientId:<Ç°×º>&<Éè±¸ID>&<²úÆ·ID>&<ĞòºÅ>,username:FastBee,passwd:xxx,IP:x.x.x.x,port:1883}
+// ==================== è§£æMQTTå‘½ä»¤ ====================
+// æ ¼å¼: {clientId:<å‰ç¼€>&<è®¾å¤‡ID>&<äº§å“ID>&<åºå·>,username:FastBee,passwd:xxx,IP:x.x.x.x,port:1883}
 static int parse_mqtt_line(const char *cmd)
 {
     if(!strstr(cmd, "clientId:")) return 0;
@@ -905,16 +905,16 @@ static int parse_mqtt_line(const char *cmd)
     if(extract_field(cmd, "port", val_buf, sizeof(val_buf)))
         g_mqtt.port = (uint16_t)atoi(val_buf);
 
-    // ×Ô¶¯??clientId ÍÆµ¼ topic
+    // è‡ªåŠ¨ä» clientId æ¨å¯¼ topic
 derive_topic_from_client_id();
 
     config_save_mqtt();
     return 1;
 }
 
-// ==================== ½âÎöÓÃ»§¶ËMQTTÃüÁî ====================
-// ¸ñÊ½: {umqtt_server:x.x.x.x,umqtt_port:13000,umqtt_user:xxx,umqtt_pass:xxx,umqtt_client:xxx,umqtt_topic:/155/xxx/property/post}
-// ËùÓĞ×Ö¶Î¾ù¿É?? ½ö¸üĞÂÌá¹©µÄ×Ö¶Î; ±ØĞëÖÁÉÙ°üº¬ umqtt_server ??umqtt_client ??umqtt_topic À´´¥·¢Æ¥?
+// ==================== è§£æç”¨æˆ·ç«¯MQTTå‘½ä»¤ ====================
+// æ ¼å¼: {umqtt_server:x.x.x.x,umqtt_port:13000,umqtt_user:xxx,umqtt_pass:xxx,umqtt_client:xxx,umqtt_topic:/155/xxx/property/post}
+// æ‰€æœ‰å­—æ®µå‡å¯é€‰, ä»…æ›´æ–°æä¾›çš„å­—æ®µ; å¿…é¡»è‡³å°‘åŒ…å« umqtt_server / umqtt_client / umqtt_topic æ¥è§¦å‘åŒ¹é…
 static int parse_user_mqtt_line(const char *cmd)
 {
     if(!strstr(cmd, "umqtt_")) return 0;
@@ -935,7 +935,7 @@ static int parse_user_mqtt_line(const char *cmd)
     if(extract_field(cmd, "umqtt_topic", val_buf, MQTT_TOPIC_MAX))
     { strncpy(g_user_mqtt.topic_up, val_buf, MQTT_TOPIC_MAX - 1); changed = 1; }
 
-    // ÈôÎ´ÏÔÊ½Ö¸¶¨topicµ«ÓĞclient_idÇÒtopicÎª¿Õ, ×Ô¶¯»ØÍËÆ´½Ó
+    // è‹¥æœªæ˜¾å¼æŒ‡å®štopicä½†æœ‰client_idä¸”topicä¸ºç©º, è‡ªåŠ¨å›é€€æ‹¼æ¥
 if(g_user_mqtt.topic_up[0] == '\0' && g_user_mqtt.client_id[0])
         snprintf(g_user_mqtt.topic_up, MQTT_TOPIC_MAX, "/155/%s/property/post", g_user_mqtt.client_id);
 
@@ -945,8 +945,8 @@ if(g_user_mqtt.topic_up[0] == '\0' && g_user_mqtt.client_id[0])
     return 1;
 }
 
-// ==================== ½âÎö²É¼¯ÖÜÆÚÃüÁî ====================
-// ¸ñÊ½: {id:collect_interval,value:0.5}
+// ==================== è§£æé‡‡é›†å‘¨æœŸå‘½ä»¤ ====================
+// æ ¼å¼: {id:collect_interval,value:0.5}
 static int parse_collect_line(const char *cmd)
 {
     if(!strstr(cmd, "id:collect_interval")) return 0;
@@ -962,8 +962,8 @@ static int parse_collect_line(const char *cmd)
     return 0;
 }
 
-// ==================== ½âÎöĞÄÌøÃüÁî ==
-// ¸ñÊ½: {id:keepalive,value:300}
+// ==================== è§£æå¿ƒè·³å‘½ä»¤ ==
+// æ ¼å¼: {id:keepalive,value:300}
 static int parse_keepalive_line(const char *cmd)
 {
     if(!strstr(cmd, "id:keepalive")) return 0;
@@ -981,8 +981,8 @@ static int parse_keepalive_line(const char *cmd)
     return 0;
 }
 
-// ==================== ½âÎöÑ¹Á¦ãĞ??(vpthreshold) ====================
-// ¸ñÊ½: {id:vpthreshold,value:switch:1,ppmax:5000,pmax:1000,ppmin:-5000,pmin:-1000,mutation:1000,shock:100}
+// ==================== è§£æå‹åŠ›é˜ˆå€¼(vpthreshold) ====================
+// æ ¼å¼: {id:vpthreshold,value:switch:1,ppmax:5000,pmax:1000,ppmin:-5000,pmin:-1000,mutation:1000,shock:100}
 static int parse_vpthreshold_line(const char *cmd)
 {
     if(!strstr(cmd, "id:vpthreshold")) return 0;
@@ -1009,8 +1009,8 @@ static int parse_vpthreshold_line(const char *cmd)
     return 1;
 }
 
-// ==================== ½âÎöÎÂ¶ÈãĞ??(Tthreshold) ====================
-// ¸ñÊ½: {id:Tthreshold,value:switch:1,high:50,low:-50,vhigh:100,vlow:-100}
+// ==================== è§£ææ¸©åº¦é˜ˆå€¼(Tthreshold) ====================
+// æ ¼å¼: {id:Tthreshold,value:switch:1,high:50,low:-50,vhigh:100,vlow:-100}
 static int parse_tthreshold_line(const char *cmd)
 {
     if(!strstr(cmd, "id:Tthreshold")) return 0;
@@ -1033,8 +1033,8 @@ static int parse_tthreshold_line(const char *cmd)
     return 1;
 }
 
-// ==================== ½âÎöµçÑ¹¼ì??(spupower) ====================
-// ¸ñÊ½: {id:spupower,value:switch:1,high:3.6,low:3.0,protect:3.2}
+// ==================== è§£æç”µå‹æ£€æµ‹(spupower) ====================
+// æ ¼å¼: {id:spupower,value:switch:1,high:3.6,low:3.0,protect:3.2}
 static int parse_spupower_line(const char *cmd)
 {
     if(!strstr(cmd, "id:spupower")) return 0;
@@ -1055,9 +1055,9 @@ static int parse_spupower_line(const char *cmd)
     return 1;
 }
 
-// ==================== ½âÎö·§ÃÅ¶¯×÷ÑÓ??(delay) ====================
-// ¸ñÊ½: {id:delay,value:switch:1,time:500}
-// time ·¶Î§ 0~VDLY_DELAY_MS_MAX (Ä¬ÈÏ 5000ms), ³¬³ö??config_save_vdelay ??clamp
+// ==================== è§£æé˜€é—¨åŠ¨ä½œå»¶æ—¶(delay) ====================
+// æ ¼å¼: {id:delay,value:switch:1,time:500}
+// time èŒƒå›´ 0~VDLY_DELAY_MS_MAX (é»˜è®¤ 5000ms), è¶…å‡ºå config_save_vdelay å†… clamp
 static int parse_vdelay_line(const char *cmd)
 {
     if(!strstr(cmd, "id:delay")) return 0;
@@ -1079,15 +1079,15 @@ static int parse_vdelay_line(const char *cmd)
     return 1;
 }
 
-// ==================== Í³Ò»ÅäÖÃÃüÁî½âÎö(¹«¿ª½Ó¿Ú) ====================
-// ·µ»Ø: 1=ÓĞĞ§ÅäÖÃ, 0=ÎŞĞ§/ÎŞÊı?? -1=reset(»Ö¸´³ö³§)
+// ==================== ç»Ÿä¸€é…ç½®å‘½ä»¤è§£æ(å…¬å¼€æ¥å£) ====================
+// è¿”å›: 1=æœ‰æ•ˆé…ç½®, 0=æ— æ•ˆ/æ— æ•°æ®, -1=reset(æ¢å¤å‡ºå‚)
 int config_parse_and_apply(const char *cmd)
 {
     if(strstr(cmd, "reset"))
     {
         printf_debug("[CFG] Factory reset, rebooting...\r\n");
         trea_delay_ms(50);
-        // Çå³ıEEPROMËùÓĞMagic ??ÖØÆôºó×Ô¶¯½øÈëMQTTµÈ´ı
+        // æ¸…é™¤EEPROMæ‰€æœ‰Magic, é‡å¯åè‡ªåŠ¨è¿›å…¥MQTTç­‰å¾…
 EE_WRITE_BYTE(EE_ADDR_INTERVAL_MAGIC, 0xFF);
         EE_WRITE_BYTE(EE_ADDR_MQTT_MAGIC,     0xFF);
         EE_WRITE_BYTE(EE_ADDR_EXT_MAGIC,      0xFF);
@@ -1099,7 +1099,7 @@ EE_WRITE_BYTE(EE_ADDR_INTERVAL_MAGIC, 0xFF);
         EE_WRITE_BYTE(EE_ADDR_TTH2_MAGIC,     0xFF);
         EE_WRITE_BYTE(EE_ADDR_UMQTT_MAGIC,    0xFF);
         NVIC_SystemReset();
-        return -1;  // ²»»áµ½´ï
+        return -1;  // ä¸ä¼šåˆ°è¾¾
         }
     if(parse_mqtt_line(cmd))         return 1;
     if(parse_user_mqtt_line(cmd))    return 1;
@@ -1110,8 +1110,8 @@ EE_WRITE_BYTE(EE_ADDR_INTERVAL_MAGIC, 0xFF);
     if(parse_spupower_line(cmd))     return 1;
     if(parse_vdelay_line(cmd))       return 1;
 
-    // ---- Òì³£¹Ø·§²ßÂÔ ----
-    // ¸ñÊ½: {id:abnormal,value:temph}
+    // ---- å¼‚å¸¸å…³é˜€ç­–ç•¥ ----
+    // æ ¼å¼: {id:abnormal,value:temph}
 if(strstr(cmd, "id:abnormal"))
     {
         char val_buf[96];
@@ -1126,8 +1126,8 @@ if(strstr(cmd, "id:abnormal"))
         return 1;
     }
 
-    // ---- ²É¼¯ÖÜÆÚ(ĞÂ¸ñ?? ----
-    // ¸ñÊ½: {id:collect_cycle,once:22,type:minute}
+    // ---- é‡‡é›†å‘¨æœŸ(æ–°æ ¼å¼) ----
+    // æ ¼å¼: {id:collect_cycle,once:22,type:minute}
 if(strstr(cmd, "id:collect_cycle"))
     {
         char val_buf[96];
@@ -1149,8 +1149,8 @@ if(strstr(cmd, "id:collect_cycle"))
         return 1;
     }
 
-    // ---- ÉÏ±¨ÖÜÆÚ(ĞÂ¸ñ?? ----
-    // ¸ñÊ½: {id:report_cycle,once:12,type:minute}
+    // ---- ä¸ŠæŠ¥å‘¨æœŸ(æ–°æ ¼å¼) ----
+    // æ ¼å¼: {id:report_cycle,once:12,type:minute}
 if(strstr(cmd, "id:report_cycle"))
     {
         char val_buf[96];
@@ -1172,8 +1172,8 @@ if(strstr(cmd, "id:report_cycle"))
         return 1;
     }
 
-    // ---- ´°¿ÚÄ£Ê½(ĞÂ¸ñ?? ----
-    // ¸ñÊ½: {id:window_pattern,value:short,start:080000,stop:200000,end_result:1,dottime:3}
+    // ---- çª—å£æ¨¡å¼(æ–°æ ¼å¼) ----
+    // æ ¼å¼: {id:window_pattern,value:short,start:080000,stop:200000,end_result:1,dottime:3}
 if(strstr(cmd, "id:window_pattern"))
     {
         char val_buf[96];
@@ -1196,7 +1196,7 @@ if(strstr(cmd, "id:window_pattern"))
         return 1;
     }
 
-    // ---- ¼òµ¥²éÑ¯Ãü??(²»ĞèÒªmain.cÉÏÏÂ?? ----
+    // ---- ç®€å•æŸ¥è¯¢å‘½ä»¤(ä¸éœ€è¦main.cä¸Šä¸‹æ–‡) ----
 if(strcmp(cmd, "config") == 0)
     { config_print_current(); return 1; }
     if(strcmp(cmd, "vpthreshold_get") == 0)
@@ -1254,8 +1254,8 @@ if(strcmp(cmd, "config") == 0)
         printf_debug("  lcd_enabled=%d\r\n", g_lcd_enabled);
         return 1;
     }
-    // ---- ÊµÊ±²É¼¯¿ª¹Ø+ÆµÂÊ ----
-    // ¸ñÊ½: real_set=1,5  (¿ªÆô,5Ãë)  real_set=0  (¹Ø±Õ)  real_set=1  (¿ªÆô,ÆµÂÊ²»±ä)
+    // ---- å®æ—¶é‡‡é›†å¼€å…³+é¢‘ç‡ ----
+    // æ ¼å¼: real_set=1,5  (å¼€å¯,5ç§’)  real_set=0  (å…³é—­)  real_set=1  (å¼€å¯,é¢‘ç‡ä¸å˜)
     if(strncmp(cmd, "real_set=", 9) == 0)
     {
         const char *p = cmd + 9;
@@ -1273,21 +1273,21 @@ if(strcmp(cmd, "config") == 0)
         return 1;
     }
 
-    // ·µ»Ø0: Î´Æ¥Åä, ÓÉµ÷ÓÃ·½(main.c)¼ÌĞø´¦ÀíĞèÒªÓ²¼şÉÏÏÂÎÄµÄÃüÁî
+    // è¿”å›0: æœªåŒ¹é…, ç”±è°ƒç”¨æ–¹(main.c)ç»§ç»­å¤„ç†éœ€è¦ç¡¬ä»¶ä¸Šä¸‹æ–‡çš„å‘½ä»¤
 return 0;
 }
 
-// ==================== ÉÏµçÅäÖÃ¼ì??====================
-// ½öµ±MQTTÎ´ÅäÖÃÊ±×èÈûµÈ´ı(30??, ÆÚ¼ä½ÓÊÜÈÎÒâÅäÖÃÃüÁî(ÈÎÒâË³Ğò)
-// MQTTÒÔÍâµÄ²ÎÊı¶¼ÓĞÄ¬ÈÏ?? ³¬Ê±ºóÓÃÄ¬ÈÏÖµÆô?
+// ==================== ä¸Šç”µé…ç½®æ£€æŸ¥ ====================
+// ä»…å½“MQTTæœªé…ç½®æ—¶é˜»å¡ç­‰å¾…(30s), æœŸé—´æ¥å—ä»»æ„é…ç½®å‘½ä»¤(ä»»æ„é¡ºåº)
+// MQTTä»¥å¤–çš„å‚æ•°éƒ½æœ‰é»˜è®¤å€¼, è¶…æ—¶åç”¨é»˜è®¤å€¼å¯åŠ¨
 void config_enter_setup_mode(uint8_t force_reconfig)
 {
-    // ¹²Ïí s_cfg_line_buf (Ä£¿é??; ??config_check_cmd »¥³âµ÷ÓÃ
+    // å…±äº« s_cfg_line_buf (æ¨¡å—çº§; ä¸ config_check_cmd äº’æ–¥è°ƒç”¨
 uint8_t mqtt_valid = 0;
 
-    (void)force_reconfig;  // ²»ÔÙĞè?? resetÒÑ¸ÄÎªÇåmagic+ÖØÆô
+    (void)force_reconfig;  // ä¸å†éœ€è¦, resetå·²æ”¹ä¸ºæ¸…magic+é‡å¯
 
-    // ¼ì²éMQTTÊÇ·ñÒÑÅä??    
+    // æ£€æŸ¥MQTTæ˜¯å¦å·²é…ç½®
 	{
     uint8_t m = 0;
         EE_READ(EE_ADDR_MQTT_MAGIC, &m, 1);
@@ -1300,7 +1300,7 @@ uint8_t mqtt_valid = 0;
         return;
     }
 
-    // MQTTÎ´Åä?? ½øÈëÅäÖÃ´°¿Ú
+    // MQTTæœªé…ç½®, è¿›å…¥é…ç½®çª—å£
     printf_debug("\r\n[CFG] === MQTT not configured, waiting (30s) ===\r\n");
     printf_debug("  MQTT: {clientId:xxx,username:xxx,passwd:xxx,IP:x.x.x.x,port:1883}\r\n");
     printf_debug("  UMQTT: {umqtt_server:x.x.x.x,umqtt_port:13000,umqtt_user:xx,umqtt_pass:xx,umqtt_client:xx,umqtt_topic:/xx/xx}\r\n");
@@ -1311,7 +1311,7 @@ uint8_t mqtt_valid = 0;
 
     while((trea_millis() - start) < 30000)
     {
-        // ??5ÃëÌá??
+        // æ¯5ç§’æç¤º
     int elapsed = (trea_millis() - start) / 1000;
         if(elapsed - last_hint >= 15)
         {
@@ -1325,13 +1325,13 @@ uint8_t mqtt_valid = 0;
         printf_debug("[CFG] Recv: %s\r\n", s_cfg_line_buf);
         config_parse_and_apply(s_cfg_line_buf);
 
-        // ¼ì²éMQTTÊÇ·ñÒÑÅä??        {
+        // æ£€æŸ¥MQTTæ˜¯å¦å·²é…ç½®        {
 	uint8_t m = 0;
             EE_READ(EE_ADDR_MQTT_MAGIC, &m, 1);
             if(m == EE_MAGIC_MQTT)
             {
                 printf_debug("[CFG] MQTT configured! Waiting 5s for optional params...\r\n");
-                // ¶Ì´°¿Ú½ÓÊÕ¿ÉÑ¡²Î??
+                // çŸ­çª—å£æ¥æ”¶å¯é€‰å‚æ•°
     uint32_t opt_start = trea_millis();
                 while((trea_millis() - opt_start) < 10000)
                 {
@@ -1347,14 +1347,14 @@ uint8_t mqtt_valid = 0;
                 return;
             }
         }
-    // 30Ãë³¬?? MQTTÈÔÎ´ÅäÖÃ
+    // 30ç§’è¶…æ—¶, MQTTä»æœªé…ç½®
     printf_debug("[CFG] TIMEOUT: MQTT not configured, entering deep sleep...\r\n");
     trea_delay_ms(50);
     enter_deepsleep_mode(0);
 }
 
 
-// ==================== ´òÓ¡µ±Ç°ÅäÖÃ ====================
+// ==================== æ‰“å°å½“å‰é…ç½® ====================
 void config_print_current(void)
 {
     printf_debug("\r\n--- Current Config ---\r\n");
@@ -1395,10 +1395,10 @@ void config_print_current(void)
     printf_debug("----------------------\r\n");
 }
 
-// ==================== ·Ç×èÈû¼ì²édebug´®¿Ú(Ö÷Ñ­»·Ã¿ÂÖµ÷?? ====================
+// ==================== éé˜»å¡æ£€æŸ¥debugä¸²å£(ä¸»å¾ªç¯æ¯è½®è°ƒç”¨) ====================
 void config_check_cmd(void)
 {
-    // ¹²Ïí s_cfg_line_buf (Ä£¿é??; ??config_enter_setup_mode »¥³âµ÷ÓÃ
+    // å…±äº« s_cfg_line_buf (æ¨¡å—çº§; ä¸ config_enter_setup_mode äº’æ–¥è°ƒç”¨
 uint16_t len;
 
     while((len = debug_rx_read_line(s_cfg_line_buf, sizeof(s_cfg_line_buf), 0)) > 0)
@@ -1408,28 +1408,28 @@ uint16_t len;
     }
 }
 
-// ==================== ÅĞ¶Ïµ±Ç°RTCÊ±¼äÊÇ·ñÔÚ»î¶¯´°??====================
+// ==================== åˆ¤æ–­å½“å‰RTCæ—¶é—´æ˜¯å¦åœ¨æ´»åŠ¨çª—å£ ====================
 int config_is_active_window(void)
 {
     uint32_t now, start, stop;
 
-    // dotÄ£Ê½²»Ê¹ÓÃ´°¿Ú¸Å?? ÓÉdo_collect°´ÕûµãÅĞ??
+    // dotæ¨¡å¼ä¸ä½¿ç”¨çª—å£æ¦‚å¿µ, ç”±do_collectæŒ‰æ•´ç‚¹åˆ¤æ–­
 if(strcmp(g_window.pattern, "dot") == 0) return 1;
 
-    // long/short: »ùÓÚHHMMSS´°¿ÚÅĞ¶Ï
+    // long/short: åŸºäºHHMMSSçª—å£åˆ¤æ–­
 now   = rtc_get_hhmmss();
     start = (uint32_t)atol(g_window.start);
     stop  = (uint32_t)atol(g_window.stop);
 
-    // Î´ÅäÖÃ´°¿ÚÊ±??start==0 && stop==0), È«ÌìÓĞĞ§
+    // æœªé…ç½®çª—å£æ—¶(start==0 && stop==0), å…¨å¤©æœ‰æ•ˆ
 if(start == 0 && stop == 0) return 1;
 
-    // stop ¼Ó 2 ·ÖÖÓÈİ²î(HHMMSS +200), ¸²¸Ç RTC ÄÖÖÓÆ«ÒÆµ¼ÖÂµÄ±ß½ç²È¿Õ
+    // stop åŠ  2 åˆ†é’Ÿå®¹å·®(HHMMSS +200), è¦†ç›– RTC é—¹é’Ÿåç§»å¯¼è‡´çš„è¾¹ç•Œè¸©ç©º
     {
-        uint32_t stop_m = stop % 10000;       // MMSS ²¿·Ö
-        uint32_t stop_h = stop / 10000;       // HH ²¿·Ö
-        stop_m += 200;                        // +2·ÖÖÓ
-        if((stop_m / 100) % 100 >= 60)        // MM>=60 ½øÎ»
+        uint32_t stop_m = stop % 10000;       // MMSS éƒ¨åˆ†
+        uint32_t stop_h = stop / 10000;       // HH éƒ¨åˆ†
+        stop_m += 200;                        // +2åˆ†é’Ÿ
+        if((stop_m / 100) % 100 >= 60)        // MM>=60 è¿›ä½
         { stop_m -= 6000; stop_h++; }
         if(stop_h >= 24) stop_h -= 24;
         stop = stop_h * 10000 + stop_m;
@@ -1438,18 +1438,18 @@ if(start == 0 && stop == 0) return 1;
     if(start < stop)
         return (now >= start && now <= stop);
     else
-        return (now >= start || now <= stop);  // ¿çÎç??
+        return (now >= start || now <= stop);  // è·¨åˆå¤œ
 }
 
-// ==================== ÖÇÄÜ¾ö²ßµ±Ç°²É¼¯ÖÜÆÚÊÇ·ñĞèÒª²ÉÑùµç³Øµç??====================
-// ½öÔÚÊ×´Î¡¢Î²´Î£¨ÉÏ±¨µã£©»òµÍµçÑ¹±£»¤Ä£Ê½ÏÂ¿ªÆô²ÉÑù£¬ÆäÓàÖĞ¼ä²É¼¯µã±£³Ö¹Ø±ÕÒÔ×î´ó»¯Ê¡µç??extern uint8_t voltage_low_power;
+// ==================== æ™ºèƒ½å†³ç­–å½“å‰é‡‡é›†å‘¨æœŸæ˜¯å¦éœ€è¦é‡‡æ ·ç”µæ± ç”µå‹ ====================
+// ä»…åœ¨é¦–æ¬¡ã€å°¾æ¬¡ï¼ˆä¸ŠæŠ¥ç‚¹ï¼‰æˆ–ä½ç”µå‹ä¿æŠ¤æ¨¡å¼ä¸‹å¼€å¯é‡‡æ ·ï¼Œå…¶ä½™ä¸­é—´é‡‡é›†ç‚¹ä¿æŒå…³é—­ä»¥æœ€å¤§åŒ–çœç”µã€‚extern uint8_t voltage_low_power;
 uint8_t config_need_adc_sampling(void)
 {
-    // 1. µÍµçÑ¹±£»¤×´Ì¬ÏÂ£º±ØĞëÃ¿´Î¶¼²ÉÑù£¬ÒÔ±ã¼°Ê±¼ì²âµç³Ø¸ü»»ºÍµçÑ¹»Ö¸´£¬ÍË³öµÍµçÑ¹×´??
+    // 1. ä½ç”µå‹ä¿æŠ¤çŠ¶æ€ä¸‹ï¼šå¿…é¡»æ¯æ¬¡éƒ½é‡‡æ ·ï¼Œä»¥ä¾¿åŠæ—¶æ£€æµ‹ç”µæ± æ›´æ¢å’Œç”µå‹æ¢å¤ï¼Œé€€å‡ºä½ç”µå‹çŠ¶æ€
 if(voltage_low_power)
         return 1;
 
-    // 2. dot£¨¶¨µãÄ£Ê½£©£ºÒ»ÌìÉÏ±¨Ò»´Î£¬Ê×´ÎºÍÎ²´Î¼ì??
+    // 2. dotï¼ˆå®šç‚¹æ¨¡å¼ï¼‰ï¼šä¸€å¤©ä¸ŠæŠ¥ä¸€æ¬¡ï¼Œé¦–æ¬¡å’Œå°¾æ¬¡æ£€æŸ¥
 if(strcmp(g_window.pattern, "dot") == 0)
     {
         uint32_t now_hhmmss = rtc_get_hhmmss();
@@ -1465,7 +1465,7 @@ if(strcmp(g_window.pattern, "dot") == 0)
         return 0;
     }
 
-    // 3. long£¨³¤Á¬½Ó£©ºÍ short£¨¶ÌÁ¬½Ó£©Ä£Ê½£º°´·ÖÖÓÕûÍø¸ñ¼ÆËãÊ×´ÎºÍÎ²??
+    // 3. longï¼ˆé•¿è¿æ¥ï¼‰å’Œ shortï¼ˆçŸ­è¿æ¥ï¼‰æ¨¡å¼ï¼šæŒ‰åˆ†é’Ÿæ•´ç½‘æ ¼è®¡ç®—é¦–æ¬¡å’Œå°¾æ¬¡
 if(strcmp(g_window.pattern, "long") == 0 || strcmp(g_window.pattern, "short") == 0)
     {
         uint32_t now_hhmmss = rtc_get_hhmmss();
@@ -1488,5 +1488,5 @@ if(strcmp(g_window.pattern, "long") == 0 || strcmp(g_window.pattern, "short") ==
         return 0;
     }
 
-    return 1; // ÆäËüÄ£Ê½£¨°²È«¶µµ×£©£º¶¼??
+    return 1; // å…¶å®ƒæ¨¡å¼ï¼ˆå®‰å…¨å…œåº•ï¼‰ï¼šéƒ½é‡‡æ ·
 }

@@ -17,8 +17,13 @@ void motor_init(void)
     /* PA11: 限位1(开阀到位), PA12: 限位2(关阀到位), 内部上拉（低电平=到位） */
     gpio_mode_set(GPIOA, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPIO_PIN_11 | GPIO_PIN_12);
 
-    /* PA6/PA7: 电机控制GPIO输出 */
+#if MOTOR_DRV_MODE == 1
+    /* PWM 驱动: PA6/PA7 复用 TIMER2 CH0/CH1 (motor.c pwm_init) */
+    pwm_init(160000, 0.0f, 0.0f);
+#else
+    /* GPIO 直驱: PA6/PA7 推挽输出 */
     gpio_mode_set(GPIOA, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_6 | GPIO_PIN_7);
+#endif
 }
 
 // ==================== 限位开关读取 ====================
@@ -46,16 +51,18 @@ const char* valve_execute(const char *action, uint8_t update_last_order)
     uint32_t t;
     uint8_t target_limit, wrong_limit;
 
-//    gpio_bit_set(GPIOA, GPIO_PIN_5);    // M_SLP HIGH: 电机驱动使能
-//    pwm_init(160000, 0.0f, 0.0f);
+    // M_SLP(PA5) 使能由硬件决定, 当前未使用; PWM 初始化见 motor_init()
 
     if(strcmp(action, "open") == 0 || strcmp(action, "1") == 0)
     {
         printf_debug("[SM] Valve OPEN\r\n");
-//        pwm_set_duty(0, 0.0f);
-//        pwm_set_duty(1, 0.999f);
-		gpio_bit_reset(GPIOA, GPIO_PIN_6); 
-		gpio_bit_set(GPIOA, GPIO_PIN_7); 
+#if MOTOR_DRV_MODE == 1
+        pwm_set_duty(0, 0.0f);
+        pwm_set_duty(1, 0.999f);
+#else
+        gpio_bit_reset(GPIOA, GPIO_PIN_6);
+        gpio_bit_set(GPIOA, GPIO_PIN_7);
+#endif
         t = trea_millis();
         while(!motor_limit1_reached() && (trea_millis() - t) < 20000);
 
@@ -69,8 +76,13 @@ const char* valve_execute(const char *action, uint8_t update_last_order)
         }
 
 		
-		gpio_bit_reset(GPIOA, GPIO_PIN_6); 
-		gpio_bit_reset(GPIOA, GPIO_PIN_7); 
+#if MOTOR_DRV_MODE == 1
+        pwm_set_duty(0, 0.0f);
+        pwm_set_duty(1, 0.0f);
+#else
+        gpio_bit_reset(GPIOA, GPIO_PIN_6);
+        gpio_bit_reset(GPIOA, GPIO_PIN_7);
+#endif
 
         target_limit = motor_limit1_reached();
         wrong_limit  = motor_limit2_reached();
@@ -91,10 +103,13 @@ const char* valve_execute(const char *action, uint8_t update_last_order)
     else if(strcmp(action, "close") == 0 || strcmp(action, "0") == 0)
     {
         printf_debug("[SM] Valve CLOSE\r\n");
-		gpio_bit_set(GPIOA, GPIO_PIN_6); 
-		gpio_bit_reset(GPIOA, GPIO_PIN_7); 
-//        pwm_set_duty(0, 0.999f);
-//        pwm_set_duty(1, 0.0f);
+#if MOTOR_DRV_MODE == 1
+        pwm_set_duty(0, 0.999f);
+        pwm_set_duty(1, 0.0f);
+#else
+        gpio_bit_set(GPIOA, GPIO_PIN_6);
+        gpio_bit_reset(GPIOA, GPIO_PIN_7);
+#endif
         t = trea_millis();
         while(!motor_limit2_reached() && (trea_millis() - t) < 20000);
 

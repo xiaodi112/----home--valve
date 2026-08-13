@@ -27,16 +27,16 @@ static void trea_uart_send_byte(uint32_t uart, uint8_t ch)
 }
 
 // ===================== LPUART0 DMA接收缓冲 =====================
-// DMA循环模式自动搬运, 软件跟踪读指�?
+// DMA循环模式自动搬运, 软件跟踪读指针
 #define LPUART_DMA_BUF_SIZE  1024
 #define LPUART_DMA_CHANNEL   DMA_CH1
 
 static uint8_t  lpuart_dma_buf[LPUART_DMA_BUF_SIZE];
 static volatile uint16_t lpuart_dma_read_pos = 0;  // 软件读取位置
 
-// IDLE帧检�? 用于OTA整帧接收
-volatile uint8_t  lpuart_frame_ready = 0;     // 帧完成标�?IDLE中断置位)
-volatile uint16_t lpuart_frame_end_pos = 0;   // 帧结束DMA写位�?
+// IDLE帧检查, 用于OTA整帧接收
+volatile uint8_t  lpuart_frame_ready = 0;     // 帧完成标志(IDLE中断置位)
+volatile uint16_t lpuart_frame_end_pos = 0;   // 帧结束DMA写位置
 
 // 获取DMA当前写入位置(DMA已写入字节数)
 static uint16_t lpuart_dma_write_pos(void)
@@ -66,7 +66,7 @@ void lpuart_dma_rx_init(void)
     dma_init_struct.priority     = DMA_PRIORITY_HIGH;
     dma_init(LPUART_DMA_CHANNEL, &dma_init_struct);
 
-    // 循环模式: 写到末尾后自动回到开�?
+    // 循环模式: 写到末尾后自动回到开头
     dma_circulation_enable(LPUART_DMA_CHANNEL);
     dma_channel_enable(LPUART_DMA_CHANNEL);
 
@@ -83,10 +83,10 @@ void lpuart_dma_rx_disable(void)
     lpuart_dma_receive_config(LPUART0, LPUART_RECEIVE_DMA_DISABLE);
 }
 
-// LPUART IRQ处理: IDLE帧检�?+ 错误清除
+// LPUART IRQ处理: IDLE帧检查 + 错误清除
 void lpuart_rx_irq_handler(void)
 {
-    // IDLE空闲检�? 一帧数据接收完�?
+    // IDLE空闲检查: 一帧数据接收完成
     if(SET == lpuart_interrupt_flag_get(LPUART0, LPUART_INT_FLAG_IDLE))
     {
         lpuart_flag_clear(LPUART0, LPUART_FLAG_IDLE);
@@ -114,7 +114,7 @@ void lpuart_rx_flush(void)
         lpuart_flag_clear(LPUART0, LPUART_FLAG_IDLE);
 }
 
-// 等待一帧完�?IDLE检�?, 返回帧长�? 0=超时
+// 等待一帧完成(IDLE检查), 返回帧长度; 0=超时
 uint16_t lpuart_wait_frame(uint32_t timeout_ms)
 {
     uint32_t start = trea_millis();
@@ -138,7 +138,7 @@ uint16_t lpuart_wait_frame(uint32_t timeout_ms)
     return 0;
 }
 
-// 从DMA缓冲拷贝数据到用户缓�?妄帧读取, 跟新read_pos)
+// 从DMA缓冲拷贝数据到用户缓冲区, 整帧读取, 跟新read_pos)
 uint16_t lpuart_read_frame(uint8_t *dst, uint16_t max_len)
 {
     uint16_t wp, rp, len;
@@ -178,7 +178,7 @@ int trea_uart_recv_byte_timeout(uint32_t uart, uint8_t* ch, uint32_t timeout_ms)
         }
         return 0;
     }
-    // 其他UART: 轮询硬件寄存�?
+    // 其他UART: 轮询硬件寄存器
     while((trea_millis() - start) < timeout_ms) {
         if(RESET != usart_flag_get(uart, USART_FLAG_RBNE)) {
             *ch = (uint8_t)usart_data_receive(uart);
@@ -222,7 +222,7 @@ int serial_write(uint32_t uart, const uint8_t *data, uint16_t len)
 
 void lpuart_rx_recover(void)
 {
-    // TX后防御性恢�? 清除错误标志(DMA模式无需重新使能中断)
+    // TX后防御性恢复: 清除错误标志(DMA模式无需重新使能中断)
     if(SET == lpuart_flag_get(LPUART0, LPUART_FLAG_ORERR))
         lpuart_flag_clear(LPUART0, LPUART_FLAG_ORERR);
     if(SET == lpuart_flag_get(LPUART0, LPUART_FLAG_FERR))
@@ -283,7 +283,7 @@ int printf_cat1(const char* fmt, ...)
 }
 
 
-// ===================== 【封�?】LPUART唤醒初始�?=====================
+// ===================== 【封装】LPUART唤醒初始化 =====================
 void lpuart_wakeup_init(void)
 {
     // 时钟源已在 com_lpuart_init() 中配置为 IRC16MDIV, 此处不再重复设置
@@ -303,8 +303,8 @@ void lpuart_wakeup_init(void)
     lpuart_interrupt_enable(LPUART0, LPUART_INT_WU);
 }
 
-// ===================== 【封�?】进入深休眠 =====================
-// 支持四种唤醒�? LPUART (counter0) / RTC闹钟 (rtc_alarm_flag) / 按键 (button_wakeup_flag) / 4G RI (ri_wakeup_flag)
+// ===================== 【封装】进入深休眠 =====================
+// 支持四种唤醒源: LPUART (counter0) / RTC闹钟 (rtc_alarm_flag) / 按键 (button_wakeup_flag) / 4G RI (ri_wakeup_flag)
 void enter_deepsleep_mode(uint8_t lpuart_enabled)
 {
     extern volatile uint8_t rtc_alarm_flag;
@@ -320,17 +320,17 @@ void enter_deepsleep_mode(uint8_t lpuart_enabled)
     // 所有进入深休眠的路径都经过本函数, 此处统一关闭可保证休眠期不被误复位
     swdt_disable();
 
-    // 配置未使�?GPIO �?ANALOG 以极致降低漏�?
+    // 配置未使用GPIO 为 ANALOG 以极致降低漏电
     gpio_enter_low_power(lpuart_enabled);
 
     rcu_periph_clock_enable(RCU_PMU);
     pmu_to_deepsleepmode(PMU_LDNPDSP_LOWDRIVE, WFI_CMD, PMU_DEEPSLEEP);
 
-    // 等待任意唤醒�?
+    // 等待任意唤醒源
     while((0x00 == counter0) && (0 == rtc_alarm_flag) && (0 == button_wakeup_flag) && (0 == ri_wakeup_flag));
 }
 
-// ===================== 【封�?】唤醒后系统重新初始�?=====================
+// ===================== 【封装】唤醒后系统重新初始化 =====================
 void system_wakeup_reinit(void)
 {
     // 恢复时钟 + 滴答定时器 + TIMER1（必须最先执行）
@@ -348,7 +348,7 @@ void system_wakeup_reinit(void)
     // 关闭RI引脚EXTI (防止唤醒后RI持续低电平重复触发)
     ri_exti_disable();
 
-    // LPUART唤醒时：消费触发唤醒的字�?深休眠期间DMA未运�? 字节在RDATA�?
+    // LPUART唤醒时：消费触发唤醒的字符, 深休眠期间DMA未运行, 字节在RDATA中
     if(counter0 != 0x00)
     {
         if(RESET != lpuart_flag_get(LPUART0, LPUART_FLAG_RBNE))
@@ -385,7 +385,7 @@ void com_lpuart_init(void)
     lpuart_transmit_config(LPUART0, LPUART_TRANSMIT_ENABLE);
     lpuart_enable(LPUART0);
 
-    // DMA循环接收初始�?替代RBNE中断, 零中断高吞吐)
+    // DMA循环接收初始化: 替代RBNE中断, 零中断高吞吐)
     lpuart_dma_rx_init();
     // IDLE中断: 帧结束检测(OTA整帧接收)
     // 注: 不启用 LPUART_INT_ERR(EIE), DMA模式下错误由 flush/recover 显式清除,
@@ -397,7 +397,7 @@ void com_lpuart_init(void)
 // ===================== USART0 中断接收环形缓冲 =====================
 #define DEBUG_RX_BUF_SIZE  256
 static volatile char    drx_buf[DEBUG_RX_BUF_SIZE];
-static volatile uint16_t drx_head = 0;   // 写入位置 (中断�?
+static volatile uint16_t drx_head = 0;   // 写入位置 (中断更新)
 static volatile uint16_t drx_tail = 0;   // 读取位置 (主循环读)
 static volatile uint8_t  drx_line_ready = 0; // 有完整行标记
 
@@ -417,7 +417,7 @@ void debug_rx_irq_handler(void)
     {
         char ch = (char)usart_data_receive(USART0);
         uint16_t next = (drx_head + 1) % DEBUG_RX_BUF_SIZE;
-        if(next != drx_tail)  // 缓冲区未�?
+        if(next != drx_tail)  // 缓冲区未空
         {
             drx_buf[drx_head] = ch;
             drx_head = next;
@@ -452,7 +452,7 @@ uint16_t debug_rx_read_line(char *buf, uint16_t buf_size, uint32_t timeout_ms)
         }
     }
 
-    // 保存读指针，若未找到完整行则回滚，避免数据丢�?
+    // 保存读指针，若未找到完整行则回滚，避免数据丢失
     uint16_t saved_tail = drx_tail;
 
     while(drx_tail != drx_head && idx < buf_size - 1)
@@ -487,13 +487,13 @@ uint16_t debug_rx_read_line(char *buf, uint16_t buf_size, uint32_t timeout_ms)
                 }
                 return idx;
             }
-            saved_tail = drx_tail;  // 空行已消费，更新保存�?
+            saved_tail = drx_tail;  // 空行已消费，更新保存值
             continue;  // 跳过行首的空 \r\n
         }
         buf[idx++] = ch;
     }
 
-    // 没找到完整行(缺少结尾\r\n)，回滚读指针，数据保留在缓冲�?
+    // 没找到完整行(缺少结尾\r\n)，回滚读指针，数据保留在缓冲区
     drx_tail = saved_tail;
     drx_line_ready = 0;
     buf[0] = '\0';

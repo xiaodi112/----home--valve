@@ -395,7 +395,7 @@ void ota_app_report_boot_status(void)
     switch(info->status)
     {
         case OTA_STATUS_SUCCESS:
-            printf_debug("[OTA] boot SUCCESS report (ver %u → %u)\r\n",
+            printf_debug("[OTA] boot SUCCESS report (ver %u-->%u)\r\n",
                          (unsigned int)info->cur_version,
                          (unsigned int)info->new_fw_version);
             EC801E_PublishUpgradeReply(OTA_REPLY_SUCCESS);

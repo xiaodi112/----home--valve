@@ -31,8 +31,10 @@ void gpio_init(void)
     gpio_mode_set(GPIOC, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_12);
     gpio_output_options_set(GPIOC, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_12);
 
-    gpio_mode_set(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_4);
-    gpio_output_options_set(GPIOD, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_4);
+#if IIC_SWITCH_ENABLED
+    gpio_mode_set(SW_IIC_GPIO_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, SW_IIC_GPIO_PIN);
+    gpio_output_options_set(SW_IIC_GPIO_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, SW_IIC_GPIO_PIN);
+#endif
 
     gpio_mode_set(GPIOB, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_5);
     gpio_output_options_set(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_5);
@@ -44,6 +46,7 @@ volatile uint8_t button_wakeup_flag = 0;
 // 深休眠前调用: PD0输入+上拉 → EXTI0下降沿 → NVIC使能
 void button_exti_init(void)
 {
+#if BUTTON_ENABLED
     rcu_periph_clock_enable(RCU_GPIOD);
     rcu_periph_clock_enable(RCU_SYSCFG);
 
@@ -59,20 +62,27 @@ void button_exti_init(void)
     nvic_irq_enable(EXTI0_IRQn, 2);
 
     button_wakeup_flag = 0;
+#endif
 }
 
 // 唤醒后调用: 禁用EXTI0 + 清标志, 防止抖动重复触发
 void button_exti_disable(void)
 {
+#if BUTTON_ENABLED
     exti_interrupt_disable(EXTI_0);
     exti_flag_clear(EXTI_0);
     nvic_irq_disable(EXTI0_IRQn);
+#endif
 }
 
 // 读取PD0(Btn1)电平: 1=按下(LOW), 0=松开(HIGH)
 uint8_t button_is_pressed(void)
 {
+#if BUTTON_ENABLED
     return (gpio_input_bit_get(GPIOD, GPIO_PIN_0) == RESET) ? 1 : 0;
+#else
+    return 0;
+#endif
 }
 
 // ===================== 极低功耗休眠配置 =====================
@@ -138,6 +148,9 @@ void gpio_enter_low_power(uint8_t lpuart_enabled)
                                  GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7 |
                                  GPIO_PIN_10 | GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_13 |
                                  GPIO_PIN_14 | GPIO_PIN_15;
+#if !BUTTON_ENABLED
+    gpiod_analog_pins |= (GPIO_PIN_0 | GPIO_PIN_1);  /* 无按键: PD0/PD1转Analog省电 */
+#endif
     if(!g_bt_on)
         gpiod_analog_pins |= GPIO_PIN_2;  /* BLE关闭时PD2转Analog, BLE开启时保持INPUT */
     if (!lpuart_enabled)

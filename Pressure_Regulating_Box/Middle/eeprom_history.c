@@ -1,12 +1,12 @@
 /**
  * @file eeprom_history.c
- * @brief EEPROM ÀúÊ·Êı¾İ»·ĞÎ»º³åÊµÏÖ
+ * @brief EEPROM å†å²æ•°æ®ç¯å½¢ç¼“å†²å®ç°
  *
- * ´æ´¢Çø: 0x800 ~ 0x1FFF (6144B)
- *   ¹ÜÀíÍ· (32B @0x800): magic(2) + head(2) + tail(2) + count(2) + crc8(1) + reserved(23)
- *   Êı¾İÇø (6112B @0x820): 191Ìõ x 32B, Ã¿ÌõÇ¡ºÃÒ»Ò³Ğ´Èë
+ * å­˜å‚¨åŒº: 0x800 ~ 0x1FFF (6144B)
+ *   ç®¡ç†å¤´ (32B @0x800): magic(2) + head(2) + tail(2) + count(2) + crc8(1) + reserved(23)
+ *   æ•°æ®åŒº (6112B @0x820): 191æ¡ x 32B, æ¯æ¡æ°å¥½ä¸€é¡µå†™å…¥
  *
- * »·ĞÎ¸²¸Ç²ßÂÔ: Ğ´Âúºó head ×Ô¶¯Ç°½ø, ¸²¸Ç×î¾É¼ÇÂ¼.
+ * ç¯å½¢è¦†ç›–ç­–ç•¥: å†™æ»¡å head è‡ªåŠ¨å‰è¿›, è¦†ç›–æœ€æ—§è®°å½•.
  */
 
 #include "eeprom_history.h"
@@ -29,21 +29,21 @@
 #include <string.h>
 #include <stdio.h>
 
-// ==================== ¹ÜÀíÍ·½á¹¹ (32×Ö½Ú, ÓëÒ³´óĞ¡¶ÔÆë) ====================
+// ==================== ç®¡ç†å¤´ç»“æ„ (32å­—èŠ‚, ä¸é¡µå¤§å°å¯¹é½) ====================
 typedef struct {
     uint16_t magic;          // EE_HIST_MAGIC
-    uint16_t head;           // Ğ´Ö¸Õë (ÏÂÒ»¸öĞ´ÈëµÄslotË÷Òı, 0~190)
-    uint16_t tail;           // ¶ÁÖ¸Õë (×î¾É¼ÇÂ¼µÄslotË÷Òı)
-    uint16_t count;          // ÓĞĞ§¼ÇÂ¼Êı (0~191)
-    uint8_t  crc8;           // ¹ÜÀíÍ·Ç°8×Ö½ÚµÄCRC8
-    uint8_t  reserved[23];   // Ìî³äµ½32×Ö½Ú
+    uint16_t head;           // å†™æŒ‡é’ˆ (ä¸‹ä¸€ä¸ªå†™å…¥çš„slotç´¢å¼•, 0~190)
+    uint16_t tail;           // è¯»æŒ‡é’ˆ (æœ€æ—§è®°å½•çš„slotç´¢å¼•)
+    uint16_t count;          // æœ‰æ•ˆè®°å½•æ•° (0~191)
+    uint8_t  crc8;           // ç®¡ç†å¤´å‰8å­—èŠ‚çš„CRC8
+    uint8_t  reserved[23];   // å¡«å……åˆ°32å­—èŠ‚
 } EeHistHeader_t;
 
-// ==================== RAM »º´æ¹ÜÀíÍ· (±ÜÃâÆµ·±¶ÁEEPROM) ====================
+// ==================== RAM ç¼“å­˜ç®¡ç†å¤´ (é¿å…é¢‘ç¹è¯»EEPROM) ====================
 static EeHistHeader_t s_hdr;
 static uint8_t s_inited = 0;
 
-// ==================== CRC8 (¶àÏîÊ½ 0x07, ³õÖµ 0x00) ====================
+// ==================== CRC8 (å¤šé¡¹å¼ 0x07, åˆå€¼ 0x00) ====================
 static uint8_t crc8_calc(const uint8_t *data, uint16_t len)
 {
     uint8_t crc = 0x00;
@@ -63,28 +63,28 @@ static uint8_t crc8_calc(const uint8_t *data, uint16_t len)
     return crc;
 }
 
-// ==================== ÄÚ²¿: Ğ´¹ÜÀíÍ·µ½EEPROM ====================
+// ==================== å†…éƒ¨: å†™ç®¡ç†å¤´åˆ°EEPROM ====================
 static void header_save(void)
 {
     s_hdr.crc8 = crc8_calc((const uint8_t *)&s_hdr, 8);
     EE_WRITE(EE_HIST_HEADER_ADDR, (const uint8_t *)&s_hdr, sizeof(EeHistHeader_t));
 }
 
-// ==================== ÄÚ²¿: ´ÓEEPROM¶Á¹ÜÀíÍ· ====================
+// ==================== å†…éƒ¨: ä»EEPROMè¯»ç®¡ç†å¤´ ====================
 static uint8_t header_load(void)
 {
     EE_READ(EE_HIST_HEADER_ADDR, (uint8_t *)&s_hdr, sizeof(EeHistHeader_t));
 
-    // Ğ£Ñémagic
+    // æ ¡éªŒmagic
     if(s_hdr.magic != EE_HIST_MAGIC)
         return 1;
 
-    // Ğ£ÑéCRC
+    // æ ¡éªŒCRC
     uint8_t expected_crc = crc8_calc((const uint8_t *)&s_hdr, 8);
     if(s_hdr.crc8 != expected_crc)
         return 2;
 
-    // ·¶Î§¼ì²é
+    // èŒƒå›´æ£€æŸ¥
     if(s_hdr.head >= EE_HIST_MAX_RECORDS ||
        s_hdr.tail >= EE_HIST_MAX_RECORDS ||
        s_hdr.count > EE_HIST_MAX_RECORDS)
@@ -93,7 +93,7 @@ static uint8_t header_load(void)
     return 0;
 }
 
-// ==================== ÄÚ²¿: ¸ñÊ½»¯(Çå¿Õ)ÀúÊ·Çø ====================
+// ==================== å†…éƒ¨: æ ¼å¼åŒ–(æ¸…ç©º)å†å²åŒº ====================
 static void history_format(void)
 {
     memset(&s_hdr, 0, sizeof(s_hdr));
@@ -104,7 +104,7 @@ static void history_format(void)
     header_save();
 }
 
-// ==================== ÄÚ²¿: »ñÈ¡BCDÊ±¼ä´Á ====================
+// ==================== å†…éƒ¨: è·å–BCDæ—¶é—´æˆ³ ====================
 static void get_bcd_timestamp(uint8_t *ts_bcd)
 {
     rtc_parameter_struct tp;
@@ -117,13 +117,13 @@ static void get_bcd_timestamp(uint8_t *ts_bcd)
     ts_bcd[5] = (uint8_t)(tp.second & 0xFF);  // SS (BCD)
 }
 
-// ==================== ÄÚ²¿: ¼ÆËã¼ÇÂ¼EEPROMµØÖ· ====================
+// ==================== å†…éƒ¨: è®¡ç®—è®°å½•EEPROMåœ°å€ ====================
 static uint32_t record_addr(uint16_t slot)
 {
     return EE_HIST_DATA_ADDR + (uint16_t)(slot * EE_HIST_RECORD_SIZE);
 }
 
-// ==================== ¹«¿ª½Ó¿Ú ====================
+// ==================== å…¬å¼€æ¥å£ ====================
 
 void ee_hist_init(void)
 {
@@ -149,7 +149,7 @@ void ee_hist_push(float pressure, float temperature,
 
     if(!s_inited) return;
 
-    // Ìî³ä¼ÇÂ¼
+    // å¡«å……è®°å½•
     rec.pressure = pressure;
     rec.temperature = temperature;
     rec.pressure2 = pressure2;
@@ -159,15 +159,15 @@ void ee_hist_push(float pressure, float temperature,
     rec.flags = flags;
     memset(rec.reserved, 0, sizeof(rec.reserved));
 
-    // ¼ÆËãCRC8 (Ç°31×Ö½Ú)
+    // è®¡ç®—CRC8 (å‰31å­—èŠ‚)
     rec.crc8 = 0;
     rec.crc8 = crc8_calc((const uint8_t *)&rec, EE_HIST_RECORD_SIZE - 1);
 
-    // Ğ´Èëµ±Ç°slot (Ç¡ºÃ32×Ö½Ú = 1Ò³Ğ´Èë)
+    // å†™å…¥å½“å‰slot (æ°å¥½32å­—èŠ‚ = 1é¡µå†™å…¥)
     uint32_t addr = record_addr(s_hdr.head);
     EE_WRITE(addr, (const uint8_t *)&rec, EE_HIST_RECORD_SIZE);
 
-    // ¸üĞÂ»·ĞÎÖ¸Õë
+    // æ›´æ–°ç¯å½¢æŒ‡é’ˆ
     s_hdr.head = (s_hdr.head + 1) % EE_HIST_MAX_RECORDS;
     if(s_hdr.count < EE_HIST_MAX_RECORDS)
     {
@@ -175,11 +175,11 @@ void ee_hist_push(float pressure, float temperature,
     }
     else
     {
-        // ÂúÁË, tail¸úËæÇ°½ø (¸²¸Ç×î¾É)
+        // æ»¡äº†, tailè·Ÿéšå‰è¿› (è¦†ç›–æœ€æ—§)
         s_hdr.tail = (s_hdr.tail + 1) % EE_HIST_MAX_RECORDS;
     }
 
-    // ±£´æ¹ÜÀíÍ·
+    // ä¿å­˜ç®¡ç†å¤´
     header_save();
 }
 
@@ -188,20 +188,20 @@ uint8_t ee_hist_read(uint16_t index, EeHistRecord_t *out)
     if(!s_inited || !out) return 1;
     if(index >= s_hdr.count) return 1;
 
-    // ¼ÆËãÊµ¼Êslot
+    // è®¡ç®—å®é™…slot
     uint16_t slot = (s_hdr.tail + index) % EE_HIST_MAX_RECORDS;
     uint32_t addr = record_addr(slot);
 
     EE_READ(addr, (uint8_t *)out, EE_HIST_RECORD_SIZE);
 
-    // CRCĞ£Ñé
+    // CRCæ ¡éªŒ
     uint8_t saved_crc = out->crc8;
     out->crc8 = 0;
     uint8_t calc_crc = crc8_calc((const uint8_t *)out, EE_HIST_RECORD_SIZE - 1);
     out->crc8 = saved_crc;
 
     if(saved_crc != calc_crc)
-        return 2;  // CRCÊ§°Ü
+        return 2;  // CRCå¤±è´¥
 
     return 0;
 }
@@ -247,6 +247,6 @@ void ee_hist_to_sensor_record(const EeHistRecord_t *hist, void *out)
     rec->flags = hist->flags;
     memset(rec->reserved, 0, sizeof(rec->reserved));
 
-    // BCDÊ±¼ä´Á×ª×Ö·û´®
+    // BCDæ—¶é—´æˆ³è½¬å­—ç¬¦ä¸²
     ee_hist_ts_to_str(hist->ts_bcd, rec->timestamp);
 }

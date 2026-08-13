@@ -1,4 +1,4 @@
-﻿#ifndef EC801E_H
+#ifndef EC801E_H
 #define EC801E_H
 
 #include <stdio.h>

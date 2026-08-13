@@ -19,7 +19,7 @@ volatile uint8_t rtc_alarm_flag = 0;
 
 static void rtc_pre_config(void);
 
-// BCD ↔ DEC 工具函数
+// BCD <-> DEC 工具函数
 uint8_t dec2bcd(uint8_t dec)
 {
     return ((dec / 10) << 4) | (dec % 10);
