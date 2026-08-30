@@ -1,6 +1,7 @@
 #include "lcd_ui.h"
 #include "slcd_seg.h"
 #include "mygpio.h"
+#include "power.h"
 #include "tim.h"
 #include "eeprom_config.h"
 #include "gd32l23x.h"
@@ -351,11 +352,7 @@ void lcd_ui_update_battery(float voltage)
 void lcd_ui_toggle_bluetooth(void)
 {
     g_bt_on ^= 1;
-    if(g_bt_on) {
-        gpio_bit_set(GPIOC, GPIO_PIN_12);
-    } else {
-        gpio_bit_reset(GPIOC, GPIO_PIN_12);
-    }
+    power_ble_set(g_bt_on);
     slcd_seg_icon_display(SLCD_ICON_LY, g_bt_on ? SET : RESET);
 }
 
@@ -481,4 +478,3 @@ static void lcd_ui_update_common_icons(void)
     // 蓝牙
     slcd_seg_icon_display(SLCD_ICON_LY, g_bt_on ? SET : RESET);
 }
-

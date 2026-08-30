@@ -1,30 +1,25 @@
 #include "led.h"
+#include "output.h"
 #include "delay.h"
 
 void led_init(void)
 {
-    /* RCU_GPIOA 由 gpio_init() 已使能，此处直接配置引脚 */
-    gpio_mode_set(LED1_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, LED1_PIN);
-    gpio_output_options_set(LED1_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, LED1_PIN);
-    gpio_bit_set(LED1_PORT, LED1_PIN);    /* 默认息灭 */
+    output_led_init();
 }
 
 void led_on(void)
 {
-    gpio_bit_reset(LED1_PORT, LED1_PIN);
+    output_led_set(1);
 }
 
 void led_off(void)
 {
-    gpio_bit_set(LED1_PORT, LED1_PIN);
+    output_led_set(0);
 }
 
 void led_toggle(void)
 {
-    if(gpio_input_bit_get(LED1_PORT, LED1_PIN) == SET)
-        gpio_bit_reset(LED1_PORT, LED1_PIN);
-    else
-        gpio_bit_set(LED1_PORT, LED1_PIN);
+    output_led_set(!output_led_is_on());
 }
 
 void led_blink(uint8_t times, uint16_t period_ms)

@@ -1,27 +1,37 @@
 #include "PT_304_35.h"
-#include "i2c_eeprom.h"
-#include "i2c_sensor.h"
+#include "soft_i2c.h"
 
-/************************** PD4 SW_IIC 内部辅助 **************************/
-static void pt304d_sw_iic_on(void)
+/* ==================== 传感器总线映射与电源管理 ==================== */
+/* S1=低压/出气 → IIC2 (PC0/PC1), S2=中压/进气 → IIC1 (PD4/PD5)
+ * 两路传感器均由 PC3 供电+上拉 (见 soft_i2c.h / app_config.h) */
+static const SoftI2C_t *pt304d_bus_of(uint8_t sensor_idx)
 {
-#if IIC_SWITCH_ENABLED
-    rcu_periph_clock_enable(RCU_GPIOD);
-    gpio_mode_set(PT304D_SW_IIC_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, PT304D_SW_IIC_PIN);
-    gpio_output_options_set(PT304D_SW_IIC_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, PT304D_SW_IIC_PIN);
-    gpio_bit_set(PT304D_SW_IIC_PORT, PT304D_SW_IIC_PIN);
-    trea_delay_ms(PT304D_PWRUP_DELAY_MS);
-#endif
+    return (sensor_idx == PT304D_SENSOR_1) ? &g_iic2 : &g_iic1;
 }
 
-static void pt304d_sw_iic_off(void)
+/* 传感器断电后: IIC1/IIC2 引脚转 Analog, 彻底杜绝悬空漏电; 下次采集时 soft_i2c_init 重新配置 */
+static void pt304d_bus_release(void)
 {
-#if IIC_SWITCH_ENABLED
-    gpio_bit_reset(PT304D_SW_IIC_PORT, PT304D_SW_IIC_PIN);
-#endif
+    gpio_mode_set(IIC1_SCL_PORT, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, IIC1_SCL_PIN | IIC1_SDA_PIN);
+    gpio_mode_set(IIC2_SCL_PORT, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, IIC2_SCL_PIN | IIC2_SDA_PIN);
+}
+
+/* 采集统一上电: 先开漏释放总线(防毛刺), 再 PC3 供电(含上电稳定延时) */
+static void pt304d_power_on(void)
+{
+    soft_i2c_sensors_init();
+    sensor_pwr_on();
+}
+
+/* 采集统一断电: PC3 拉低 + 总线转 Analog */
+static void pt304d_power_off(void)
+{
+    sensor_pwr_off();
+    pt304d_bus_release();
 }
 
 /************************** 量程辅助: 根据 sensor_idx 返回满量程 (Pa) **************************/
+
 static float pt304d_get_fs(uint8_t sensor_idx)
 {
     return (sensor_idx == PT304D_SENSOR_1) ? PT304D_S1_FS : PT304D_S2_FS;
@@ -57,61 +67,32 @@ static float pt304d_7b_conv_temp(uint32_t raw)
 
 static PT304D_Status pt304d_7b_send_meas(uint8_t sensor_idx)
 {
-    if (sensor_idx == PT304D_SENSOR_1)
-    {
-        IIC_Start();
-        IIC_Send_Byte((PT304D_7B_ADDR << 1) | IIC_WR);
-        if (IIC_Wait_Ack(0) != 0) { IIC_Stop(); return PT304D_ERR_I2C; }
-        IIC_Send_Byte(PT304D_7B_MEAS_CMD);
-        if (IIC_Wait_Ack(0) != 0) { IIC_Stop(); return PT304D_ERR_I2C; }
-        IIC_Stop();
-    }
-    else
-    {
-        IIC_Start1();
-        IIC_Send_Byte1((PT304D_7B_ADDR << 1) | IIC_WR);
-        if (IIC_Wait_Ack1(0) != 0) { IIC_Stop1(); return PT304D_ERR_I2C; }
-        IIC_Send_Byte1(PT304D_7B_MEAS_CMD);
-        if (IIC_Wait_Ack1(0) != 0) { IIC_Stop1(); return PT304D_ERR_I2C; }
-        IIC_Stop1();
-    }
+    const SoftI2C_t *bus = pt304d_bus_of(sensor_idx);
+
+    soft_i2c_start(bus);
+    if(soft_i2c_write_byte(bus, (uint8_t)((PT304D_7B_ADDR << 1) | IIC_WR)) != 0) { soft_i2c_stop(bus); return PT304D_ERR_I2C; }
+    if(soft_i2c_write_byte(bus, PT304D_7B_MEAS_CMD) != 0)                         { soft_i2c_stop(bus); return PT304D_ERR_I2C; }
+    soft_i2c_stop(bus);
     return PT304D_OK;
 }
 
 static PT304D_Status pt304d_7b_read(uint8_t sensor_idx, PT304D_Data *p_data)
 {
+    const SoftI2C_t *bus = pt304d_bus_of(sensor_idx);
     uint8_t data_buf[PT304D_7B_READ_BYTES] = {0};
     uint8_t i;
     PT304D_Status ret;
 
-    if (sensor_idx == PT304D_SENSOR_1)
+    soft_i2c_start(bus);
+    if(soft_i2c_write_byte(bus, (uint8_t)((PT304D_7B_ADDR << 1) | IIC_RD)) != 0)
     {
-        IIC_Start();
-        IIC_Send_Byte((PT304D_7B_ADDR << 1) | IIC_RD);
-        if (IIC_Wait_Ack(0) != 0)
-        {
-            IIC_Stop();
-            p_data->err = PT304D_ERR_I2C;
-            return PT304D_ERR_I2C;
-        }
-        for (i = 0; i < PT304D_7B_READ_BYTES; i++)
-            data_buf[i] = IIC_Read_Byte(i < (PT304D_7B_READ_BYTES - 1) ? 1 : 0);
-        IIC_Stop();
+        soft_i2c_stop(bus);
+        p_data->err = PT304D_ERR_I2C;
+        return PT304D_ERR_I2C;
     }
-    else
-    {
-        IIC_Start1();
-        IIC_Send_Byte1((PT304D_7B_ADDR << 1) | IIC_RD);
-        if (IIC_Wait_Ack1(0) != 0)
-        {
-            IIC_Stop1();
-            p_data->err = PT304D_ERR_I2C;
-            return PT304D_ERR_I2C;
-        }
-        for (i = 0; i < PT304D_7B_READ_BYTES; i++)
-            data_buf[i] = IIC_Read_Byte1(i < (PT304D_7B_READ_BYTES - 1) ? 1 : 0);
-        IIC_Stop1();
-    }
+    for(i = 0; i < PT304D_7B_READ_BYTES; i++)
+        data_buf[i] = soft_i2c_read_byte(bus, (i < (PT304D_7B_READ_BYTES - 1)) ? 1 : 0);
+    soft_i2c_stop(bus);
 
     p_data->stat_raw = data_buf[0];
     ret = pt304d_7b_check_stat(data_buf[0]);
@@ -135,48 +116,21 @@ static PT304D_Status pt304d_7b_read(uint8_t sensor_idx, PT304D_Data *p_data)
 
 static PT304D_Status pt304d_4b_read(uint8_t sensor_idx, PT304D_Data *p_data)
 {
+    const SoftI2C_t *bus = pt304d_bus_of(sensor_idx);
     uint8_t buf[PT304D_4B_READ_BYTES];
     uint8_t i;
 
-	trea_delay_ms(50);
-    if (sensor_idx == PT304D_SENSOR_1)
+    trea_delay_ms(50);
+    soft_i2c_start(bus);
+    if(soft_i2c_write_byte(bus, (uint8_t)((PT304D_4B_ADDR << 1) | IIC_RD)) != 0)
     {
-        IIC_Start();
-        IIC_Send_Byte((PT304D_4B_ADDR << 1) | IIC_RD);
-        if (IIC_Wait_Ack(0) != 0)
-        {
-            IIC_Stop();
-            p_data->err = PT304D_ERR_I2C;
-            return PT304D_ERR_I2C;
-        }
-//		//低功耗模式
-//		trea_delay_ms(50);
-//		IIC_Start();
-//        IIC_Send_Byte((PT304D_4B_ADDR << 1) | IIC_RD);
-//        if (IIC_Wait_Ack(0) != 0)
-//        {
-//            IIC_Stop();
-//            p_data->err = PT304D_ERR_I2C;
-//            return PT304D_ERR_I2C;
-//        }
-        for (i = 0; i < PT304D_4B_READ_BYTES; i++)
-            buf[i] = IIC_Read_Byte(i < (PT304D_4B_READ_BYTES - 1) ? 1 : 0);
-        IIC_Stop();
+        soft_i2c_stop(bus);
+        p_data->err = PT304D_ERR_I2C;
+        return PT304D_ERR_I2C;
     }
-    else
-    {
-        IIC_Start1();
-        IIC_Send_Byte1((PT304D_4B_ADDR << 1) | IIC_RD);
-        if (IIC_Wait_Ack1(0) != 0)
-        {
-            IIC_Stop1();
-            p_data->err = PT304D_ERR_I2C;
-            return PT304D_ERR_I2C;
-        }
-        for (i = 0; i < PT304D_4B_READ_BYTES; i++)
-            buf[i] = IIC_Read_Byte1(i < (PT304D_4B_READ_BYTES - 1) ? 1 : 0);
-        IIC_Stop1();
-    }
+    for(i = 0; i < PT304D_4B_READ_BYTES; i++)
+        buf[i] = soft_i2c_read_byte(bus, (i < (PT304D_4B_READ_BYTES - 1)) ? 1 : 0);
+    soft_i2c_stop(bus);
 
     /* 状态解析: Bit7:6 = status, 00=正常 */
     p_data->stat_raw = buf[0];
@@ -213,10 +167,7 @@ static PT304D_Status pt304d_4b_read(uint8_t sensor_idx, PT304D_Data *p_data)
 
 PT304D_Status PT304D_Init(uint8_t sensor_idx)
 {
-    if (sensor_idx == PT304D_SENSOR_1)
-        IIC_Init();
-    else
-        IIC_GPIO_Init1();
+    soft_i2c_init(pt304d_bus_of(sensor_idx));
     return PT304D_OK;
 }
 
@@ -256,11 +207,10 @@ PT304D_Status PT304D_Collect(uint8_t sensor_idx, PT304D_Data *p_data)
 
     if (p_data == NULL) return PT304D_ERR_NULLPTR;
 
-    pt304d_sw_iic_on();
-    PT304D_Init(sensor_idx);
+    pt304d_power_on();
 
     ret = PT304D_SendMeasCmd(sensor_idx);
-    if (ret != PT304D_OK) { p_data->err = ret; pt304d_sw_iic_off(); return ret; }
+    if (ret != PT304D_OK) { p_data->err = ret; pt304d_power_off(); return ret; }
 
 #ifdef PT304D_DRV_7BYTE
     if (!PT304D_IS_4BYTE(sensor_idx))
@@ -269,24 +219,19 @@ PT304D_Status PT304D_Collect(uint8_t sensor_idx, PT304D_Data *p_data)
 
     ret = PT304D_ReadMeasData(sensor_idx, p_data);
 
-    pt304d_sw_iic_off();
+    pt304d_power_off();
     return ret;
 }
 
-// 一次性采集两路传感器，PD4 仅上/断电一次，效率更高   s2进气（中压）   s1出气（低压）
+/* 一次性采集两路传感器, PC3 仅上/断电一次, 效率更高
+ * p_s1 = 低压/出气 (IIC2/PC0/PC1), p_s2 = 中压/进气 (IIC1/PD4/PD5) */
 void PT304D_CollectAll(PT304D_Data *p_s1, PT304D_Data *p_s2)
 {
-    // Init I2C GPIO before power-on: open-drain HIGH (bus idle)
-    // Prevents sensor seeing glitches from Analog-mode residue after deep sleep
-    if(p_s1 != NULL) IIC_Init();
-    if(p_s2 != NULL) IIC_GPIO_Init1();
+    /* 先初始化总线 GPIO(开漏释放) 再 PC3 供电: 防止传感器上电瞬间看到毛刺 */
+    pt304d_power_on();
 
-    pt304d_sw_iic_on();
-
-    // --- 传感器1: PC0/PC1 (与M24M01 共用总线) ---
     if (p_s1 != NULL)
     {
-        IIC_Init();
         if (PT304D_SendMeasCmd(PT304D_SENSOR_1) == PT304D_OK)
         {
 #ifdef PT304D_DRV_7BYTE
@@ -301,10 +246,8 @@ void PT304D_CollectAll(PT304D_Data *p_s1, PT304D_Data *p_s2)
         }
     }
 
-    // --- 传感器2: PB6/PB7 (独立总线) ---
     if (p_s2 != NULL)
     {
-        IIC_GPIO_Init1();
         if (PT304D_SendMeasCmd(PT304D_SENSOR_2) == PT304D_OK)
         {
 #ifdef PT304D_DRV_7BYTE
@@ -319,40 +262,19 @@ void PT304D_CollectAll(PT304D_Data *p_s1, PT304D_Data *p_s2)
         }
     }
 
-    pt304d_sw_iic_off();
+    pt304d_power_off();
 }
 
 PT304D_Status PT304D_SetI2CAddr(uint8_t sensor_idx, uint8_t new_7bit_addr)
 {
+    const SoftI2C_t *bus = pt304d_bus_of(sensor_idx);
+
     if (new_7bit_addr > 0x7F) return PT304D_ERR_DATA;
 
-    if (sensor_idx == PT304D_SENSOR_1)
-    {
-        IIC_Start();
-        IIC_Send_Byte((PT304D_I2C_ADDR_7BIT << 1) | IIC_WR);
-        if (IIC_Wait_Ack(0) != 0) { IIC_Stop(); return PT304D_ERR_I2C; }
-        IIC_Send_Byte(PT304D_ADDR_REG);
-        if (IIC_Wait_Ack(0) != 0) { IIC_Stop(); return PT304D_ERR_I2C; }
-        IIC_Send_Byte(new_7bit_addr);
-        if (IIC_Wait_Ack(0) != 0) { IIC_Stop(); return PT304D_ERR_I2C; }
-        IIC_Stop();
-    }
-    else
-    {
-        IIC_Start1();
-        IIC_Send_Byte1((PT304D_I2C_ADDR_7BIT << 1) | IIC_WR);
-        if (IIC_Wait_Ack1(0) != 0) { IIC_Stop1(); return PT304D_ERR_I2C; }
-        IIC_Send_Byte1(PT304D_ADDR_REG);
-        if (IIC_Wait_Ack1(0) != 0) { IIC_Stop1(); return PT304D_ERR_I2C; }
-        IIC_Send_Byte1(new_7bit_addr);
-        if (IIC_Wait_Ack1(0) != 0) { IIC_Stop1(); return PT304D_ERR_I2C; }
-        IIC_Stop1();
-    }
+    soft_i2c_start(bus);
+    if(soft_i2c_write_byte(bus, (uint8_t)((PT304D_I2C_ADDR_7BIT << 1) | IIC_WR)) != 0) { soft_i2c_stop(bus); return PT304D_ERR_I2C; }
+    if(soft_i2c_write_byte(bus, PT304D_ADDR_REG) != 0)                                { soft_i2c_stop(bus); return PT304D_ERR_I2C; }
+    if(soft_i2c_write_byte(bus, new_7bit_addr) != 0)                                  { soft_i2c_stop(bus); return PT304D_ERR_I2C; }
+    soft_i2c_stop(bus);
     return PT304D_OK;
 }
-
-
-
-
-
-

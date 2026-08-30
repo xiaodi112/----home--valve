@@ -1,5 +1,7 @@
 #include "motor.h"
 
+#if MOTOR_ENABLED
+
 static uint32_t timer_clk;
 static uint32_t pwm_freq;
 static uint16_t arr, psc;
@@ -8,8 +10,11 @@ static uint16_t arr, psc;
 static void pwm_compute(uint32_t freq)
 {
     uint32_t clk = timer_clk;
-    uint32_t prescaler;
+    uint32_t prescaler = 0;
     uint32_t period;
+
+    /* 非法输入保护: 频率为0或过高时回退到安全默认值 */
+    if(freq == 0 || freq > 1000000) freq = 160000;
 
     for(prescaler = 0; prescaler < 65535; prescaler++) {
         period = clk / (freq * (prescaler + 1));
@@ -17,17 +22,25 @@ static void pwm_compute(uint32_t freq)
         if(period <= 65535 && period >= 100) {
             break;
         }
+
+        /* 频率过高: period 随分频增大只会更小, 提前退出避免无效计算 */
+        if(period < 100 && prescaler == 0) {
+            break;
+        }
     }
 
-    // Safety clamp: prevent period=0 causing arr underflow
-    if(period == 0) period = 100;
+    /* Safety clamp: 防止 period 越界导致 arr 下溢/溢出 */
+    if(period < 100 || period > 65535) {
+        period = 100;
+        prescaler = 0;
+    }
 
     psc = prescaler;
     arr = period - 1;
 }
 
 /* 初始化PWM */
-void pwm_init(uint32_t freq, float duty_ch0, float duty_ch1)
+static void pwm_init(uint32_t freq, float duty_ch0, float duty_ch1)
 {
     SystemCoreClockUpdate();
     timer_clk = SystemCoreClock;
@@ -80,7 +93,7 @@ void pwm_init(uint32_t freq, float duty_ch0, float duty_ch1)
 }
 
 /* 修改频率 */
-void pwm_set_freq(uint32_t freq)
+static void pwm_set_freq(uint32_t freq)
 {
     pwm_freq = freq;
 
@@ -91,9 +104,14 @@ void pwm_set_freq(uint32_t freq)
 }
 
 /* 修改占空比（0.0~1.0） */
-void pwm_set_duty(uint8_t ch, float duty)
+static void pwm_set_duty(uint8_t ch, float duty)
 {
-    uint16_t pulse = duty * (arr + 1);
+    uint16_t pulse;
+
+    /* 占空比越界钳制, 防止 pulse 溢出 */
+    if(duty < 0.0f) duty = 0.0f;
+    if(duty > 1.0f) duty = 1.0f;
+    pulse = (uint16_t)(duty * (arr + 1));
 
     if(ch == 0) {
         timer_channel_output_pulse_value_config(TIMER2, TIMER_CH_0, pulse);
@@ -101,3 +119,88 @@ void pwm_set_duty(uint8_t ch, float duty)
         timer_channel_output_pulse_value_config(TIMER2, TIMER_CH_1, pulse);
     }
 }
+
+/* ==================== 电机初始化 ==================== */
+void motor_init(uint8_t enabled)
+{
+    if(!enabled) return;
+
+    rcu_periph_clock_enable(RCU_GPIOA);
+
+    /* PA11: 限位1(开阀到位), PA12: 限位2(关阀到位), 内部上拉（低电平=到位） */
+    gpio_mode_set(GPIOA, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPIO_PIN_11 | GPIO_PIN_12);
+
+#if MOTOR_DRV_MODE == 1
+    /* PWM 驱动: PA6/PA7 复用 TIMER2 CH0/CH1 */
+    pwm_init(160000, 0.0f, 0.0f);
+#else
+    /* GPIO 直驱: PA6/PA7 推挽输出 */
+    gpio_mode_set(GPIOA, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_6 | GPIO_PIN_7);
+#endif
+}
+
+/* ==================== 限位开关读取 ==================== */
+/* PA11: K1-S 开阀到位（低电平=到位） */
+uint8_t motor_limit1_reached(void)
+{
+    return (gpio_input_bit_get(GPIOA, GPIO_PIN_11) == RESET) ? 1 : 0;
+}
+
+/* PA12: K2-S 关阀到位（低电平=到位） */
+uint8_t motor_limit2_reached(void)
+{
+    return (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) ? 1 : 0;
+}
+
+/* ==================== 方向驱动(语义接口) ==================== */
+void motor_drive_open(void)
+{
+    motor_sleep_enable();   /* M_SLP(PA5) 拉高: 使能电机驱动 */
+#if MOTOR_DRV_MODE == 1
+    pwm_set_duty(0, 0.0f);
+    pwm_set_duty(1, 0.9f);
+#else
+    gpio_bit_reset(GPIOA, GPIO_PIN_6);
+    gpio_bit_set(GPIOA, GPIO_PIN_7);
+#endif
+}
+
+void motor_drive_close(void)
+{
+    motor_sleep_enable();   /* M_SLP(PA5) 拉高: 使能电机驱动 */
+#if MOTOR_DRV_MODE == 1
+    pwm_set_duty(0, 0.9f);
+    pwm_set_duty(1, 0.0f);
+#else
+    gpio_bit_set(GPIOA, GPIO_PIN_6);
+    gpio_bit_reset(GPIOA, GPIO_PIN_7);
+#endif
+}
+
+void motor_stop(void)
+{
+#if MOTOR_DRV_MODE == 1
+    pwm_set_duty(0, 0.0f);
+    pwm_set_duty(1, 0.0f);
+#else
+    gpio_bit_reset(GPIOA, GPIO_PIN_6);
+    gpio_bit_reset(GPIOA, GPIO_PIN_7);
+#endif
+    motor_sleep_disable();   /* 停止后 M_SLP 拉低 */
+}
+
+/* ==================== 电机使能 M_SLEEP (PA5) ==================== */
+void motor_sleep_enable(void)
+{
+    rcu_periph_clock_enable(RCU_GPIOA);
+    gpio_mode_set(MOTOR_SLEEP_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, MOTOR_SLEEP_PIN);
+    gpio_output_options_set(MOTOR_SLEEP_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, MOTOR_SLEEP_PIN);
+    gpio_bit_set(MOTOR_SLEEP_PORT, MOTOR_SLEEP_PIN);
+}
+
+void motor_sleep_disable(void)
+{
+    gpio_bit_reset(MOTOR_SLEEP_PORT, MOTOR_SLEEP_PIN);
+}
+
+#endif /* MOTOR_ENABLED */

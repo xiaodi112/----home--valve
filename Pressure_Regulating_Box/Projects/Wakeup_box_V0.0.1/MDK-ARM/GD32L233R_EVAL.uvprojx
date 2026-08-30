@@ -645,6 +645,16 @@
               <FilePath>..\..\..\Middle\eeprom_config.h</FilePath>
             </File>
             <File>
+              <FileName>valve_timing.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\Middle\valve_timing.c</FilePath>
+            </File>
+            <File>
+              <FileName>valve_timing.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\..\..\Middle\valve_timing.h</FilePath>
+            </File>
+            <File>
               <FileName>threshold.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\Middle\threshold.c</FilePath>
@@ -673,6 +683,41 @@
               <FileName>eeprom_history.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\Middle\eeprom_history.c</FilePath>
+            </File>
+            <File>
+              <FileName>report.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\Middle\report.c</FilePath>
+            </File>
+            <File>
+              <FileName>report.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\..\..\Middle\report.h</FilePath>
+            </File>
+            <File>
+              <FileName>config_policy.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\Middle\config_policy.c</FilePath>
+            </File>
+            <File>
+              <FileName>config_policy.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\..\..\Middle\config_policy.h</FilePath>
+            </File>
+            <File>
+              <FileName>config_store.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\Middle\config_store.c</FilePath>
+            </File>
+            <File>
+              <FileName>config_store.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\..\..\Middle\config_store.h</FilePath>
+            </File>
+            <File>
+              <FileName>ch4_alarm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\Middle\ch4_alarm.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -730,6 +775,36 @@
               <FilePath>..\..\..\BSP\motor.h</FilePath>
             </File>
             <File>
+              <FileName>power.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\BSP\power.c</FilePath>
+            </File>
+            <File>
+              <FileName>power.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\..\..\BSP\power.h</FilePath>
+            </File>
+            <File>
+              <FileName>output.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\BSP\output.c</FilePath>
+            </File>
+            <File>
+              <FileName>output.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\..\..\BSP\output.h</FilePath>
+            </File>
+            <File>
+              <FileName>wakeup.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\BSP\wakeup.c</FilePath>
+            </File>
+            <File>
+              <FileName>wakeup.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\..\..\BSP\wakeup.h</FilePath>
+            </File>
+            <File>
               <FileName>adc_bat.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\BSP\adc_bat.c</FilePath>
@@ -750,14 +825,14 @@
           <GroupName>Drivers</GroupName>
           <Files>
             <File>
-              <FileName>i2c_sensor.c</FileName>
+              <FileName>soft_i2c.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\..\..\Drivers\i2c_sensor.c</FilePath>
+              <FilePath>..\..\..\Drivers\soft_i2c.c</FilePath>
             </File>
             <File>
-              <FileName>i2c_sensor.h</FileName>
+              <FileName>soft_i2c.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\..\..\Drivers\i2c_sensor.h</FilePath>
+              <FilePath>..\..\..\Drivers\soft_i2c.h</FilePath>
             </File>
             <File>
               <FileName>ec800e.c</FileName>
@@ -790,16 +865,6 @@
               <FilePath>..\..\..\Drivers\PT_304_35.h</FilePath>
             </File>
             <File>
-              <FileName>i2c_eeprom.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\..\..\Drivers\i2c_eeprom.c</FilePath>
-            </File>
-            <File>
-              <FileName>i2c_eeprom.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\..\..\Drivers\i2c_eeprom.h</FilePath>
-            </File>
-            <File>
               <FileName>ble_ota.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\Drivers\ble_ota.c</FilePath>
@@ -808,6 +873,11 @@
               <FileName>at24c64.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\Drivers\at24c64.c</FilePath>
+            </File>
+            <File>
+              <FileName>ch4_sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\Drivers\ch4_sensor.c</FilePath>
             </File>
           </Files>
         </Group>

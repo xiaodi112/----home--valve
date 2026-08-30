@@ -1,44 +1,18 @@
 #include "at24c64.h"
 #include "app_config.h"
-#include "i2c_sensor.h"
+#include "soft_i2c.h"
 #include "delay.h"
 #include "usart.h"
 #include "gd32l23x.h"
 #include <string.h>
 
-/* ===================== I2C 电子开关 PD4 (SW_IIC) 管理 =====================
- * PD4 = SW_IIC 电子开关 (TPS22918), 控制所有 I2C 设备电源
- * 默认 LOW 节能; 每次 EEPROM 读/写前自动 set + 20ms 上电稳定, 操作后 reset
- * 接口调用者无需关心 PD4 状态 (与传感器采集路径的 PD4 状态独立)
+/* ===================== EEPROM 总线 (IIC0: PB6/PB7) =====================
+ * 硬件: EEPROM 常供电、常上拉, 与传感器电源(PC3)无关。
+ * 每次读/写前调用总线初始化(开漏配置+死锁恢复), 常供电无需断电。
  */
-#if IIC_SWITCH_ENABLED
-static uint8_t s_pwr_init_done = 0;
-
-#endif
-static inline void at24c64_pwr_on(void)
+static inline void at24c64_bus_init(void)
 {
-#if IIC_SWITCH_ENABLED
-    rcu_periph_clock_enable(RCU_GPIOD);
-    gpio_mode_set(SW_IIC_GPIO_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, SW_IIC_GPIO_PIN);
-    gpio_output_options_set(SW_IIC_GPIO_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, SW_IIC_GPIO_PIN);
-
-    if(!s_pwr_init_done) {
-        s_pwr_init_done = 1;
-        gpio_bit_reset(SW_IIC_GPIO_PORT, SW_IIC_GPIO_PIN);
-        trea_delay_ms(50);
-    }
-
-    gpio_bit_set(SW_IIC_GPIO_PORT, SW_IIC_GPIO_PIN);
-    trea_delay_ms(20);   /* EEPROM 上电稳定 (手册典型 1ms, 留余量) */
-#endif
-    IIC_Init();          /* 重新配置 PC0/PC1 GPIO + 总线死锁恢复 (与传感器共用总线) */
-}
-
-static inline void at24c64_pwr_off(void)
-{
-#if IIC_SWITCH_ENABLED
-    gpio_bit_reset(SW_IIC_GPIO_PORT, SW_IIC_GPIO_PIN);
-#endif
+    soft_i2c_init(&g_iic0);
 }
 
 /*
@@ -62,14 +36,13 @@ uint8_t AT24C64_WaitReady(uint32_t addr, uint16_t timeout_ms)
 
     for(i = 0; i < timeout_ms; i++)
     {
-        IIC_Start();
-        IIC_Send_Byte(dev_byte);
-        if(IIC_Wait_Ack(10) == 0)
+        soft_i2c_start(&g_iic0);
+        if(soft_i2c_write_byte(&g_iic0, dev_byte) == 0)
         {
-            IIC_Stop();
+            soft_i2c_stop(&g_iic0);
             return 0;
         }
-        IIC_Stop();
+        soft_i2c_stop(&g_iic0);
         trea_delay_ms(1);
     }
     return 1;
@@ -85,25 +58,16 @@ uint8_t AT24C64_WriteByte(uint32_t addr, uint8_t data)
 
     if(addr >= AT24C64_TOTAL_SIZE) return 1;
 
-    at24c64_pwr_on();
+    at24c64_bus_init();
 
-    IIC_Start();
-    IIC_Send_Byte(dev_byte);
-    if(IIC_Wait_Ack(100) != 0) { IIC_Stop(); at24c64_pwr_off(); return 2; }
-
-    IIC_Send_Byte(addr_hi);
-    if(IIC_Wait_Ack(100) != 0) { IIC_Stop(); at24c64_pwr_off(); return 3; }
-
-    IIC_Send_Byte(addr_lo);
-    if(IIC_Wait_Ack(100) != 0) { IIC_Stop(); at24c64_pwr_off(); return 4; }
-
-    IIC_Send_Byte(data);
-    if(IIC_Wait_Ack(100) != 0) { IIC_Stop(); at24c64_pwr_off(); return 5; }
-
-    IIC_Stop();
+    soft_i2c_start(&g_iic0);
+    if(soft_i2c_write_byte(&g_iic0, dev_byte) != 0) { soft_i2c_stop(&g_iic0); return 2; }
+    if(soft_i2c_write_byte(&g_iic0, addr_hi) != 0)  { soft_i2c_stop(&g_iic0); return 3; }
+    if(soft_i2c_write_byte(&g_iic0, addr_lo) != 0)  { soft_i2c_stop(&g_iic0); return 4; }
+    if(soft_i2c_write_byte(&g_iic0, data) != 0)     { soft_i2c_stop(&g_iic0); return 5; }
+    soft_i2c_stop(&g_iic0);
 
     ret = AT24C64_WaitReady(addr, AT24C64_WRITE_TIME + 1);
-    at24c64_pwr_off();
     return ret;
 }
 
@@ -118,28 +82,20 @@ uint8_t AT24C64_WritePage(uint32_t addr, const uint8_t *data, uint16_t len)
 
     if(addr >= AT24C64_TOTAL_SIZE || len == 0 || len > AT24C64_PAGE_SIZE) return 1;
 
-    at24c64_pwr_on();
+    at24c64_bus_init();
 
-    IIC_Start();
-    IIC_Send_Byte(dev_byte);
-    if(IIC_Wait_Ack(100) != 0) { IIC_Stop(); at24c64_pwr_off(); return 2; }
-
-    IIC_Send_Byte(addr_hi);
-    if(IIC_Wait_Ack(100) != 0) { IIC_Stop(); at24c64_pwr_off(); return 3; }
-
-    IIC_Send_Byte(addr_lo);
-    if(IIC_Wait_Ack(100) != 0) { IIC_Stop(); at24c64_pwr_off(); return 4; }
+    soft_i2c_start(&g_iic0);
+    if(soft_i2c_write_byte(&g_iic0, dev_byte) != 0) { soft_i2c_stop(&g_iic0); return 2; }
+    if(soft_i2c_write_byte(&g_iic0, addr_hi) != 0)  { soft_i2c_stop(&g_iic0); return 3; }
+    if(soft_i2c_write_byte(&g_iic0, addr_lo) != 0)  { soft_i2c_stop(&g_iic0); return 4; }
 
     for(i = 0; i < len; i++)
     {
-        IIC_Send_Byte(data[i]);
-        if(IIC_Wait_Ack(100) != 0) { IIC_Stop(); at24c64_pwr_off(); return 5; }
+        if(soft_i2c_write_byte(&g_iic0, data[i]) != 0) { soft_i2c_stop(&g_iic0); return 5; }
     }
-
-    IIC_Stop();
+    soft_i2c_stop(&g_iic0);
 
     ret = AT24C64_WaitReady(addr, AT24C64_WRITE_TIME + 1);
-    at24c64_pwr_off();
     return ret;
 }
 
@@ -174,34 +130,27 @@ uint8_t AT24C64_Read(uint32_t addr, uint8_t *buf, uint16_t len)
 
     if(addr >= AT24C64_TOTAL_SIZE || len == 0) return 1;
 
-    at24c64_pwr_on();
+    at24c64_bus_init();
 
     /* 第一步: Dummy Write 设置读起始地址 (2 字节) */
-    IIC_Start();
-    IIC_Send_Byte(dev_byte | 0x00);          /* 设备地址 + 写位 */
-    if(IIC_Wait_Ack(1000) != 0) { IIC_Stop(); at24c64_pwr_off(); return 2; }
-
-    IIC_Send_Byte(addr_hi);                  /* 字地址高字节 A12~A8 */
-    if(IIC_Wait_Ack(1000) != 0) { IIC_Stop(); at24c64_pwr_off(); return 3; }
-
-    IIC_Send_Byte(addr_lo);                  /* 字地址低字节 A7~A0 */
-    if(IIC_Wait_Ack(1000) != 0) { IIC_Stop(); at24c64_pwr_off(); return 4; }
+    soft_i2c_start(&g_iic0);
+    if(soft_i2c_write_byte(&g_iic0, dev_byte | 0x00) != 0) { soft_i2c_stop(&g_iic0); return 2; }
+    if(soft_i2c_write_byte(&g_iic0, addr_hi) != 0)         { soft_i2c_stop(&g_iic0); return 3; }
+    if(soft_i2c_write_byte(&g_iic0, addr_lo) != 0)         { soft_i2c_stop(&g_iic0); return 4; }
 
     /* 第二步: 重复起始 + 读数据 */
-    IIC_Start();
-    IIC_Send_Byte(dev_byte | 0x01);          /* 设备地址 + 读位 */
-    if(IIC_Wait_Ack(1000) != 0) { IIC_Stop(); at24c64_pwr_off(); return 5; }
+    soft_i2c_start(&g_iic0);
+    if(soft_i2c_write_byte(&g_iic0, dev_byte | 0x01) != 0) { soft_i2c_stop(&g_iic0); return 5; }
 
     for(i = 0; i < len; i++)
     {
         if(i == len - 1)
-            buf[i] = IIC_Read_Byte(0);       /* 最后字节: NACK */
+            buf[i] = soft_i2c_read_byte(&g_iic0, 0);       /* 最后字节: NACK */
         else
-            buf[i] = IIC_Read_Byte(1);       /* 其余: ACK (继续读) */
+            buf[i] = soft_i2c_read_byte(&g_iic0, 1);       /* 其余: ACK (继续读) */
     }
 
-    IIC_Stop();
-    at24c64_pwr_off();
+    soft_i2c_stop(&g_iic0);
     return 0;
 }
 
@@ -213,7 +162,7 @@ void AT24C64_Test(void)
 
     printf_debug("\r\n===== AT24C64 Diagnostic Start =====\r\n");
 
-    at24c64_pwr_on();
+    at24c64_bus_init();
 
     // 读取未写过的地址 (空片应为 0xFF)
     test_addr = 0x1FF0;
@@ -236,6 +185,5 @@ void AT24C64_Test(void)
     else
         printf_debug("  -> FAIL (expect 0xA5, got 0x%02X)\r\n", val);
 
-    at24c64_pwr_off();
     printf_debug("===== AT24C64 Diagnostic End =====\r\n\r\n");
 }

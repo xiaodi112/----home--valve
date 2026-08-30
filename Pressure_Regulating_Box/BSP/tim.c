@@ -233,39 +233,9 @@ int rtc_set_from_cclk(const char *cclk_str)
     printf_debug("[RTC] CCLK parsed: 20%02d-%02d-%02d %02d:%02d:%02d\r\n",
                  year, month, day, hour, min, sec);
 
-    /* === 已配置且时间偏差小: 跳过 re-init ===
-     * RTC 已运行时再次进入 init mode 在某些 GD32L23x 状态下会失败 (INITF 等待超时);
-     * 而 LXTAL 精度 ±20ppm = 每天最多 ~1.7 秒, 完全无需每次 4G 重连都重新校准.
-     * 仅在首次配置 (BKP0 未设) 或时间偏差 > 5 分钟时才走完整 init 路径 */
-    if(BKP_VALUE == RTC_BKP0)
-    {
-        rtc_parameter_struct cur_para;
-        long diff_sec, target_sec, cur_sec;
-        int cur_year, cur_month, cur_date, cur_hour, cur_min, cur_second;
-
-        rtc_current_time_get(&cur_para);
-        cur_year   = bcd2dec(cur_para.year);
-        cur_month  = bcd2dec(cur_para.month);
-        cur_date   = bcd2dec(cur_para.date);
-        cur_hour   = bcd2dec(cur_para.hour);
-        cur_min    = bcd2dec(cur_para.minute);
-        cur_second = bcd2dec(cur_para.second);
-
-        target_sec = (long)hour * 3600 + (long)min * 60 + sec;
-        cur_sec    = (long)cur_hour * 3600 + (long)cur_min * 60 + cur_second;
-        diff_sec   = target_sec - cur_sec;
-        if(diff_sec < 0) diff_sec = -diff_sec;
-
-        // 同年同月同日 + 偏差 < 1 分钟: 跳过, 沿用现有 RTC 时间
-        if(cur_year == (year % 100) && cur_month == month && cur_date == day && diff_sec < 60)
-        {
-            printf_debug("[RTC] Already configured, diff=%lds < 60s, skip re-init\r\n", diff_sec);
-            rtc_show_time();
-            printf_debug("\r\n");
-            return 1;
-        }
-        printf_debug("[RTC] Drift too large (diff=%lds or date mismatch), force re-init\r\n", diff_sec);
-    }
+    /* RTC 校准策略: 不做本地/网络时间误差比较, 每次 SyncTime 都主动用
+     * 4G 网络时间校准 (开机连接 + 周期历史上报时调用 EC801E_SyncTime),
+     * 消除长期漂移; rtc_init 自带同步等待与重试保护, 失败仅打印非关键错误并沿用旧时间 */
 
     // 配置RTC
     rtc_initpara.factor_asyn    = prescaler_a;
@@ -355,6 +325,18 @@ void rtc_get_time_str(char *buf, uint8_t buf_size)
 // 获取当前RTC时间的HHMMSS整数值
 // 如 13:29:00 → 132900, 用于与窗口start/stop比较
 // ==============================
+
+void rtc_get_datetime(RtcDateTime_t *dt)
+{
+    rtc_current_time_get(&rtc_initpara);
+    if(dt == NULL) return;
+    dt->year   = bcd2dec((uint8_t)(rtc_initpara.year   & 0xFF));
+    dt->month  = bcd2dec((uint8_t)(rtc_initpara.month  & 0xFF));
+    dt->day    = bcd2dec((uint8_t)(rtc_initpara.date   & 0xFF));
+    dt->hour   = bcd2dec((uint8_t)(rtc_initpara.hour   & 0xFF));
+    dt->minute = bcd2dec((uint8_t)(rtc_initpara.minute & 0xFF));
+    dt->second = bcd2dec((uint8_t)(rtc_initpara.second & 0xFF));
+}
 uint32_t rtc_get_hhmmss(void)
 {
     rtc_current_time_get(&rtc_initpara);

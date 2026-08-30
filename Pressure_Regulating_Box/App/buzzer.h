@@ -1,14 +1,9 @@
 #ifndef BUZZER_H
 #define BUZZER_H
 
-#include "gd32l23x.h"
 #include <stdint.h>
 
-/* BUZZER: PB8, HIGH=响, LOW=停 */
-#define BUZZER_PORT  GPIOB
-#define BUZZER_PIN   GPIO_PIN_8
-
-/* GPIO时钟由 gpio_init() 统一使能，buzzer_init() 仅配置引脚模式 */
+/* 引脚配置在 BSP/output.c (output_buzzer_init, gpio_init 时统一调用) */
 void    buzzer_init(void);
 void    buzzer_on(void);
 void    buzzer_off(void);

@@ -1,13 +1,12 @@
 #include "usart.h"
 #include "mygpio.h"
+#include "app_config.h"
 
 #include "delay.h"
 #include "systick.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-
-static void system_clock_reconfig(void);
 
 #define TREA_UART_DEBUG USART0
 #define TREA_UART_CAT1  LPUART0
@@ -27,18 +26,18 @@ static void trea_uart_send_byte(uint32_t uart, uint8_t ch)
 }
 
 // ===================== LPUART0 DMA接收缓冲 =====================
-// DMA循环模式自动搬运, 软件跟踪读指针
+// DMA循环模式接收串口数据, 供AT指令响应解析
 #define LPUART_DMA_BUF_SIZE  1024
 #define LPUART_DMA_CHANNEL   DMA_CH1
 
 static uint8_t  lpuart_dma_buf[LPUART_DMA_BUF_SIZE];
 static volatile uint16_t lpuart_dma_read_pos = 0;  // 软件读取位置
 
-// IDLE帧检查, 用于OTA整帧接收
-volatile uint8_t  lpuart_frame_ready = 0;     // 帧完成标志(IDLE中断置位)
+// IDLE帧中断: 用于OTA帧接收
+volatile uint8_t  lpuart_frame_ready = 0;     // 帧已就绪(IDLE中断置位)
 volatile uint16_t lpuart_frame_end_pos = 0;   // 帧结束DMA写位置
 
-// 获取DMA当前写入位置(DMA已写入字节数)
+// 获取DMA当前写位置(DMA正在写入的数据位置)
 static uint16_t lpuart_dma_write_pos(void)
 {
     return (uint16_t)(LPUART_DMA_BUF_SIZE - dma_transfer_number_get(LPUART_DMA_CHANNEL));
@@ -66,7 +65,7 @@ void lpuart_dma_rx_init(void)
     dma_init_struct.priority     = DMA_PRIORITY_HIGH;
     dma_init(LPUART_DMA_CHANNEL, &dma_init_struct);
 
-    // 循环模式: 写到末尾后自动回到开头
+    // 循环模式: 写满末尾后自动回卷到头部
     dma_circulation_enable(LPUART_DMA_CHANNEL);
     dma_channel_enable(LPUART_DMA_CHANNEL);
 
@@ -76,45 +75,45 @@ void lpuart_dma_rx_init(void)
     lpuart_dma_read_pos = 0;
 }
 
-// 禁用DMA接收(深休眠前调用)
+// 关闭DMA接收(进入休眠前调用)
 void lpuart_dma_rx_disable(void)
 {
     dma_channel_disable(LPUART_DMA_CHANNEL);
     lpuart_dma_receive_config(LPUART0, LPUART_RECEIVE_DMA_DISABLE);
 }
 
-// LPUART IRQ处理: IDLE帧检查 + 错误清除
+// LPUART IRQ处理: IDLE帧中断+ 错误清除
 void lpuart_rx_irq_handler(void)
 {
-    // IDLE空闲检查: 一帧数据接收完成
+    // IDLE帧中断: 一帧接收完成置位
     if(SET == lpuart_interrupt_flag_get(LPUART0, LPUART_INT_FLAG_IDLE))
     {
         lpuart_flag_clear(LPUART0, LPUART_FLAG_IDLE);
         lpuart_frame_end_pos = lpuart_dma_write_pos();
         lpuart_frame_ready = 1;
     }
-    // 防御性兜底: 一次性清除所有错误标志(ORE/FE/NE/PE),
-    // 防止未处理的错误源(如 Noise Error)导致中断风暴
+    // 清除错误标志: 一次性清除全部错误(ORE/FE/NE/PE),
+    // 防止未处理的中断源(如 Noise Error)导致中断风暴
     LPUART_INTC(LPUART0) = LPUART_INTC_PEC | LPUART_INTC_FEC
                           | LPUART_INTC_NEC | LPUART_INTC_OREC;
 }
 
-// 清空DMA接收缓冲(读指针跟到写指针)
+// 清空DMA接收缓冲(丢弃残留数据)
 void lpuart_rx_flush(void)
 {
     lpuart_dma_read_pos = lpuart_dma_write_pos();
     lpuart_frame_ready = 0;
-    // 清除错误标志
+    // 清除溢出标志
     if(SET == lpuart_flag_get(LPUART0, LPUART_FLAG_ORERR))
         lpuart_flag_clear(LPUART0, LPUART_FLAG_ORERR);
     if(SET == lpuart_flag_get(LPUART0, LPUART_FLAG_FERR))
         lpuart_flag_clear(LPUART0, LPUART_FLAG_FERR);
-    // 清除IDLE标志(防止残留触发)
+    // 清IDLE标志(防止重复触发)
     if(SET == lpuart_flag_get(LPUART0, LPUART_FLAG_IDLE))
         lpuart_flag_clear(LPUART0, LPUART_FLAG_IDLE);
 }
 
-// 等待一帧完成(IDLE检查), 返回帧长度; 0=超时
+// 等待一帧数据(IDLE中断), 返回帧长度; 0=超时
 uint16_t lpuart_wait_frame(uint32_t timeout_ms)
 {
     uint32_t start = trea_millis();
@@ -138,7 +137,7 @@ uint16_t lpuart_wait_frame(uint32_t timeout_ms)
     return 0;
 }
 
-// 从DMA缓冲拷贝数据到用户缓冲区, 整帧读取, 跟新read_pos)
+// 从DMA接收缓冲拷贝数据到用户缓冲, 按帧读取, 更新read_pos)
 uint16_t lpuart_read_frame(uint8_t *dst, uint16_t max_len)
 {
     uint16_t wp, rp, len;
@@ -167,7 +166,7 @@ int trea_uart_recv_byte_timeout(uint32_t uart, uint8_t* ch, uint32_t timeout_ms)
     uint32_t start = trea_millis();
     if(uart == LPUART0)
     {
-         // 【LPUART0 专用路径：从 DMA 缓冲区读取】
+         // 对LPUART0 专用路径走 DMA 缓冲读取
         while((trea_millis() - start) < timeout_ms) {
             uint16_t wp = lpuart_dma_write_pos();
             if(lpuart_dma_read_pos != wp) {
@@ -178,7 +177,7 @@ int trea_uart_recv_byte_timeout(uint32_t uart, uint8_t* ch, uint32_t timeout_ms)
         }
         return 0;
     }
-    // 其他UART: 轮询硬件寄存器
+    // 其他UART: 轮询硬件接收寄存器
     while((trea_millis() - start) < timeout_ms) {
         if(RESET != usart_flag_get(uart, USART_FLAG_RBNE)) {
             *ch = (uint8_t)usart_data_receive(uart);
@@ -222,7 +221,7 @@ int serial_write(uint32_t uart, const uint8_t *data, uint16_t len)
 
 void lpuart_rx_recover(void)
 {
-    // TX后防御性恢复: 清除错误标志(DMA模式无需重新使能中断)
+    // TX完成后防御性恢复: 清除错误标志(DMA模式不可用中断使能时调用)
     if(SET == lpuart_flag_get(LPUART0, LPUART_FLAG_ORERR))
         lpuart_flag_clear(LPUART0, LPUART_FLAG_ORERR);
     if(SET == lpuart_flag_get(LPUART0, LPUART_FLAG_FERR))
@@ -267,7 +266,6 @@ int printf_debug(const char* fmt, ...)
     serial_write(TREA_UART_DEBUG, (const uint8_t*)buf, (uint16_t)n);
     return n;
 }
-
 int printf_cat1(const char* fmt, ...)
 {
     static char buf[256];
@@ -283,16 +281,16 @@ int printf_cat1(const char* fmt, ...)
 }
 
 
-// ===================== 【封装】LPUART唤醒初始化 =====================
+// ===================== 封装好的LPUART唤醒初始化 =====================
 void lpuart_wakeup_init(void)
 {
-    // 时钟源已在 com_lpuart_init() 中配置为 IRC16MDIV, 此处不再重复设置
+    // 时钟源在 com_lpuart_init() 中已配置为 IRC16MDIV, 波特率与唤醒一致
 
-    // 唤醒中断 + EXTI配置
+    // 使能唤醒中断 + EXTI中断
     nvic_irq_enable(LPUART_WKUP_IRQn, 0);
     exti_init(EXTI_28, EXTI_INTERRUPT, EXTI_TRIG_RISING);
 
-    // 起始位唤醒
+    // 起始位唤醒模式
     lpuart_wakeup_mode_config(LPUART0, LPUART_WUM_STARTB);
     lpuart_enable(LPUART0);
 
@@ -303,70 +301,14 @@ void lpuart_wakeup_init(void)
     lpuart_interrupt_enable(LPUART0, LPUART_INT_WU);
 }
 
-// ===================== 【封装】进入深休眠 =====================
-// 支持四种唤醒源: LPUART (counter0) / RTC闹钟 (rtc_alarm_flag) / 按键 (button_wakeup_flag) / 4G RI (ri_wakeup_flag)
-void enter_deepsleep_mode(uint8_t lpuart_enabled)
-{
-    extern volatile uint8_t rtc_alarm_flag;
-    extern volatile uint8_t button_wakeup_flag;
-    extern volatile uint8_t ri_wakeup_flag;
-
-    counter0 = 0x00;
-    rtc_alarm_flag = 0;
-    button_wakeup_flag = 0;
-    ri_wakeup_flag = 0;
-
-    // 软件看门狗: 进入深休眠前必须关闭 (深休眠期间 SysTick 停摆, 否则唤醒后计数错乱)
-    // 所有进入深休眠的路径都经过本函数, 此处统一关闭可保证休眠期不被误复位
-    swdt_disable();
-
-    // 配置未使用GPIO 为 ANALOG 以极致降低漏电
-    gpio_enter_low_power(lpuart_enabled);
-
-    rcu_periph_clock_enable(RCU_PMU);
-    pmu_to_deepsleepmode(PMU_LDNPDSP_LOWDRIVE, WFI_CMD, PMU_DEEPSLEEP);
-
-    // 等待任意唤醒源
-    while((0x00 == counter0) && (0 == rtc_alarm_flag) && (0 == button_wakeup_flag) && (0 == ri_wakeup_flag));
-}
-
-// ===================== 【封装】唤醒后系统重新初始化 =====================
-void system_wakeup_reinit(void)
-{
-    // 恢复时钟 + 滴答定时器 + TIMER1（必须最先执行）
-    system_clock_reconfig();
-    systick_config();
-    my_systick_config();
-    timer1_delay_init(); // 深休眠后 APB1 停摆, 必须重新启动 TIMER1 计数器
-
-    // 无论哪种唤醒源，都必须关闭LPUART唤醒模式和中断 + RI EXTI
-    // 否则LPUART唤醒中断持续触发，无法再次进入深休眠
-    lpuart_wakeup_disable(LPUART0);
-    lpuart_interrupt_disable(LPUART0, LPUART_INT_WU);
-    exti_flag_clear(EXTI_28);
-
-    // 关闭RI引脚EXTI (防止唤醒后RI持续低电平重复触发)
-    ri_exti_disable();
-
-    // LPUART唤醒时：消费触发唤醒的字符, 深休眠期间DMA未运行, 字节在RDATA中
-    if(counter0 != 0x00)
-    {
-        if(RESET != lpuart_flag_get(LPUART0, LPUART_FLAG_RBNE))
-            lpuart_data_receive(LPUART0);
-        lpuart_receive_config(LPUART0, LPUART_RECEIVE_ENABLE);
-        while(RESET == lpuart_flag_get(LPUART0, LPUART_FLAG_TC));
-        lpuart_disable(LPUART0);
-    }
-}
-
-// ===================== LPUART初始化=====================
+// ===================== LPUART初始化 =====================
 void com_lpuart_init(void)
 {
     rcu_periph_clock_enable(RCU_GPIOD);
     rcu_periph_clock_enable(RCU_LPUART);
 
-    gpio_af_set(GPIOD, GPIO_AF_8, GPIO_PIN_8);   /* PD8 = LPUART0_TX → LP_TXD → 4G模块 */
-    gpio_af_set(GPIOD, GPIO_AF_8, GPIO_PIN_9);   /* PD9 = LPUART0_RX ← LP_RXD ← 4G模块 */
+    gpio_af_set(GPIOD, GPIO_AF_8, GPIO_PIN_8);   /* PD8 = LPUART0_TX 即 LP_TXD 连 4G模块 */
+    gpio_af_set(GPIOD, GPIO_AF_8, GPIO_PIN_9);   /* PD9 = LPUART0_RX 即 LP_RXD 连 4G模块 */
 
     gpio_mode_set(GPIOD, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO_PIN_8);
     gpio_output_options_set(GPIOD, GPIO_OTYPE_PP, GPIO_OSPEED_10MHZ, GPIO_PIN_8);
@@ -374,8 +316,8 @@ void com_lpuart_init(void)
     gpio_output_options_set(GPIOD, GPIO_OTYPE_PP, GPIO_OSPEED_10MHZ, GPIO_PIN_9);
 
     lpuart_deinit(LPUART0);
-    // 时钟源必须在 UE=0 (deinit后) 且 baudrate_set 之前配置,
-    // 确保 BRR 按 IRC16M 时钟正确计算, 且不违反"UE=1时禁止切换时钟"的硬件约束
+    // 时钟源选择在 UE=0 (deinit完成) 且 baudrate_set 之前配置,
+    // 确保 BRR 按 IRC16M 时钟计算正确, 规避"UE=1时禁止切换时钟"的硬件约束
     rcu_lpuart_clock_config(RCU_LPUARTSRC_IRC16MDIV);
     lpuart_word_length_set(LPUART0, LPUART_WL_8BIT);
     lpuart_stop_bit_set(LPUART0, LPUART_STB_1BIT);
@@ -385,21 +327,21 @@ void com_lpuart_init(void)
     lpuart_transmit_config(LPUART0, LPUART_TRANSMIT_ENABLE);
     lpuart_enable(LPUART0);
 
-    // DMA循环接收初始化: 替代RBNE中断, 零中断高吞吐)
+    // DMA循环接收初始化: 避免RBNE中断, 减少中断消耗)
     lpuart_dma_rx_init();
-    // IDLE中断: 帧结束检测(OTA整帧接收)
-    // 注: 不启用 LPUART_INT_ERR(EIE), DMA模式下错误由 flush/recover 显式清除,
-    //     EIE 会使 NE(Noise Error) 等触发中断但 ISR 未必全部处理, 易引发中断风暴
+    // IDLE中断: 帧接收完成标志(OTA等帧协议)
+    // 注: 未使能 LPUART_INT_ERR(EIE), DMA模式下不可用中断使能/恢复方式处理
+    //     EIE 会使 NE(Noise Error) 触发未完全处理的中断, 可能导致中断风暴
     lpuart_interrupt_enable(LPUART0, LPUART_INT_IDLE);
     nvic_irq_enable(LPUART_IRQn, 1);
 }
 
-// ===================== USART0 中断接收环形缓冲 =====================
+// ===================== USART0 调试串口接收缓冲 =====================
 #define DEBUG_RX_BUF_SIZE  256
 static volatile char    drx_buf[DEBUG_RX_BUF_SIZE];
-static volatile uint16_t drx_head = 0;   // 写入位置 (中断更新)
-static volatile uint16_t drx_tail = 0;   // 读取位置 (主循环读)
-static volatile uint8_t  drx_line_ready = 0; // 有完整行标记
+static volatile uint16_t drx_head = 0;   // 写位置 (中断更新)
+static volatile uint16_t drx_tail = 0;   // 读位置 (主循环更新)
+static volatile uint8_t  drx_line_ready = 0; // 整行就绪标志
 
 void debug_rx_init(void)
 {
@@ -417,7 +359,7 @@ void debug_rx_irq_handler(void)
     {
         char ch = (char)usart_data_receive(USART0);
         uint16_t next = (drx_head + 1) % DEBUG_RX_BUF_SIZE;
-        if(next != drx_tail)  // 缓冲区未空
+        if(next != drx_tail)  // 缓冲未满
         {
             drx_buf[drx_head] = ch;
             drx_head = next;
@@ -441,7 +383,7 @@ uint16_t debug_rx_read_line(char *buf, uint16_t buf_size, uint32_t timeout_ms)
 {
     uint16_t idx = 0;
 
-    // 等待完整行或超时
+    // 等待整行就绪
     uint32_t t0 = trea_millis();
     while(!drx_line_ready)
     {
@@ -452,7 +394,7 @@ uint16_t debug_rx_read_line(char *buf, uint16_t buf_size, uint32_t timeout_ms)
         }
     }
 
-    // 保存读指针，若未找到完整行则回滚，避免数据丢失
+    // 从环形缓冲拷贝一行, 失败时回滚读指针防止数据丢失
     uint16_t saved_tail = drx_tail;
 
     while(drx_tail != drx_head && idx < buf_size - 1)
@@ -465,7 +407,7 @@ uint16_t debug_rx_read_line(char *buf, uint16_t buf_size, uint32_t timeout_ms)
             if(idx > 0)
             {
                 buf[idx] = '\0';
-                // 消费掉连续的 \r\n
+                // 跳过多余换行 \r\n
                 while(drx_tail != drx_head)
                 {
                     char peek = drx_buf[drx_tail];
@@ -474,7 +416,7 @@ uint16_t debug_rx_read_line(char *buf, uint16_t buf_size, uint32_t timeout_ms)
                     else
                         break;
                 }
-                // 检查是否还有更多行
+                // 重新检查缓冲中是否有新行
                 drx_line_ready = 0;
                 {
                     uint16_t t = drx_tail;
@@ -487,13 +429,13 @@ uint16_t debug_rx_read_line(char *buf, uint16_t buf_size, uint32_t timeout_ms)
                 }
                 return idx;
             }
-            saved_tail = drx_tail;  // 空行已消费，更新保存值
-            continue;  // 跳过行首的空 \r\n
+            saved_tail = drx_tail;  // 无整行时回滚读指针到保存值
+            continue;  // 跳过空行 \r\n
         }
         buf[idx++] = ch;
     }
 
-    // 没找到完整行(缺少结尾\r\n)，回滚读指针，数据保留在缓冲区
+    // 没有完整行(缺少结尾\r\n)时回滚读指针, 等待下次数据
     drx_tail = saved_tail;
     drx_line_ready = 0;
     buf[0] = '\0';
@@ -501,14 +443,14 @@ uint16_t debug_rx_read_line(char *buf, uint16_t buf_size, uint32_t timeout_ms)
 }
 
 // ===================== UART4 蓝牙 DMA接收 =====================
-// DMA循环模式 + IDLE中断, 参照 LPUART0 DMA 方案
+// DMA循环模式 + IDLE中断, 类似 LPUART0 DMA 机制
 #define BLE_DMA_BUF_SIZE     1024
 #define BLE_DMA_CHANNEL      DMA_CH2
 
 static uint8_t  ble_dma_buf[BLE_DMA_BUF_SIZE];
 static volatile uint16_t ble_dma_read_pos = 0;
 
-// 获取DMA当前写入位置
+// 获取DMA当前写位置
 static uint16_t ble_dma_write_pos(void)
 {
     return (uint16_t)(BLE_DMA_BUF_SIZE - dma_transfer_number_get(BLE_DMA_CHANNEL));
@@ -533,7 +475,7 @@ void ble_uart_init(void)
     gpio_mode_set(GPIOB, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO_PIN_4);
     gpio_output_options_set(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_10MHZ, GPIO_PIN_4);
 
-    /* UART4 配置 */
+    /* UART4 基本配置 */
     usart_deinit(UART4);
     usart_baudrate_set(UART4, 115200U);
     usart_word_length_set(UART4, USART_WL_8BIT);
@@ -543,7 +485,7 @@ void ble_uart_init(void)
     usart_transmit_config(UART4, USART_TRANSMIT_ENABLE);
     usart_enable(UART4);
 
-    /* DMA 循环接收 */
+    /* DMA 循环接收初始化 */
     dma_deinit(BLE_DMA_CHANNEL);
     dma_struct_para_init(&dma_init_struct);
     dma_init_struct.request      = DMA_REQUEST_UART4_RX;
@@ -564,16 +506,16 @@ void ble_uart_init(void)
     /* UART4 使能DMA接收 */
     usart_dma_receive_config(UART4, USART_RECEIVE_DMA_ENABLE);
 
-    /* IDLE中断: 帧结束检测 */
+    /* IDLE中断: 帧接收完成标志*/
     usart_interrupt_enable(UART4, USART_INT_IDLE);
     nvic_irq_enable(UART4_IRQn, 1);
 	
-    /* 复位读指针 */
+    /* 复位读位置指针 */
     ble_dma_read_pos = 0;
 	
 }
 
-// UART4 反初始化 (关闭蓝牙时调用)
+// UART4 关闭初始化 (关闭外设时钟和GPIO)
 void ble_uart_deinit(void)
 {
     /* 关闭中断 */
@@ -587,7 +529,7 @@ void ble_uart_deinit(void)
     /* 关闭UART4 */
     usart_disable(UART4);
 
-    /* GPIO恢复为模拟输入 (低功耗) */
+    /* GPIO恢复为模拟输入 (省电) */
     gpio_mode_set(GPIOB, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, GPIO_PIN_3 | GPIO_PIN_4);
 
     /* 关闭UART4时钟 */
@@ -596,10 +538,10 @@ void ble_uart_deinit(void)
     ble_dma_read_pos = 0;
 }
 
-// UART4 IDLE中断处理 (在 UART4_IRQHandler 中调用)
+// UART4 IDLE中断处理 (由 UART4_IRQHandler 调用)
 void ble_uart_rx_irq_handler(void)
 {
-    /* IDLE检测: 一帧数据接收完毕 */
+    /* IDLE中断: 一帧接收完成*/
     if(RESET != usart_interrupt_flag_get(UART4, USART_INT_FLAG_IDLE))
     {
 		usart_flag_clear(UART4,USART_FLAG_IDLE);
@@ -613,7 +555,7 @@ void ble_uart_rx_irq_handler(void)
         usart_flag_clear(UART4, USART_FLAG_FERR);
 }
 
-// DMA缓冲区可读字节数
+// DMA接收缓冲中可读字节数
 uint16_t ble_uart_rx_available(void)
 {
     uint16_t wp = ble_dma_write_pos();
@@ -623,7 +565,7 @@ uint16_t ble_uart_rx_available(void)
         return BLE_DMA_BUF_SIZE - ble_dma_read_pos + wp;
 }
 
-// 读取一字节
+// 读取一个字节
 uint8_t ble_uart_rx_read(void)
 {
     uint8_t ch = ble_dma_buf[ble_dma_read_pos];
@@ -635,26 +577,105 @@ uint8_t ble_uart_rx_read(void)
 void ble_uart_rx_flush(void)
 {
     ble_dma_read_pos = ble_dma_write_pos();
-    /* 清除可能残留的错误标志 */
+    /* clear error flags */
     if(RESET != usart_flag_get(UART4, USART_FLAG_ORERR))
         usart_flag_clear(UART4, USART_FLAG_ORERR);
     if(RESET != usart_flag_get(UART4, USART_FLAG_FERR))
         usart_flag_clear(UART4, USART_FLAG_FERR);
     if(RESET != usart_flag_get(UART4, USART_FLAG_IDLE))
-        usart_data_receive(UART4);  /* 清除IDLE */
+        usart_data_receive(UART4);  /* clear IDLE */
 }
 
-// ===================== 时钟配置 =====================
-static void system_clock_reconfig(void)
+#if LASER_CH4_ENABLED
+// ==================== USART1 (CH4 sensor) ====================
+volatile uint8_t  s_ch4_rx_buf[64];
+static volatile uint16_t s_ch4_rx_len;
+static volatile uint8_t  s_ch4_frame_ready;
+
+void usart1_ch4_init(void)
 {
-    RCU_CTL |= RCU_CTL_IRC16MEN;
-    while(rcu_osci_stab_wait(RCU_IRC16M) != SUCCESS);
+    rcu_periph_clock_enable(RCU_GPIOA);
+    rcu_periph_clock_enable(RCU_USART1);
 
-    rcu_ahb_clock_config(RCU_AHB_CKSYS_DIV1);
-    rcu_apb1_clock_config(RCU_APB1_CKAHB_DIV1);
-    rcu_apb2_clock_config(RCU_APB2_CKAHB_DIV1);
+    /* PA2 = USART1_TX (AF7), PA3 = USART1_RX (AF7) */
+    gpio_af_set(GPIOA, GPIO_AF_7, GPIO_PIN_2 | GPIO_PIN_3);
+    gpio_mode_set(GPIOA, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO_PIN_2 | GPIO_PIN_3);
+    gpio_output_options_set(GPIOA, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_2);
 
-    RCU_CTL &= ~RCU_CTL_PLLEN;
-    RCU_CFG0 &= ~RCU_CFG0_SCS;
-    RCU_CFG0 |= RCU_CKSYSSRC_IRC16M;
+    usart_deinit(USART1);
+    usart_baudrate_set(USART1, 115200U);
+    usart_parity_config(USART1, USART_PM_NONE);
+    usart_word_length_set(USART1, USART_WL_8BIT);
+    usart_stop_bit_set(USART1, USART_STB_1BIT);
+
+    usart_enable(USART1);
+    usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
+    usart_receive_config(USART1, USART_RECEIVE_ENABLE);
+
+    /* 先复位接收状态, 再使能中断, 避免 ISR 使用陈旧计数 */
+    s_ch4_rx_len = 0;
+    s_ch4_frame_ready = 0;
+
+    /* 逐字节接收中断 + IDLE 帧结束中断。
+     * 此前只使能 IDLE: GD32L23x USART 无接收 FIFO 时 RDR 仅缓存 1 字节,
+     * 29 字节帧在 IDLE 触发前几乎全部溢出, 且 IDLE 处理又先读掉最后一字节,
+     * 导致永远收不到完整帧 (ch4 parse 必然失败)。*/
+    usart_interrupt_enable(USART1, USART_INT_RBNE);
+    usart_interrupt_enable(USART1, USART_INT_IDLE);
+    nvic_irq_enable(USART1_IRQn, 1);
 }
+
+void usart1_ch4_deinit(void)
+{
+    usart_interrupt_disable(USART1, USART_INT_RBNE);
+    usart_interrupt_disable(USART1, USART_INT_IDLE);
+    nvic_irq_disable(USART1_IRQn);
+    usart_disable(USART1);
+    rcu_periph_clock_disable(RCU_USART1);
+
+    /* PA2/PA3 -> analog for low power */
+    gpio_mode_set(GPIOA, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, GPIO_PIN_2 | GPIO_PIN_3);
+}
+
+void usart1_ch4_irq_handler(void)
+{
+    /* 逐字节接收: RBNE 中断逐字节入库 (此前仅 IDLE, 帧内字节全部丢失) */
+    if(RESET != usart_interrupt_flag_get(USART1, USART_INT_FLAG_RBNE))
+    {
+        while(RESET != usart_flag_get(USART1, USART_FLAG_RBNE))
+        {
+            uint8_t ch = (uint8_t)usart_data_receive(USART1);
+            if(s_ch4_rx_len < sizeof(s_ch4_rx_buf))
+                s_ch4_rx_buf[s_ch4_rx_len++] = ch;
+        }
+    }
+    /* 帧结束: IDLE 置位。
+     * 必须用 usart_flag_clear() 写 USART_INTC 清 IDLE 标志——仅读 RDR
+     * 不会清 IDLE, 会导致 IDLE 中断无限重入、主循环饿死
+     * (实测卡死约180s后被 SWDT 复位)。 */
+    if(RESET != usart_flag_get(USART1, USART_FLAG_IDLE))
+    {
+        usart_flag_clear(USART1, USART_FLAG_IDLE);
+        /* 清 IDLE 后再收残留字节, 防止漏掉最后一位 */
+        while(RESET != usart_flag_get(USART1, USART_FLAG_RBNE))
+        {
+            uint8_t ch = (uint8_t)usart_data_receive(USART1);
+            if(s_ch4_rx_len < sizeof(s_ch4_rx_buf))
+                s_ch4_rx_buf[s_ch4_rx_len++] = ch;
+        }
+        s_ch4_frame_ready = 1;
+    }
+    /* 溢出/帧错误清除, 防中断风暴 */
+    if(RESET != usart_flag_get(USART1, USART_FLAG_ORERR))
+        usart_flag_clear(USART1, USART_FLAG_ORERR);
+    if(RESET != usart_flag_get(USART1, USART_FLAG_FERR))
+        usart_flag_clear(USART1, USART_FLAG_FERR);
+}
+
+/* accessors for ch4_sensor.c */
+uint8_t *ch4_get_rx_buf(void)    { return (uint8_t *)s_ch4_rx_buf; }
+uint16_t ch4_get_rx_len(void)   { return s_ch4_rx_len; }
+uint8_t  ch4_get_frame_ready(void) { return s_ch4_frame_ready; }
+void     ch4_clear_frame_ready(void) { s_ch4_frame_ready = 0; s_ch4_rx_len = 0; }
+
+#endif /* LASER_CH4_ENABLED */

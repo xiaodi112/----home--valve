@@ -7,6 +7,25 @@
 #include "threshold.h"
 
 #define APP_FW_VERSION_NUM     1
+
+/* ==================== State Machine ==================== */
+typedef enum {
+    STATE_INIT = 0,
+    STATE_SLEEP,
+    STATE_WAKEUP,
+    STATE_COLLECT,
+    STATE_UPLOAD,
+    STATE_DOWNLINK,
+    STATE_ALARM,
+    STATE_BLE_OTA,
+    STATE_CH4
+} AppState_t;
+
+extern AppState_t app_state;
+
+/* CH4 request flag (set by downlink gas_get, checked by do_downlink) */
+extern volatile uint8_t g_ch4_request;
+extern uint8_t g_alarm_recover_reported; /* 报警关阀恢复"已上报一次"标志 (RAM) */
 typedef struct {
     PT304D_Data raw;
     PT304D_Data raw2;
@@ -25,9 +44,12 @@ typedef struct {
 } SensorContext_t;
 
 extern SensorContext_t g_sensor;
+extern uint8_t g_lcd_active;   // LCD当前是否显示 (运行状态, 区别于配置项; main.c 维护)
 
-// 公共功能函数 (main.c 定义, downlink.c 等模块调用)
+// 供其他模块使用 (main.c 实现, downlink.c 等模块调用)
 void lcd_shutdown(void);
 const char* alarm_try_close_valve(ThresholdResult_t result);
+const char* ch4_alarm_try_close_valve(void);
+void threshold_alarm_reset_rt(void);
 
 #endif

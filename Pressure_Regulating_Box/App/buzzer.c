@@ -1,22 +1,20 @@
 #include "buzzer.h"
+#include "output.h"
 #include "delay.h"
 
 void buzzer_init(void)
 {
-    /* RCU_GPIOB 由 gpio_init() 已使能，此处直接配置引脚 */
-    gpio_mode_set(BUZZER_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, BUZZER_PIN);
-    gpio_output_options_set(BUZZER_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, BUZZER_PIN);
-    gpio_bit_reset(BUZZER_PORT, BUZZER_PIN);    /* 默认关闭 */
+    output_buzzer_init();
 }
 
 void buzzer_on(void)
 {
-    gpio_bit_set(BUZZER_PORT, BUZZER_PIN);
+    output_buzzer_set(1);
 }
 
 void buzzer_off(void)
 {
-    gpio_bit_reset(BUZZER_PORT, BUZZER_PIN);
+    output_buzzer_set(0);
 }
 
 void buzzer_beep(uint8_t times, uint16_t on_ms)

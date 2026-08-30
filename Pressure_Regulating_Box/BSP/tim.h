@@ -31,6 +31,21 @@ void rtc_set_next_alarm(uint16_t interval_minutes);
 void rtc_set_next_alarm_sec(uint8_t seconds);
 void rtc_get_time_str(char *buf, uint8_t buf_size);
 
+// ==============================
+// 当前日期时间结构体 (十进制值, 供定时/日期逻辑复用)
+// ==============================
+typedef struct {
+    uint8_t year;    /* 0-99 (如 26 = 2026) */
+    uint8_t month;   /* 1-12 */
+    uint8_t day;     /* 1-31 */
+    uint8_t hour;    /* 0-23 */
+    uint8_t minute;  /* 0-59 */
+    uint8_t second;  /* 0-59 */
+} RtcDateTime_t;
+
+// 获取当前RTC日期时间 (BCD转十进制)
+void rtc_get_datetime(RtcDateTime_t *dt);
+
 // 获取当前RTC时间的HHMMSS整数值 (如 13:29:00 → 132900)
 uint32_t rtc_get_hhmmss(void);
 

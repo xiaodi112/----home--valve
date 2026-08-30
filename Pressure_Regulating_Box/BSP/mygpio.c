@@ -1,6 +1,7 @@
 #include "mygpio.h"
-#include "eeprom_config.h"
-#include "lcd_ui.h"
+#include "power.h"
+#include "output.h"
+#include "motor.h"
 
 
 
@@ -12,32 +13,16 @@ void gpio_init(void)
     rcu_periph_clock_enable(RCU_GPIOD);
     rcu_periph_clock_enable(RCU_GPIOF);
 
-    /* 先写 ODR 再切输出模式, 避免模式切换瞬间的电平跳变:
-     *   PA0(4G_DTR):  默认 HIGH (允许 EC800E 休眠)
-     *   PA15(LED1):   默认 LOW (LED 默认息灭)
-     *   PB8(BUZZER):  默认 LOW (蜂鸣器默认关闭)
-     *   PC12(SW_BT 蓝牙开关): 默认 LOW (蓝牙默认断电)
-     *   PD4(SW_IIC 电子开关): 默认 LOW (节能, 采集时按需上电)
-     *   PB5(V4G_EN 4G 电源): 默认 LOW (4G 默认断电)
-     */
+    /* 电源引脚 (4G_EN/BLE_EN/SENSOR_PWR/DTR): BSP/power.c 统一管理 */
+    power_gpio_init();
+    /* 蜂鸣器/LED 输出引脚: BSP/output.c 统一管理 */
+    output_gpio_init();
 
-    gpio_mode_set(GPIOA, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_0);
-    gpio_output_options_set(GPIOA, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_0);
-	gpio_bit_set(GPIOA, GPIO_PIN_0);
-
-    gpio_mode_set(GPIOB, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_8);
-    gpio_output_options_set(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_8);
-
-    gpio_mode_set(GPIOC, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_12);
-    gpio_output_options_set(GPIOC, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_12);
-
-#if IIC_SWITCH_ENABLED
-    gpio_mode_set(SW_IIC_GPIO_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, SW_IIC_GPIO_PIN);
-    gpio_output_options_set(SW_IIC_GPIO_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, SW_IIC_GPIO_PIN);
+#if MOTOR_ENABLED
+    /* PA5 (MOTOR_SLEEP): 电机使能, 默认 LOW (电机禁用) */
+    gpio_mode_set(MOTOR_SLEEP_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, MOTOR_SLEEP_PIN);
+    gpio_output_options_set(MOTOR_SLEEP_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, MOTOR_SLEEP_PIN);
 #endif
-
-    gpio_mode_set(GPIOB, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_5);
-    gpio_output_options_set(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_5);
 }
 
 // ===================== PD0(Btn1)/PD1(Btn2) 按键唤醒 =====================
@@ -87,7 +72,7 @@ uint8_t button_is_pressed(void)
 
 // ===================== 极低功耗休眠配置 =====================
 // 将休眠期间不需要的GPIO配置为 Analog Input (不带上下拉)，彻底杜绝引脚倒灌和悬空漏电
-void gpio_enter_low_power(uint8_t lpuart_enabled)
+void gpio_enter_low_power(uint8_t lpuart_enabled, uint8_t lcd_active, uint8_t bt_on)
 {
     /* 1. 确保所有GPIO时钟开启以允许配置其寄存器 */
     rcu_periph_clock_enable(RCU_GPIOA);
@@ -105,7 +90,7 @@ void gpio_enter_low_power(uint8_t lpuart_enabled)
                                  GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_15;
     if(!lpuart_enabled)
         gpioa_analog_pins |= GPIO_PIN_1;  /* PA1: 4G断电时转Analog, 在线时保持INPUT(RI唤醒) */
-    if(!g_lcd_active)
+    if(!lcd_active)
         gpioa_analog_pins |= (GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10);  /* PA8-10: SLCD COM0-2 */
     gpio_mode_set(GPIOA, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, gpioa_analog_pins);
 
@@ -114,9 +99,9 @@ void gpio_enter_low_power(uint8_t lpuart_enabled)
      *    排除 PB3/PB4 (UART4_TX/RX) — 蓝牙开启时保持AF
      */
     uint32_t gpiob_analog_pins = GPIO_PIN_2 | GPIO_PIN_6 | GPIO_PIN_7 | GPIO_PIN_8;
-    if(!g_bt_on)
+    if(!bt_on)
         gpiob_analog_pins |= (GPIO_PIN_3 | GPIO_PIN_4);  /* 蓝牙关闭时PB3/PB4转Analog */
-    if(!g_lcd_active)
+    if(!lcd_active)
         gpiob_analog_pins |= (GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_9 |
                               GPIO_PIN_10 | GPIO_PIN_11 | GPIO_PIN_12 |
                               GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15);  /* SLCD SEG+COM3 */
@@ -130,7 +115,7 @@ void gpio_enter_low_power(uint8_t lpuart_enabled)
     uint32_t gpioc_analog_pins = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | 
                                  GPIO_PIN_4 | GPIO_PIN_5 | 
                                  GPIO_PIN_13;
-    if(!g_lcd_active)
+    if(!lcd_active)
     {
         gpioc_analog_pins |= (GPIO_PIN_6 | GPIO_PIN_7 | GPIO_PIN_8 |
                               GPIO_PIN_9 | GPIO_PIN_10 | GPIO_PIN_11);  /* SLCD SEG24-29 */
@@ -141,7 +126,7 @@ void gpio_enter_low_power(uint8_t lpuart_enabled)
     /* 5. GPIOD 配置
      *    PD0(Btn1): 按键唤醒 EXTI0, 保持 INPUT (外部上拉)
      *    PD1(Btn2): 保持 INPUT (外部上拉, 防悬空)
-     *    PD4(SW_IIC): gpio_init 已配置为 OUTPUT LOW (电子开关断电), 跳过
+     *    PD4/PD5(IIC1): 中压传感器 I2C 总线, 采集后已转 Analog
      *    PD8=LPUART0_TX, PD9=LPUART0_RX: LPUART启用时保留 AF
      */
     uint32_t gpiod_analog_pins = GPIO_PIN_3 | GPIO_PIN_4 |
@@ -151,7 +136,7 @@ void gpio_enter_low_power(uint8_t lpuart_enabled)
 #if !BUTTON_ENABLED
     gpiod_analog_pins |= (GPIO_PIN_0 | GPIO_PIN_1);  /* 无按键: PD0/PD1转Analog省电 */
 #endif
-    if(!g_bt_on)
+    if(!bt_on)
         gpiod_analog_pins |= GPIO_PIN_2;  /* BLE关闭时PD2转Analog, BLE开启时保持INPUT */
     if (!lpuart_enabled)
     {
@@ -164,20 +149,6 @@ void gpio_enter_low_power(uint8_t lpuart_enabled)
      */
     uint32_t gpiof_analog_pins = GPIO_PIN_0 | GPIO_PIN_1;
     gpio_mode_set(GPIOF, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, gpiof_analog_pins);
-}
-
-// ===================== 控制 4G 模组 DTR 引脚 (PA0) =====================
-// level: 1 = HIGH (允许模块休眠); 0 = LOW (强制唤醒)
-void gpio_set_4g_dtr(uint8_t level)
-{
-    if(level)
-    {
-        gpio_bit_set(GPIOA, GPIO_PIN_0);
-    }
-    else
-    {
-        gpio_bit_reset(GPIOA, GPIO_PIN_0);
-    }
 }
 
 // ===================== PD2 蓝牙连接状态引脚 =====================

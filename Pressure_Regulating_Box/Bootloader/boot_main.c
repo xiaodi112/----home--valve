@@ -115,8 +115,6 @@ static int boot_info_write(const OtaInfo_t *info)
     fmc_lock();
     return 0;
 }
-
-/* ==================== 擦除 App 区 ==================== */
 static int boot_app_erase(void)
 {
     uint32_t addr;
@@ -137,8 +135,6 @@ static int boot_app_erase(void)
     fmc_lock();
     return 0;
 }
-
-/* ==================== Cache → App 拷贝 ==================== */
 /* 按字 (4B) 拷贝, size 不足 4 字节末尾补 0xFF (与 App 端写入一致) */
 static int boot_copy_cache_to_app(uint32_t size)
 {
@@ -177,8 +173,6 @@ static int boot_copy_cache_to_app(uint32_t size)
     fmc_lock();
     return 0;
 }
-
-/* ==================== 缓存固件合法性校验 (擦 App 前调用) ==================== */
 /* 校验缓存区头部向量表: MSP 在 SRAM, ResetHandler 在 App Flash 范围
  * 通过 → 返回 0;  失败 → 返回 -1, 此时不应擦除 App 区 (旧程序保留) */
 static int boot_validate_cache(uint32_t fw_size)
@@ -195,8 +189,6 @@ static int boot_validate_cache(uint32_t fw_size)
     /* MSP 必须在 SRAM (0x20000000 - 0x20007FFF) */
     if((cache_msp & 0x2FFE0000U) != 0x20000000U)
         return -1;
-
-    /* ResetHandler 必须在 App Flash 区域 (OTA_APP_ADDR ~ OTA_APP_END), 且 Thumb 位=1 */
     if((cache_reset & 0x01U) == 0)
         return -1;
     if((cache_reset & ~1U) < OTA_APP_ADDR || (cache_reset & ~1U) > OTA_APP_END)
@@ -222,17 +214,28 @@ static int boot_verify_copy(uint32_t fw_size)
     }
     return 0;
 }
-
-/* ==================== 跳转 App ==================== */
 typedef void (*app_entry_t)(void);
+
+static int boot_validate_app(void)
+{
+    uint32_t app_msp   = *(volatile uint32_t *)(OTA_APP_ADDR);
+    uint32_t app_reset = *(volatile uint32_t *)(OTA_APP_ADDR + 4);
+
+    if((app_msp & 0x2FFE0000U) != 0x20000000U)
+        return -1;
+    if((app_reset & 0x01U) == 0)
+        return -1;
+    if((app_reset & ~1U) < OTA_APP_ADDR || (app_reset & ~1U) > OTA_APP_END)
+        return -1;
+    return 0;
+}
+
 
 static void boot_jump_to_app(void)
 {
     uint32_t app_msp;
     uint32_t app_reset;
     app_entry_t entry;
-
-    /* App 向量表起始字 = 初始 MSP, 第二个字 = ResetHandler */
     app_msp   = *(volatile uint32_t *)(OTA_APP_ADDR);
     app_reset = *(volatile uint32_t *)(OTA_APP_ADDR + 4);
 
@@ -243,20 +246,15 @@ static void boot_jump_to_app(void)
     boot_print("\r\n");
 
     /* 简单合法性检查: MSP 必须落在 SRAM 范围内 (0x20000000-0x20007FFF) */
-    if((app_msp & 0x2FFE0000U) != 0x20000000U)
+    if(boot_validate_app() != 0)
     {
-        /* App 区无效, 死循环 (避免乱跳) */
-        boot_print("[BL] App MSP invalid! HALT\r\n");
+        boot_print("[BL] App vector invalid! HALT\r\n");
         while(1) __NOP();
     }
 
     __disable_irq();
-
-    /* 复位关键外设, 防止跳到 App 后中断意外触发 */
     rcu_periph_reset_enable(RCU_GPIOARST);
     rcu_periph_reset_disable(RCU_GPIOARST);
-
-    /* 重定位向量表 (App 的 sys_init 也会再设一次, 此处先到位) */
     SCB->VTOR = OTA_APP_ADDR;
 
     __set_MSP(app_msp);
@@ -276,7 +274,7 @@ int main(void)
 
     /* SystemInit 已在 startup 中调用, 时钟已就绪 */
     boot_delay_ms(10);
-    /* I2C 电源开关由 App 管理 (app_config.h: IIC_SWITCH_ENABLED / IIC_SWITCH_PIN_SELECT), BL 不干预 */
+    /* I2C 电源开关由 App 管理 (app_config.h: IIC0/1/2 引脚与传感器电源(PC3)), BL 不干预 */
 
 
     /* 初始化调试串口 */
@@ -285,8 +283,6 @@ int main(void)
 
     /* 1. 加载 InfoBlock */
     boot_info_load(&info);
-
-    /* 2. magic 无效 → 直接跳 App */
     if(info.magic != OTA_MAGIC_VALID)
     {
         boot_print("[BL] No valid magic, jump App\r\n");
@@ -305,14 +301,16 @@ int main(void)
             /* 升级流程 (FLASHING 是上次断电恢复, 与 PENDING 同样处理) */
             if(info.retry_count >= OTA_MAX_RETRY)
             {
-                /* 超过重试上限, 标记 FAILED 让 App 上报后清除 */
                 boot_print("[BL] Max retry, FAILED\r\n");
                 info.status = OTA_STATUS_FAILED;
                 boot_info_write(&info);
+                if(boot_validate_app() != 0)
+                {
+                    boot_print("[BL] App region invalid, HALT (safe)\r\n");
+                    while(1) __NOP();
+                }
                 boot_jump_to_app();
             }
-
-            /* ★ 擦写前校验缓存固件合法性 → 不合法则保留旧 App (回滚) */
             {
                 uint32_t c_msp = *(volatile uint32_t *)(OTA_CACHE_ADDR);
                 uint32_t c_rst = *(volatile uint32_t *)(OTA_CACHE_ADDR + 4);
@@ -327,7 +325,6 @@ int main(void)
                 boot_print("[BL] Validate FAIL\r\n");
                 info.status = OTA_STATUS_FAILED;
                 boot_info_write(&info);
-                /* 旧 App 区未擦除, jump 后运行原程序 */
                 boot_jump_to_app();
             }
             boot_print("[BL] Validate OK\r\n");
@@ -335,36 +332,46 @@ int main(void)
             info.retry_count++;
             info.status = OTA_STATUS_FLASHING;
             boot_info_write(&info);
-
-            /* 擦 App 区 */
-            boot_print("[BL] Erasing App...\r\n");
-            if(boot_app_erase() != 0)
+            /* Flash App: erase + copy + verify, retry up to 3 times.
+             * On final failure NEVER jump to a possibly corrupted App:
+             * keep FLASHING so a power cycle retries; if the App vector
+             * table is still valid (e.g. erase failed), run old App. */
             {
-                boot_print("[BL] Erase FAIL\r\n");
-                info.status = OTA_STATUS_FAILED;
-                boot_info_write(&info);
-                boot_jump_to_app();
+                uint8_t attempt;
+                uint8_t flash_ok = 0;
+                for(attempt = 0; attempt < 3; attempt++)
+                {
+                    boot_print("[BL] Flashing attempt...\r\n");
+                    if(boot_app_erase() != 0)
+                    {
+                        boot_print("[BL] Erase FAIL\r\n");
+                        break;
+                    }
+                    if(boot_copy_cache_to_app(info.new_fw_size) != 0)
+                    {
+                        boot_print("[BL] Copy FAIL\r\n");
+                        continue;
+                    }
+                    if(boot_verify_copy(info.new_fw_size) != 0)
+                    {
+                        boot_print("[BL] Verify FAIL\r\n");
+                        continue;
+                    }
+                    flash_ok = 1;
+                    break;
+                }
+                if(!flash_ok)
+                {
+                    if(boot_validate_app() == 0)
+                    {
+                        boot_print("[BL] App intact, keep FLASHING, jump old App\r\n");
+                        boot_jump_to_app();
+                    }
+                    boot_print("[BL] App invalid, HALT (power-cycle to retry)\r\n");
+                    while(1) __NOP();
+                }
             }
 
-            /* 拷贝 Cache → App */
-            boot_print("[BL] Copying Cache->App...\r\n");
-            if(boot_copy_cache_to_app(info.new_fw_size) != 0)
-            {
-                boot_print("[BL] Copy FAIL\r\n");
-                /* 拷贝失败但缓存仍完好, 不标记 FAILED 以便下次重试 */
-                boot_jump_to_app();
-            }
-
-            /* ★ 拷贝后回读验证: 确保 App 区数据与缓存一致 */
-            boot_print("[BL] Verifying...\r\n");
-            if(boot_verify_copy(info.new_fw_size) != 0)
-            {
-                boot_print("[BL] Verify FAIL\r\n");
-                /* 校验不一致, 不标记 FAILED, 保留重试机会 */
-                boot_jump_to_app();
-            }
-
-            /* 升级成功: 写 SUCCESS 状态 + 当前版本 */
             boot_print("[BL] SUCCESS, jump App\r\n");
             info.status = OTA_STATUS_SUCCESS;
             info.cur_version = info.new_fw_version;
@@ -377,7 +384,6 @@ int main(void)
         case OTA_STATUS_FAILED:
         case OTA_STATUS_IDLE:
         default:
-            /* 已就绪状态, 直接跳转 App; App 端自行上报回执并清除 */
             boot_jump_to_app();
             break;
     }

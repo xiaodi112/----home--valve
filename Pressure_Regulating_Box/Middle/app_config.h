@@ -32,8 +32,8 @@
  * 当前: 10*60/3600 = 0.1667h (10min) / 1*3600/3600 = 1h
  * EXT 区有效时, g_interval 由 cycle 推导, 两者必须保持同步。
  */
-#define APP_DEFAULT_COLLECT_HOURS     (10.0f / 60.0f)   /* 10 min */
-#define APP_DEFAULT_UPLOAD_HOURS      (60.0f / 60.0f)   /* 1 h */
+#define APP_DEFAULT_COLLECT_HOURS     (20.0f / 60.0f)   /* 10 min */
+#define APP_DEFAULT_UPLOAD_HOURS      (120.0f / 60.0f)   /* 1 h */
 
 /* ---------- MQTT默认值（EEPROM无数据时使用） ---------- */
 #define APP_DEFAULT_MQTT_CLIENT_ID    "S&D54GRG29T5HB0&149&1"
@@ -53,17 +53,20 @@
 #define APP_AT_TIMEOUT_MQTT           15000
 #define APP_MQTT_KEEPALIVE            300    /* MQTT心跳(秒), 模块自动发PINGREQ */
 
+/* 一直在线模式(long+活动窗口或end_result=1)下, 4G与平台连接主动巡检间隔(分钟) */
+#define FOURG_SUPERVISE_INTERVAL_MIN  30
+
 /* ---------- 窗口配置默认值 ---------- */
 #define APP_DEFAULT_WINDOW_PATTERN    "long"    /* long=长连接 short=短连接 dot=定点 */
 #define APP_DEFAULT_WINDOW_END_RESULT 1         /* 0=窗口结束4G断电 1=保持在线 (long模式) */
 #define APP_DEFAULT_WINDOW_DOTTIME    0         /* dot模式整点小时(0-23) */
 #define APP_DEFAULT_WINDOW_START      "080000" /* short模式: 活动窗口开始 HHMMSS */
-#define APP_DEFAULT_WINDOW_STOP       "200000" /* short模式: 活动窗口结束 HHMMSS */
+#define APP_DEFAULT_WINDOW_STOP       "180000" /* short模式: 活动窗口结束 HHMMSS */
 
 /* ---------- 采集/上报周期默认值 (与 APP_DEFAULT_COLLECT/UPLOAD_HOURS 等价, 单位粒度更细) ---------- */
-#define APP_DEFAULT_COLLECT_ONCE      10        /* 采集周期数值 */
+#define APP_DEFAULT_COLLECT_ONCE      20        /* 采集周期数值 */
 #define APP_DEFAULT_COLLECT_TYPE      CYCLE_MINUTE /* 采集周期单位 */
-#define APP_DEFAULT_REPORT_ONCE       1         /* 上报周期数值 */
+#define APP_DEFAULT_REPORT_ONCE       2         /* 上报周期数值 */
 #define APP_DEFAULT_REPORT_TYPE       CYCLE_HOUR /* 上报周期单位 */
 
 /* ---------- 阀门最后状态默认值 ---------- */
@@ -71,50 +74,56 @@
 
 
 
-
-/*	BUTTON_ENABLED=1, LCD_LOCK_ENABLED=1 — 有按键 + LCD 受控（当前产品）
-	BUTTON_ENABLED=1, LCD_LOCK_ENABLED=0 — 有按键 + LCD 长亮轮显（按键仍可翻页/操作）
-	BUTTON_ENABLED=0, LCD_LOCK_ENABLED=0 — 无按键 + LCD 长亮轮显（纯展示型产品）
-	BUTTON_ENABLED=0, LCD_LOCK_ENABLED=1 — 无按键 + LCD 受控（无法唤醒 LCD，上电亮 60s 后关闭，此后无法再亮，不合理组合）*/
-
-/* ---------- 实时采集频率默认值 ---------- */
-/* ---------- Button (PD0) compile switch ---------- */
-#define BUTTON_ENABLED                1         /* 1=button present, 0=no button (PD0 -> Analog) */
-
-/* ---------- LCD??????????? ---------- */
+/*
+	BUTTON_ENABLED 已移至 BSP/mygpio.h (板级按键配置):
+	BUTTON_ENABLED=1 + LCD_LOCK_ENABLED=1 — 有按键 + LCD 受控（当前产品）
+	BUTTON_ENABLED=1 + LCD_LOCK_ENABLED=0 — 有按键 + LCD 长亮轮显
+	BUTTON_ENABLED=0 + LCD_LOCK_ENABLED=0 — 无按键 + LCD 长亮轮显
+	BUTTON_ENABLED=0 + LCD_LOCK_ENABLED=1 — 无按键 + LCD 受控（不合理组合）
+*/
+/* ---------- LCD显示模式编译开关 ---------- */
 #define LCD_LOCK_ENABLED              0         /* 1=LCD按键锁定(60s超时关屏/20s回默认页); 0=LCD常亮+采集周期自动翻页 */
-#define LCD_SINGLE_SENSOR             1         /* 1=6页界面显示（6,一个传感器); 0=8页界面显示(8,2个传感器) */
 
-/* ---------- I2C 电源电子开关 (PD4/SW_IIC) ---------- */
-#define IIC_SWITCH_ENABLED            1         /* 1=有PD4/PD5电子开关(TPS22918), I2C设备按需上电/断电; 0=无开关(I2C设备常供电), 跳过PD4/PD5操作 */
-/* ---------- I2C 电源电子开关引脚选择 (PD4/PD5 二选一, 仅 IIC_SWITCH_ENABLED=1 生效) ---------- */
-#define IIC_SWITCH_PIN_SELECT  		  0     	/* 0=PD4(默认), 1=PD5 */
+#define LCD_SINGLE_SENSOR             0         /* 1=6页界面显示（6,一个传感器); 0=8页界面显示(8,2个传感器) */
 
-#if IIC_SWITCH_ENABLED
-#if IIC_SWITCH_PIN_SELECT == 0
-#define SW_IIC_GPIO_PORT   GPIOD
-#define SW_IIC_GPIO_PIN    GPIO_PIN_4
-#elif IIC_SWITCH_PIN_SELECT == 1
-#define SW_IIC_GPIO_PORT   GPIOD
-#define SW_IIC_GPIO_PIN    GPIO_PIN_5
-#else
-#error "IIC_SWITCH_PIN_SELECT must be 0 (PD4) or 1 (PD5)"
-#endif
-#else
-#define SW_IIC_GPIO_PORT   GPIOD
-#define SW_IIC_GPIO_PIN    GPIO_PIN_4
-#endif
+/* ---------- 激光甲烷传感器硬件选配 (编译开关) ----------
+ * 1=硬件带激光甲烷传感器: 编译 CH4 采集驱动/状态机/gas_get/laser_get/laser_set
+ * 0=无此硬件: 相关代码不编译, 平台下发 laser/gas 命令时直接忽略(仅打印调试日志)
+ */
+#define LASER_CH4_ENABLED             1
 
+/* ---------- 电机(阀门执行器)硬件选配 (编译开关) ----------
+ * 1=硬件带电机: 编译电机驱动/阀门动作(删除运行时门控, 直接生效)
+ * 0=无电机: 电机代码整块剔除, 节省 RAM/Flash, 阀门指令返回 valve_err
+ */
+#define MOTOR_ENABLED                 1
 
-/* ---------- 电机驱动方式 ---------- */
-#define MOTOR_DRV_MODE   0     /* 0=GPIO电平驱动(PA6/PA7); 1=PWM驱动(TIMER2 CH0/CH1, 160kHz) */
+/* ---------- 三组独立 I2C 总线引脚映射 ---------- */
+#define IIC0_SCL_PORT  GPIOB    /* IIC0: EEPROM    SCL */
+#define IIC0_SCL_PIN   GPIO_PIN_6
+#define IIC0_SDA_PORT  GPIOB    /* IIC0: EEPROM    SDA */
+#define IIC0_SDA_PIN   GPIO_PIN_7
+#define IIC1_SCL_PORT  GPIOD    /* IIC1: 中压传感器 SCL S2*/
+#define IIC1_SCL_PIN   GPIO_PIN_4
+#define IIC1_SDA_PORT  GPIOD    /* IIC1: 中压传感器 SDA S2*/
+#define IIC1_SDA_PIN   GPIO_PIN_5
+#define IIC2_SCL_PORT  GPIOC    /* IIC2: 低压传感器 SCL S1*/
+#define IIC2_SCL_PIN   GPIO_PIN_0
+#define IIC2_SDA_PORT  GPIOC    /* IIC2: 低压传感器 SDA S1*/
+#define IIC2_SDA_PIN   GPIO_PIN_1
+
+/* ---------- 软件 I2C 总线速率 (半周期延时计数, 越小越快) ---------- */
+#define SOFT_I2C_HALF_PERIOD       150
+
+/* 传感器供电 (SENSOR_PWR_ENABLED/SENSOR_PWRUP_DELAY_MS) 已移至 BSP/power.h */
+/* 电机引脚 (MOTOR_SLEEP_PORT/PIN, MOTOR_DRV_MODE) 已移至 BSP/motor.h */
 
 #define APP_DEFAULT_REAL_ENABLED      1         /* 0=禁用, 1=启用秒级采集 */
 #define APP_DEFAULT_REAL_FREQUENCY    5         /* 秒数 (1-10) */
 
 /* ---------- 产品复用配置默认值 ---------- */
-#define APP_DEFAULT_LCD_ENABLED       1         /* 0=无LCD产品, 1=有LCD产品 */
-#define APP_DEFAULT_SENSOR_COUNT      1         /* 1=单路传感器(进气端), 2=双路传感器 */
+#define APP_DEFAULT_LCD_ENABLED       0         /* 0=无LCD产品, 1=有LCD产品 */
+#define APP_DEFAULT_SENSOR_COUNT      2         /* 1=单路传感器(进气端), 2=双路传感器 */
 
 /* ---------- 阈值默认值 ---------- */
 /* 注: 阈值结构已拆分为 4 组独立配置, 默认值定义在 eeprom_config.h:
@@ -167,9 +176,10 @@ typedef enum {
     ABNORMAL_LOW_OR_MUTATION,  /* 超下限或突变 */
     ABNORMAL_ALL,              /* 全部 (压力超高/超低/突变) */
     ABNORMAL_TEMP_HIGH,        /* 温度过高关阀 (temph)  含 TEMP_HIGH + TEMP_VERY_HIGH */
-    ABNORMAL_TEMP_LOW          /* 温度过低关阀 (templ)  含 TEMP_LOW  + TEMP_VERY_LOW */
+    ABNORMAL_TEMP_LOW,         /* 温度过低关阀 (templ)  含 TEMP_LOW  + TEMP_VERY_LOW */
+    ABNORMAL_JGCLOSE           /* 激光甲烷报警关阀 (jgclose): CH4浓度>=门限(报警)即关阀, 平台 valve_open 恢复 */
     /* 注: 电压报警 (voltage_high/voltage_low) 只上报, 不动阀。
-     *     电压保护 (voltage_protect, VPROTECT) 强制关阀, 独立于本策略。
+     *     电压保护 (voltage_protect, VPROTECT) 也只上报/进入VLP省电, 不关阀。
      */
 } AbnormalClose_t;
 

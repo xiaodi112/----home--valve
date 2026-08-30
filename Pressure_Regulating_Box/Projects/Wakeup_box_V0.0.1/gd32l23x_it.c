@@ -34,6 +34,7 @@ OF SUCH DAMAGE.
 
 #include "gd32l23x_it.h"
 #include "gd32l233r_eval.h"
+#include "app_config.h"
 #include "gd32l23x_rtc.h"
 #include "systick.h"
 #include "delay.h"
@@ -162,7 +163,7 @@ void EXTI0_IRQHandler(void)
 {
     if(RESET != exti_flag_get(EXTI_0)) {
         exti_flag_clear(EXTI_0);
-        // 立即禁用EXTI0, 防止按键抖动期间重复进入ISR
+        // 自动禁用EXTI0, 防止唤醒后再次触发中断导致ISR死循环
         exti_interrupt_disable(EXTI_0);
         button_wakeup_flag = 1;
     }
@@ -198,4 +199,14 @@ void EXTI2_IRQHandler(void)
 void UART4_IRQHandler(void)
 {
     ble_uart_rx_irq_handler();
+}
+
+/*!
+    \brief      this function handles USART1 interrupt request (CH4 sensor RX IDLE)
+*/
+void USART1_IRQHandler(void)
+{
+#if LASER_CH4_ENABLED
+    usart1_ch4_irq_handler();
+#endif
 }

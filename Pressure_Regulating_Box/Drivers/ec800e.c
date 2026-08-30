@@ -12,6 +12,7 @@
 #include "delay.h"
 #include "tim.h"
 #include "mygpio.h"
+#include "power.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -484,16 +485,16 @@ void EC801E_SetPSM(uint8_t mode)
             // PSM: T3412=1分钟(10100001), T3324=20秒(00001010)
             EC_SendCmd("AT+CPSMS=1,,,\"10100001\",\"00001010\"\r\n", "OK", APP_AT_TIMEOUT_SHORT);
             EC_SendCmd("AT+QSCLK=3\r\n", "OK", APP_AT_TIMEOUT_SHORT);
-            gpio_set_4g_dtr(1);  // 硬件拉高 DTR (PA0) 允许休眠
+            power_4g_dtr_set(1);  // 硬件拉高 DTR (PA0) 允许休眠
             printf_debug("[EC] PSM enabled (TAU=1min, Active=20s)\r\n");
             break;
         case 1:
 			EC_SendCmd("AT+QSCLKEX=1,1,1\r\n", "OK", APP_AT_TIMEOUT_SHORT);
-            gpio_set_4g_dtr(1);  // 硬件拉高 DTR (PA0) 允许 4G 模组在空闲 1s 后进入休眠
+            power_4g_dtr_set(1);  // 硬件拉高 DTR (PA0) 允许 4G 模组在空闲 1s 后进入休眠
             printf_debug("[EC] QSCLKEX=1,1,1 enabled (DTR HIGH)\r\n");
             break;
         default:
-            gpio_set_4g_dtr(0);  // 硬件拉低 DTR (PA0) 强制保持唤醒
+            power_4g_dtr_set(0);  // 硬件拉低 DTR (PA0) 强制保持唤醒
             EC_SendCmd("AT+QSCLK=0\r\n", "OK", APP_AT_TIMEOUT_SHORT);
             EC_SendCmd("AT+CPSMS=0\r\n", "OK", APP_AT_TIMEOUT_SHORT);
             printf_debug("[EC] Sleep disabled (DTR LOW)\r\n");
@@ -504,7 +505,7 @@ void EC801E_SetPSM(uint8_t mode)
 // ==================== 唤醒模块（纯引脚拉低，无指令无残留） ====================
 void EC801E_Wakeup(void)
 {
-    gpio_set_4g_dtr(0);  // 硬件拉低 DTR (PA0) 强制唤醒模组
+    power_4g_dtr_set(0);  // 硬件拉低 DTR (PA0) 强制唤醒模组
     trea_delay_ms(160);  // 硬件拉低后，等待300ms以便模组及串口硬件完全就绪稳定
 	
     printf_debug("[EC] Module wakeup via DTR\r\n");
@@ -634,19 +635,48 @@ EC_Status_t EC801E_EnsureConnected(void)
     return EC801E_InitAndConnect();
 }
 
+// ==================== 配置MQTT协议版本 (MQTT 3.1.1) ====================
+// QMTCFG version=4 → MQTT 3.1.1; 连发两次防模块偶发丢指令, 再查询确认
+// 失败仅告警不阻断连接 (版本不符时连接本身会暴露问题)
+static void EC801E_ConfigMqttVersion(uint8_t profile)
+{
+    snprintf(s_cmd_buf, sizeof(s_cmd_buf), "AT+QMTCFG=\"version\",%d,4\r\n", profile);
+    EC_SendCmd(s_cmd_buf, "OK", APP_AT_TIMEOUT_SHORT);
+    EC_SendCmd(s_cmd_buf, "OK", APP_AT_TIMEOUT_SHORT);
+
+    snprintf(s_cmd_buf, sizeof(s_cmd_buf), "AT+QMTCFG=\"version\",%d\r\n", profile);
+    if(EC_SendCmd(s_cmd_buf, "+QMTCFG: \"version\",4", APP_AT_TIMEOUT_SHORT) == EC_OK)
+        printf_debug("[EC] MQTT v%d: version=4 (MQTT3.1.1) OK\r\n", profile);
+    else
+        printf_debug("[EC] MQTT v%d: version confirm failed: %s\r\n", profile, ec_rx_buf);
+}
+
 // ==================== 首次初始化+连接+订阅+QSCLK ====================
 EC_Status_t EC801E_InitAndConnect(void)
 {
     uint8_t retry;
     EC_Status_t ret;
 
-    EC801E_SetPSM(0);
+	
+    EC801E_PowerOff();
+	trea_delay_ms(100);
+	EC801E_PowerOn();
+	EC801E_SetPSM(0);
     printf_debug("[EC] === InitAndConnect ===\r\n");
 
     // 软件复位模块射频+协议栈, 清除残留TCP/MQTT/PDP状态
-    EC_SendCmd("AT+CFUN=1,1\r\n", "OK", APP_AT_TIMEOUT_SHORT);
-    trea_delay_ms(4000);  // 等待模块复位完成
+//    EC_SendCmd("AT+CFUN=1,1\r\n", "OK", APP_AT_TIMEOUT_SHORT);
+//	printf_cat1("AT+CFUN=1,1\r\n");
+    trea_delay_ms(3000);  // 等待模块复位完成
 
+	 // 设备信息 (ICCID)
+    {
+        char iccid[32] = {0};
+		EC801E_QueryICCID(iccid, sizeof(iccid));
+        printf_debug("[SM] Device info:\r\n ICCID=%s\r\n ",
+                     iccid);
+    }
+	
     // 确认模块已就绪 (复位后AT可能需数秒才响应)
     if(EC_SendCmdRetry("AT\r\n", "OK", APP_AT_TIMEOUT_SHORT, APP_EC_MAX_RETRY) != EC_OK)
     {
@@ -658,6 +688,9 @@ EC_Status_t EC801E_InitAndConnect(void)
     {
         ret = EC801E_InitNetwork();
         if(ret != EC_OK) { trea_delay_ms(1000); continue; }
+
+        // MQTT协议版本: MQTT 3.1.1 (必须在 QMTOPEN 之前配置)
+        EC801E_ConfigMqttVersion(0);
 
         // 设置keepalive (从eeprom_config或默认值)
         {
@@ -1311,6 +1344,9 @@ EC_Status_t EC801E_UserMqtt_Connect(void)
     snprintf(s_cmd_buf, sizeof(s_cmd_buf), "AT+QMTCFG=\"keepalive\",1,600\r\n");
     EC_SendCmd(s_cmd_buf, "OK", APP_AT_TIMEOUT_SHORT);
 	trea_delay_ms(300);
+    // MQTT协议版本: MQTT 3.1.1 (用户端通道, 必须在 QMTOPEN 之前配置)
+    EC801E_ConfigMqttVersion(1);
+	trea_delay_ms(300);
     // recv/mode: URC模式(用户端只发布不订阅, 无需主动查询)
     EC_SendCmd("AT+QMTCFG=\"recv/mode\",1,0,1\r\n", "OK", APP_AT_TIMEOUT_SHORT);
 
@@ -1377,54 +1413,60 @@ static void ly_build_payload(float p1_kpa, float t1, float voltage,
 {
     if(g_sensor_count >= 2)
     {
-		//    snprintf(s_payload, sizeof(s_payload),
-//        "{\"param\":["
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY01\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY02\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY03\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY05\",\"value\":\"%s\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY08\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
-//        "{\"deviceKey\":\"%s\",\"key\":\"LY11\",\"value\":\"%.2f\",\"ts\":\"%s\"}"
-//        "]}",
-//        g_user_mqtt.client_id, p1_kpa, ts,
-//        g_user_mqtt.client_id, t1, ts,
-//        g_user_mqtt.client_id, voltage, ts,
-//        g_user_mqtt.client_id, fault, ts,
-//        g_user_mqtt.client_id, csq, ts,
-//        g_user_mqtt.client_id, volt_alarm, ts,
-//        g_user_mqtt.client_id, (unsigned int)report_min, ts,
-//        g_user_mqtt.client_id, p2_kpa, ts,
-//        g_user_mqtt.client_id, t2, ts);
-        snprintf(s_payload, sizeof(s_payload),
-                 "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-                 "{\"id\":\"temp2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-                 "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-                 "{\"id\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
-                 "{\"id\":\"csq\",\"value\":\"%s\",\"ts\":\"%s\"},"
-                 "{\"id\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
-                 "{\"id\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
-                 "{\"id\":\"pressure2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-                 "{\"id\":\"voltage\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
-                t1, ts, t2, ts, p1_kpa, ts,
-                fault, ts, csq, ts, volt_alarm, ts,
-                (unsigned int)report_min, ts, p2_kpa, ts, voltage, ts);
+	    snprintf(s_payload, sizeof(s_payload),
+        "{\"param\":["
+        "{\"deviceKey\":\"%s\",\"key\":\"LY01\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY02\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY03\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY05\",\"value\":\"%s\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY08\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY11\",\"value\":\"%.2f\",\"ts\":\"%s\"}"
+        "]}",
+        g_user_mqtt.client_id, p1_kpa, ts,
+        g_user_mqtt.client_id, t1, ts,
+        g_user_mqtt.client_id, voltage, ts,
+        g_user_mqtt.client_id, fault, ts,
+        g_user_mqtt.client_id, csq, ts,
+        g_user_mqtt.client_id, volt_alarm, ts,
+        g_user_mqtt.client_id, (unsigned int)report_min, ts,
+        g_user_mqtt.client_id, p2_kpa, ts,
+        g_user_mqtt.client_id, t2, ts);
+//        snprintf(s_payload, sizeof(s_payload),
+//                 "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//                 "{\"id\":\"temp2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//                 "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//                 "{\"id\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
+//                 "{\"id\":\"csq\",\"value\":\"%s\",\"ts\":\"%s\"},"
+//                 "{\"id\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
+//                 "{\"id\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
+//                 "{\"id\":\"pressure2\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
+//                 "{\"id\":\"voltage\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
+//                t1, ts, t2, ts, p1_kpa, ts,
+//                fault, ts, csq, ts, volt_alarm, ts,
+//                (unsigned int)report_min, ts, p2_kpa, ts, voltage, ts);
     }
     else
     {
-        snprintf(s_payload, sizeof(s_payload),
-                 "[{\"id\":\"temp\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-                 "{\"id\":\"pressure\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"},"
-                 "{\"id\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
-                 "{\"id\":\"csq\",\"value\":\"%s\",\"ts\":\"%s\"},"
-                 "{\"id\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
-                 "{\"id\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
-                 "{\"id\":\"voltage\",\"value\":\"%.2f\",\"ts\":\"%s\",\"remark\":\"\"}]",
-                t1, ts, p1_kpa, ts,
-                fault, ts, csq, ts, volt_alarm, ts,
-                (unsigned int)report_min, ts, voltage, ts);
+       snprintf(s_payload, sizeof(s_payload),
+        "{\"param\":["
+        "{\"deviceKey\":\"%s\",\"key\":\"LY03\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY04\",\"value\":\"%d\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY05\",\"value\":\"%s\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY06\",\"value\":\"%d\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY07\",\"value\":\"%u\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY08\",\"value\":\"%.2f\",\"ts\":\"%s\"},"
+        "{\"deviceKey\":\"%s\",\"key\":\"LY11\",\"value\":\"%.2f\",\"ts\":\"%s\"}"
+        "]}",
+        g_user_mqtt.client_id, voltage, ts,
+        g_user_mqtt.client_id, fault, ts,
+        g_user_mqtt.client_id, csq, ts,
+        g_user_mqtt.client_id, volt_alarm, ts,
+        g_user_mqtt.client_id, (unsigned int)report_min, ts,
+        g_user_mqtt.client_id, p2_kpa, ts,
+        g_user_mqtt.client_id, t2, ts);
     }
 }
 

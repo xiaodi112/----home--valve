@@ -3,6 +3,9 @@
 
 #include "gd32l23x.h"
 
+/* 按键功能开关 (板级): 1=有按键功能, 0=无按键 (PD0 -> Analog) */
+#define BUTTON_ENABLED                1
+
 void gpio_init(void);
 
 // ===================== PD0(Btn1)/PD1(Btn2) 按键唤醒 =====================
@@ -13,10 +16,8 @@ void button_exti_disable(void);   // 唤醒后调用: 禁用EXTI0防止重复触
 uint8_t button_is_pressed(void);  // 读取PD0(Btn1): 1=按下(LOW), 0=松开(HIGH)
 
 // 进入极低功耗休眠配置 (关闭所有外设和未使用GPIO)
-void gpio_enter_low_power(uint8_t lpuart_enabled);
-
-// 控制 4G 模组 DTR 引脚 (PA0): 1=HIGH (允许休眠), 0=LOW (强制唤醒)
-void gpio_set_4g_dtr(uint8_t level);
+// lcd_active/bt_on 由调用方传入, 避免 BSP 依赖业务全局
+void gpio_enter_low_power(uint8_t lpuart_enabled, uint8_t lcd_active, uint8_t bt_on);
 
 // ===================== PD2 蓝牙连接状态引脚 =====================
 // BLE模块连接成功后输出LOW, 未连接时为HIGH (内部上拉)

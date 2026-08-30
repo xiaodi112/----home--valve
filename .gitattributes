@@ -1,4 +1,4 @@
-# Source files are kept GBK-encoded in the working tree (Keil/GBK toolchain).
-# Git stores the blobs as UTF-8 (converted automatically on add/checkout).
-*.c working-tree-encoding=GBK eol=crlf
-*.h working-tree-encoding=GBK eol=crlf
+# Source files are kept UTF-8-encoded in the working tree.
+# Git stores the blobs as UTF-8 (native, no conversion).
+*.c eol=crlf
+*.h eol=crlf

@@ -14,6 +14,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+/* 阈值值 == 0.00 视为该单项关闭(不产生报警), 平台/debug串口配置均适用;
+ * shock 滞回带是修正量, 不参与"0=关闭" */
+#define THR_ACTIVE(v)  ((v) != 0.0f)
+
 // ==================== 阈值检查 ====================
 // 优先级:
 //   1. spupower.protect (VPROTECT, 仅报警; VLP模式由 main.c 门控)
@@ -28,7 +32,8 @@ ThresholdResult_t threshold_check(float pressure, float temperature, float volta
     // ---- 1. 电压保护(VPROTECT) — spupower.enabled 关闭时跳过, 不触发报警/VLP ----
     // voltage >= 0 守卫: ADC 超时返回 -1.0, 不可参与电压判定, 否则误触发 VPROTECT
     // 进入滞回: 已在VLP时用 protect+0.15 判断(由do_collect处理退出), 未在VLP时用 protect-0.1 防振荡
-    if(g_spupower.enabled && check_voltage && voltage >= 0.0f && voltage < g_spupower.protect - 0.1f)
+    if(g_spupower.enabled && check_voltage && voltage >= 0.0f &&
+       THR_ACTIVE(g_spupower.protect) && voltage < g_spupower.protect - 0.1f)
         return THRESHOLD_VPROTECT;
 
     // ---- 2/3. 压力检查 (含 shock 滞回带) ----
@@ -36,36 +41,36 @@ ThresholdResult_t threshold_check(float pressure, float temperature, float volta
     {
         float shock = g_pthreshold.shock;
         // 压力极限 (ppmin/ppmax)
-        if(pressure > g_pthreshold.ppmax + shock)
+        if(THR_ACTIVE(g_pthreshold.ppmax) && pressure > g_pthreshold.ppmax + shock)
             return THRESHOLD_VERY_HIGH;
-        if(pressure < g_pthreshold.ppmin - shock)
+        if(THR_ACTIVE(g_pthreshold.ppmin) && pressure < g_pthreshold.ppmin - shock)
             return THRESHOLD_VERY_LOW;
         // 普通上下限
-        if(pressure > g_pthreshold.pmax + shock)
+        if(THR_ACTIVE(g_pthreshold.pmax) && pressure > g_pthreshold.pmax + shock)
             return THRESHOLD_OVER_LIMIT;
-        if(pressure < g_pthreshold.pmin - shock)
+        if(THR_ACTIVE(g_pthreshold.pmin) && pressure < g_pthreshold.pmin - shock)
             return THRESHOLD_UNDER_LIMIT;
     }
 
     // ---- 4/5. 温度检查 ----
     if(g_tthreshold.enabled)
     {
-        if(temperature > g_tthreshold.vhigh)
+        if(THR_ACTIVE(g_tthreshold.vhigh) && temperature > g_tthreshold.vhigh)
             return THRESHOLD_TEMP_VERY_HIGH;
-        if(temperature < g_tthreshold.vlow)
+        if(THR_ACTIVE(g_tthreshold.vlow) && temperature < g_tthreshold.vlow)
             return THRESHOLD_TEMP_VERY_LOW;
-        if(temperature > g_tthreshold.high)
+        if(THR_ACTIVE(g_tthreshold.high) && temperature > g_tthreshold.high)
             return THRESHOLD_TEMP_HIGH;
-        if(temperature < g_tthreshold.low)
+        if(THR_ACTIVE(g_tthreshold.low) && temperature < g_tthreshold.low)
             return THRESHOLD_TEMP_LOW;
     }
 
     // ---- 6. 电压上下限 (spupower.enabled 关闭时跳过, 不触发报警)
     if(g_spupower.enabled && check_voltage && voltage >= 0.0f)
     {
-        if(voltage > g_spupower.high)
+        if(THR_ACTIVE(g_spupower.high) && voltage > g_spupower.high)
             return THRESHOLD_VOLT_HIGH;
-        if(voltage < g_spupower.low)
+        if(THR_ACTIVE(g_spupower.low) && voltage < g_spupower.low)
             return THRESHOLD_VOLT_LOW;
     }
 
@@ -74,7 +79,7 @@ ThresholdResult_t threshold_check(float pressure, float temperature, float volta
     {
         float delta = pressure - last_pressure;
         if(delta < 0) delta = -delta;
-        if(delta > g_pthreshold.mutation)
+        if(THR_ACTIVE(g_pthreshold.mutation) && delta > g_pthreshold.mutation)
             return THRESHOLD_MUTATION;
     }
 
@@ -111,7 +116,9 @@ int threshold_voltage_alarm(float voltage)
 //    if(voltage < 0.0f || !g_spupower.enabled)
 	if(voltage < 0.0f)
         return -1;
-    if(voltage > g_spupower.high || voltage < g_spupower.low || voltage < g_spupower.protect)
+    if((THR_ACTIVE(g_spupower.high) && voltage > g_spupower.high) ||
+       (THR_ACTIVE(g_spupower.low)  && voltage < g_spupower.low) ||
+       (THR_ACTIVE(g_spupower.protect) && voltage < g_spupower.protect))
         return 1;
     return 0;
 }
@@ -125,20 +132,20 @@ PressureStatus_t threshold_get_pressure_status(float pressure, float last_pressu
 
     float shock = g_pthreshold.shock;
 
-    if(pressure > g_pthreshold.ppmax + shock)
+    if(THR_ACTIVE(g_pthreshold.ppmax) && pressure > g_pthreshold.ppmax + shock)
         return PRESSURE_VERYHIGH;
-    if(pressure < g_pthreshold.ppmin - shock)
+    if(THR_ACTIVE(g_pthreshold.ppmin) && pressure < g_pthreshold.ppmin - shock)
         return PRESSURE_VERYLOW;
-    if(pressure > g_pthreshold.pmax + shock)
+    if(THR_ACTIVE(g_pthreshold.pmax) && pressure > g_pthreshold.pmax + shock)
         return PRESSURE_HIGH;
-    if(pressure < g_pthreshold.pmin - shock)
+    if(THR_ACTIVE(g_pthreshold.pmin) && pressure < g_pthreshold.pmin - shock)
         return PRESSURE_LOW;
 
     if(last_pressure >= 0)
     {
         float delta = pressure - last_pressure;
         if(delta < 0) delta = -delta;
-        if(delta > g_pthreshold.mutation)
+        if(THR_ACTIVE(g_pthreshold.mutation) && delta > g_pthreshold.mutation)
             return PRESSURE_MUTATION;
     }
     return PRESSURE_NORMAL;
@@ -164,13 +171,13 @@ TempStatus_t threshold_get_temp_status(float temperature)
     if(!g_tthreshold.enabled)
         return TEMP_NORMAL;
 
-    if(temperature > g_tthreshold.vhigh)
+    if(THR_ACTIVE(g_tthreshold.vhigh) && temperature > g_tthreshold.vhigh)
         return TEMP_VERY_HIGH;
-    if(temperature < g_tthreshold.vlow)
+    if(THR_ACTIVE(g_tthreshold.vlow) && temperature < g_tthreshold.vlow)
         return TEMP_VERY_LOW;
-    if(temperature > g_tthreshold.high)
+    if(THR_ACTIVE(g_tthreshold.high) && temperature > g_tthreshold.high)
         return TEMP_HIGH;
-    if(temperature < g_tthreshold.low)
+    if(THR_ACTIVE(g_tthreshold.low) && temperature < g_tthreshold.low)
         return TEMP_LOW;
     return TEMP_NORMAL;
 }
@@ -195,26 +202,26 @@ ThresholdResult_t threshold_check2(float pressure, float temperature, float last
     if(g_pthreshold2.enabled)
     {
         float shock = g_pthreshold2.shock;
-        if(pressure > g_pthreshold2.ppmax + shock)
+        if(THR_ACTIVE(g_pthreshold2.ppmax) && pressure > g_pthreshold2.ppmax + shock)
             return THRESHOLD_VERY_HIGH;
-        if(pressure < g_pthreshold2.ppmin - shock)
+        if(THR_ACTIVE(g_pthreshold2.ppmin) && pressure < g_pthreshold2.ppmin - shock)
             return THRESHOLD_VERY_LOW;
-        if(pressure > g_pthreshold2.pmax + shock)
+        if(THR_ACTIVE(g_pthreshold2.pmax) && pressure > g_pthreshold2.pmax + shock)
             return THRESHOLD_OVER_LIMIT;
-        if(pressure < g_pthreshold2.pmin - shock)
+        if(THR_ACTIVE(g_pthreshold2.pmin) && pressure < g_pthreshold2.pmin - shock)
             return THRESHOLD_UNDER_LIMIT;
     }
 
     // ---- 温度检查 ----
     if(g_tthreshold2.enabled)
     {
-        if(temperature > g_tthreshold2.vhigh)
+        if(THR_ACTIVE(g_tthreshold2.vhigh) && temperature > g_tthreshold2.vhigh)
             return THRESHOLD_TEMP_VERY_HIGH;
-        if(temperature < g_tthreshold2.vlow)
+        if(THR_ACTIVE(g_tthreshold2.vlow) && temperature < g_tthreshold2.vlow)
             return THRESHOLD_TEMP_VERY_LOW;
-        if(temperature > g_tthreshold2.high)
+        if(THR_ACTIVE(g_tthreshold2.high) && temperature > g_tthreshold2.high)
             return THRESHOLD_TEMP_HIGH;
-        if(temperature < g_tthreshold2.low)
+        if(THR_ACTIVE(g_tthreshold2.low) && temperature < g_tthreshold2.low)
             return THRESHOLD_TEMP_LOW;
     }
 
@@ -223,7 +230,7 @@ ThresholdResult_t threshold_check2(float pressure, float temperature, float last
     {
         float delta = pressure - last_pressure;
         if(delta < 0) delta = -delta;
-        if(delta > g_pthreshold2.mutation)
+        if(THR_ACTIVE(g_pthreshold2.mutation) && delta > g_pthreshold2.mutation)
             return THRESHOLD_MUTATION;
     }
 
@@ -239,20 +246,20 @@ PressureStatus_t threshold_get_pressure_status2(float pressure, float last_press
 
     float shock = g_pthreshold2.shock;
 
-    if(pressure > g_pthreshold2.ppmax + shock)
+    if(THR_ACTIVE(g_pthreshold2.ppmax) && pressure > g_pthreshold2.ppmax + shock)
         return PRESSURE_VERYHIGH;
-    if(pressure < g_pthreshold2.ppmin - shock)
+    if(THR_ACTIVE(g_pthreshold2.ppmin) && pressure < g_pthreshold2.ppmin - shock)
         return PRESSURE_VERYLOW;
-    if(pressure > g_pthreshold2.pmax + shock)
+    if(THR_ACTIVE(g_pthreshold2.pmax) && pressure > g_pthreshold2.pmax + shock)
         return PRESSURE_HIGH;
-    if(pressure < g_pthreshold2.pmin - shock)
+    if(THR_ACTIVE(g_pthreshold2.pmin) && pressure < g_pthreshold2.pmin - shock)
         return PRESSURE_LOW;
 
     if(last_pressure >= 0)
     {
         float delta = pressure - last_pressure;
         if(delta < 0) delta = -delta;
-        if(delta > g_pthreshold2.mutation)
+        if(THR_ACTIVE(g_pthreshold2.mutation) && delta > g_pthreshold2.mutation)
             return PRESSURE_MUTATION;
     }
     return PRESSURE_NORMAL;
@@ -265,13 +272,13 @@ TempStatus_t threshold_get_temp_status2(float temperature)
     if(!g_tthreshold2.enabled)
         return TEMP_NORMAL;
 
-    if(temperature > g_tthreshold2.vhigh)
+    if(THR_ACTIVE(g_tthreshold2.vhigh) && temperature > g_tthreshold2.vhigh)
         return TEMP_VERY_HIGH;
-    if(temperature < g_tthreshold2.vlow)
+    if(THR_ACTIVE(g_tthreshold2.vlow) && temperature < g_tthreshold2.vlow)
         return TEMP_VERY_LOW;
-    if(temperature > g_tthreshold2.high)
+    if(THR_ACTIVE(g_tthreshold2.high) && temperature > g_tthreshold2.high)
         return TEMP_HIGH;
-    if(temperature < g_tthreshold2.low)
+    if(THR_ACTIVE(g_tthreshold2.low) && temperature < g_tthreshold2.low)
         return TEMP_LOW;
     return TEMP_NORMAL;
 }
