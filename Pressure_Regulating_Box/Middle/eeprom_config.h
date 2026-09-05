@@ -73,11 +73,13 @@
  *    0x287: sensor_count (1B)
  *    0x288: vlp_flag (1B)
  *    0x289: ch4_alarm_closed (1B, 激光甲烷报警关阀标志, 重启后保持, 平台 valve_open 清除)
+ *    0x28A-0x28D: report_delay_min (float, 周期上报后延分钟, 0~60, 支持小数如1.5)
  *
  *  区块 7: 阀门到位延时 valve_delay (Magic 0xC3)
  *    0x290: Magic
  *    0x291: enabled (1B)
  *    0x292-0x293: delay_ms (uint16)
+ *    0x294-0x297: valve_timeout_ms (uint32, 阀门限位到位等待超时, 默认40000)
  */
 
 // ==================== EEPROM 地址定义 ====================
@@ -145,6 +147,8 @@
 #define EE_ADDR_LCD_ENABLED       0x286
 #define EE_ADDR_SENSOR_COUNT      0x287
 #define EE_ADDR_VLP_FLAG          0x288
+#define EE_ADDR_REPORT_DELAY      0x28A
+#define EE_ADDR_VALVE_TIMEOUT     0x294
 
 // 区块 7: 阀门到位延时 (valve_delay)
 #define EE_ADDR_VDLY_MAGIC        0x290
@@ -231,6 +235,15 @@
 #define EE_ADDR_LASER_TIME        0x4C2
 #define EE_MAGIC_LASER            0xCA
 
+// 区块 14: 出气端/激光异常关阀 (Magic 0xCB)
+//   0x4D0: Magic
+//   0x4D1-0x4E0: abnormal2_close (16B string, 出气端 pv* 策略)
+//   0x4E1: abnormal3_close (1B, 激光甲烷异常关阀 0=关 1=开)
+#define EE_ADDR_ABN2_MAGIC        0x4D0
+#define EE_ADDR_ABNORMAL2_CLOSE   0x4D1
+#define EE_ADDR_ABNORMAL3_CLOSE   0x4E1
+#define EE_MAGIC_ABN23            0xCB
+
 // ==================== Magic ====================值 ====================
 #define EE_MAGIC_INTERVAL         0xA5
 #define EE_MAGIC_MQTT             0x5A
@@ -272,6 +285,11 @@
 // 安全上限: 阀门到位保持 PWM 驱动的最长时间(ms)
 // 防止误配置超长延时, 保护电机与阀门
 #define VDLY_DELAY_MS_MAX    5000
+
+/* 阀门限位到位等待超时 (ms): 默认40s, 可配置 1~120s (看门狗180s, 留余量) */
+#define DEF_VALVE_TIMEOUT_MS   40000
+#define VALVE_TIMEOUT_MS_MIN   1000
+#define VALVE_TIMEOUT_MS_MAX   120000
 
 // 电压检测 (spupower)
 #define DEF_SP_SWITCH        0
@@ -402,12 +420,15 @@ typedef struct {
 
 // 全部配置结构体通过extern声明 (定义在config_store.c)
 extern AppInterval_t              g_interval;
+extern float                      g_report_delay_min;   // 周期上报后延分钟 (0~60, 支持小数)
 extern MqttConfig_t               g_mqtt;
 extern UserMqttConfig_t           g_user_mqtt;            // 用户端MQTT配置
 extern WindowConfig_t             g_window;
 extern CycleConfig_t              g_collect_cycle;
 extern CycleConfig_t              g_report_cycle;
 extern char                       g_abnormal_close[16];
+extern char                       g_abnormal2_close[16];   // 出气端异常关阀策略 (pv*)
+extern uint8_t                    g_abnormal3_close;       // 激光甲烷异常关阀 0=关 1=开
 extern uint8_t                    g_valve_last_order;
 extern uint8_t                    g_valve_alarm_closed;    // 报警自动关阀标志 (EEPROM持久化, OTA重启后自动恢复)
 extern uint8_t                    g_valve_pre_alarm_order; // 关阀前阀门状态 (EEPROM持久化)
@@ -417,6 +438,7 @@ extern uint8_t                    g_real_frequency;       // 实时采集频率 
 extern uint8_t                    g_lcd_enabled;          // LCD显示开关 (0=关, 1=开, EEPROM持久化)
 extern uint8_t                    g_sensor_count;         // 传感器数量 (1=单路, 2=双路, EEPROM持久化)
 extern uint16_t                   g_keepalive_sec;        // MQTT心跳(秒)
+extern uint32_t                   g_valve_timeout_ms;     // 阀门限位到位等待超时(ms), 默认40000
 extern TempThresholdConfig_t      g_tthreshold;           // 第一路温度阈值
 extern TempThresholdConfig_t      g_tthreshold2;          // 第二路温度阈值
 extern ValveDelayConfig_t         g_vdelay;               // 阀门到位延时
@@ -473,6 +495,9 @@ void config_save_ch4_threshold(void);
 // 保存激光甲烷定时采集配置 (laser_switch + laser_time 位图)
 void config_save_laser(void);
 
+// 保存出气端/激光异常关阀配置 (abnormal2_close + abnormal3_close)
+void config_save_abn23(void);
+
 // 获取心跳值(含默认值)
 uint16_t config_get_keepalive(void);
 
@@ -509,6 +534,8 @@ void config_check_cmd(void);
 // 判断当前RTC时间是否在活动窗口
 // 返回: 1=活动(应上报), 0=非活动(仅采集)
 int config_is_active_window(void);
+// 按指定时刻(HHMMSS)判断是否在活动窗口 (后延上报用网格时刻判断)
+int config_is_active_window_at(uint32_t hhmmss);
 
 // 低电压省电模式标志 (定义于 main.c)
 extern uint8_t voltage_low_power;

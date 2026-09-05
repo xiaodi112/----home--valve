@@ -11,6 +11,7 @@
 #include "usart.h"
 #include "ec800e.h"
 #include "delay.h"
+#include "mygpio.h"
 #include "buzzer.h"
 #include <stdio.h>
 #include <string.h>
@@ -36,6 +37,7 @@ void do_ch4(void)
     static CH4_InternalState_t ch4_state = CH4_STATE_IDLE;
     static uint32_t warmup_start_ms = 0;
     static CH4_Data_t ch4_data;
+    static uint8_t s_ch4_4g_ok = 0;   // 本次采集上报 4G 连接是否成功 (POWER_OFF 据此决定是否恢复QSCLK)
 
     switch(ch4_state)
     {
@@ -80,16 +82,28 @@ void do_ch4(void)
             /* 激光甲烷异常自动关阀 (jgclose 策略): 报警即关阀, 保持关闭直到平台 valve_open */
             if(level == CH4_ALARM_ALARM)
                 ch4_alarm_try_close_valve();
-            /* 暖机/采集期间 4G 已进入 QSCLK 休眠, 上报前先唤醒并确保 MQTT 在线 */
+            /* 暖机/采集期间 4G 已进入 QSCLK 休眠, 上报前先恢复 4G LPUART 再唤醒并确认 MQTT 在线
+             * (纯RTC最小唤醒进入CH4时, 4G串口未初始化, 必须先 com_lpuart_init 否则所有AT rx(0)) */
+            com_lpuart_init();
+            trea_delay_ms(100);
+            gpio_init();   /* 最小唤醒后 PA0(DTR) 为 Analog, 恢复输出后才能拉低DTR唤醒4G */
             EC801E_Wakeup();
             if(EC801E_EnsureConnected() == EC_OK)
             {
+                s_ch4_4g_ok = 1;
                 report_publish_ch4_status(&ch4_data, level);
                 trea_delay_ms(300);
                 report_publish_feedback(32);   /* 激光甲烷状态获取成功 */
 				if(level == CH4_ALARM_ALARM)
 					// 报警提示音
 					buzzer_beep(4, 100);
+            }
+            else
+            {
+                /* 4G 通信失败: 断电并标记失败, 避免"假在线"与无效重试 (与 do_upload 一致) */
+                s_ch4_4g_ok = 0;
+                EC801E_PowerOff();
+                printf_debug("[CH4] report: 4G connect failed, power off\r\n");
             }
             printf_debug("[CH4] report: gas=%d\r\n", (int)level);
             ch4_state = CH4_STATE_POWER_OFF;
@@ -98,7 +112,9 @@ void do_ch4(void)
 
         case CH4_STATE_POWER_OFF:
             ch4_power_off();
-            EC801E_SetPSM(1);   /* long模式: 上报完成后恢复QSCLK轻休眠 */
+            if(s_ch4_4g_ok)
+                EC801E_SetPSM(1);   /* long模式: 上报成功后恢复QSCLK轻休眠 */
+            s_ch4_4g_ok = 0;
             printf_debug("[CH4] power off\r\n");
             ch4_state = CH4_STATE_IDLE;
             app_state = STATE_SLEEP;

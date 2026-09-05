@@ -13,12 +13,14 @@ void gpio_init(void)
     rcu_periph_clock_enable(RCU_GPIOD);
     rcu_periph_clock_enable(RCU_GPIOF);
 
-    /* 电源引脚 (4G_EN/BLE_EN/SENSOR_PWR/DTR): BSP/power.c 统一管理 */
+    /* 电源引脚 (V4G_EN/PWRKEY/BLE_EN/CH4/DTR): BSP/power.c 统一管理 */
     power_gpio_init();
     /* 蜂鸣器/LED 输出引脚: BSP/output.c 统一管理 */
     output_gpio_init();
 
 #if MOTOR_ENABLED
+    /* PA11/PA12 限位开关: 恢复输入+上拉 (深休眠 gpio_enter_low_power 会转 Analog) */
+    motor_limit_init();
     /* PA5 (MOTOR_SLEEP): 电机使能, 默认 LOW (电机禁用) */
     gpio_mode_set(MOTOR_SLEEP_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, MOTOR_SLEEP_PIN);
     gpio_output_options_set(MOTOR_SLEEP_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, MOTOR_SLEEP_PIN);
@@ -82,14 +84,14 @@ void gpio_enter_low_power(uint8_t lpuart_enabled, uint8_t lcd_active, uint8_t bt
     rcu_periph_clock_enable(RCU_GPIOF);
 
     /* 2. GPIOA 配置
-     *    排除 PA1 (4G RI, EXTI唤醒) — 4G在线时保持INPUT
+     *    排除 PA0 (4G DTR) / PA1 (4G RI) — 4G在线时 DTR 保持输出HIGH, RI 保持INPUT(EXTI)
      *    排除 PA8/PA9/PA10 (SLCD COM0/COM1/COM2, LCD开启时保持AF)
      */
-    uint32_t gpioa_analog_pins = GPIO_PIN_0 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 |
+    uint32_t gpioa_analog_pins = GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 |
                                  GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7 |
                                  GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_15;
     if(!lpuart_enabled)
-        gpioa_analog_pins |= GPIO_PIN_1;  /* PA1: 4G断电时转Analog, 在线时保持INPUT(RI唤醒) */
+        gpioa_analog_pins |= (GPIO_PIN_0 | GPIO_PIN_1);  /* PA0/PA1: 4G断电时转Analog */
     if(!lcd_active)
         gpioa_analog_pins |= (GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10);  /* PA8-10: SLCD COM0-2 */
     gpio_mode_set(GPIOA, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, gpioa_analog_pins);
@@ -108,13 +110,16 @@ void gpio_enter_low_power(uint8_t lpuart_enabled, uint8_t lcd_active, uint8_t bt
     gpio_mode_set(GPIOB, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, gpiob_analog_pins);
 
     /* 4. GPIOC 配置
+     *    排除 PC0 (V4G_EN) — 4G在线时保持输出HIGH, 维持模块供电 (条件, 见下)
      *    排除 PC6-PC11 (SLCD SEG24-29, LCD开启时保持AF)
      *    排除 PC12 (SW_BT 输出)
      *    排除 PC14/PC15 (LXTAL, RTC保持, 绝对不动!)
      */
-    uint32_t gpioc_analog_pins = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | 
+    uint32_t gpioc_analog_pins = GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 |
                                  GPIO_PIN_4 | GPIO_PIN_5 | 
                                  GPIO_PIN_13;
+    if(!lpuart_enabled)
+        gpioc_analog_pins |= GPIO_PIN_0;  /* PC0 (V4G_EN): 4G断电时转Analog */
     if(!lcd_active)
     {
         gpioc_analog_pins |= (GPIO_PIN_6 | GPIO_PIN_7 | GPIO_PIN_8 |

@@ -21,6 +21,7 @@ AppInterval_t g_interval = {
     APP_DEFAULT_UPLOAD_HOURS,
     0, 0, 0
 };
+float g_report_delay_min = 0.0f;   /* 周期上报后延分钟 (0~60, 支持小数) */
 
 MqttConfig_t g_mqtt = {
     APP_DEFAULT_MQTT_CLIENT_ID,
@@ -47,6 +48,8 @@ CycleConfig_t g_collect_cycle = { APP_DEFAULT_COLLECT_ONCE, APP_DEFAULT_COLLECT_
 CycleConfig_t g_report_cycle  = { APP_DEFAULT_REPORT_ONCE,  APP_DEFAULT_REPORT_TYPE  };
 
 char g_abnormal_close[16] = APP_DEFAULT_ABNORMAL_CLOSE;
+char g_abnormal2_close[16] = APP_DEFAULT_ABNORMAL_CLOSE;   /* 出气端 pv* 策略 */
+uint8_t g_abnormal3_close = 0;                             /* 激光甲烷异常关阀 0=关 1=开 */
 uint8_t g_valve_last_order = APP_DEFAULT_VALVE_LAST_ORDER;
 uint8_t g_valve_alarm_closed = 0;
 uint8_t g_valve_pre_alarm_order = 0;
@@ -56,6 +59,7 @@ uint8_t g_real_frequency = APP_DEFAULT_REAL_FREQUENCY;
 uint8_t g_lcd_enabled = APP_DEFAULT_LCD_ENABLED;
 uint8_t g_sensor_count = APP_DEFAULT_SENSOR_COUNT;
 uint16_t g_keepalive_sec = APP_MQTT_KEEPALIVE;
+uint32_t g_valve_timeout_ms = DEF_VALVE_TIMEOUT_MS;   /* 阀门限位到位等待超时(ms) */
 
 TempThresholdConfig_t g_tthreshold = {
     DEF_TT_SWITCH, DEF_TT_HIGH, DEF_TT_LOW, DEF_TT_VHIGH, DEF_TT_VLOW
@@ -256,6 +260,7 @@ void config_save_vdelay(void)
         g_vdelay.delay_ms = VDLY_DELAY_MS_MAX;
     EE_WRITE_BYTE(EE_ADDR_VDLY_ENABLED, g_vdelay.enabled);
     EE_WRITE(EE_ADDR_VDLY_DELAY_MS, (const uint8_t *)&g_vdelay.delay_ms, 2);
+    EE_WRITE(EE_ADDR_VALVE_TIMEOUT, (const uint8_t *)&g_valve_timeout_ms, 4);
     EE_WRITE_BYTE(EE_ADDR_VDLY_MAGIC, EE_MAGIC_VDLY);
     printf_debug("[CFG] VDLY saved: en=%d delay_ms=%d\r\n",
                  g_vdelay.enabled, g_vdelay.delay_ms);
@@ -343,6 +348,16 @@ void config_save_laser(void)
     printf_debug("[CFG] LASER saved: switch=%d time=%s\r\n", g_laser_switch, tstr);
 }
 
+/* ==================== 区块14: 出气端/激光异常关阀 ==================== */
+void config_save_abn23(void)
+{
+    EE_WRITE_BYTE(EE_ADDR_ABN2_MAGIC, EE_MAGIC_ABN23);
+    ee_write_string(EE_ADDR_ABNORMAL2_CLOSE, g_abnormal2_close, 16);
+    EE_WRITE_BYTE(EE_ADDR_ABNORMAL3_CLOSE, g_abnormal3_close);
+    printf_debug("[CFG] ABN23 saved: abn2=%s abn3=%d\r\n",
+                 g_abnormal2_close, g_abnormal3_close);
+}
+
 /* ==================== 区块6: 扩展配置 ==================== */
 void config_save_ext(void)
 {
@@ -364,6 +379,7 @@ void config_save_ext(void)
     EE_WRITE_BYTE(EE_ADDR_VALVE_ALARM_CLOSED, g_valve_alarm_closed);
     EE_WRITE_BYTE(EE_ADDR_VALVE_PRE_ALARM_ORDER, g_valve_pre_alarm_order);
     EE_WRITE_BYTE(EE_ADDR_CH4_ALARM_CLOSED, g_ch4_alarm_closed);
+    ee_write_float(EE_ADDR_REPORT_DELAY, g_report_delay_min);
     EE_WRITE_BYTE(EE_ADDR_LCD_ENABLED, g_lcd_enabled);
     EE_WRITE_BYTE(EE_ADDR_VLP_FLAG, voltage_low_power);
     printf_debug("[CFG] EXT saved\r\n");
@@ -527,6 +543,12 @@ void config_load_all(void)
     {
         EE_READ(EE_ADDR_VDLY_ENABLED, &g_vdelay.enabled, 1);
         EE_READ(EE_ADDR_VDLY_DELAY_MS, (uint8_t *)&g_vdelay.delay_ms, 2);
+        EE_READ(EE_ADDR_VALVE_TIMEOUT, (uint8_t *)&g_valve_timeout_ms, 4);
+        /* 合法性: 0/0xFFFFFFFF → 默认; 越界 → 钳位边界 */
+        if(g_valve_timeout_ms == 0 || g_valve_timeout_ms == 0xFFFFFFFFu)
+            g_valve_timeout_ms = DEF_VALVE_TIMEOUT_MS;
+        if(g_valve_timeout_ms < VALVE_TIMEOUT_MS_MIN) g_valve_timeout_ms = VALVE_TIMEOUT_MS_MIN;
+        if(g_valve_timeout_ms > VALVE_TIMEOUT_MS_MAX) g_valve_timeout_ms = VALVE_TIMEOUT_MS_MAX;
         if(g_vdelay.enabled >= 2) g_vdelay.enabled = 0;
         printf_debug("[CFG] VDLY: en=%d delay_ms=%d\r\n",
                      g_vdelay.enabled, g_vdelay.delay_ms);
@@ -535,6 +557,7 @@ void config_load_all(void)
     {
         g_vdelay.enabled = DEF_VD_SWITCH;
         g_vdelay.delay_ms = DEF_VD_TIME_MS;
+        g_valve_timeout_ms = DEF_VALVE_TIMEOUT_MS;
         printf_debug("[CFG] No VDLY, using defaults: en=%d delay_ms=%d\r\n",
                      g_vdelay.enabled, g_vdelay.delay_ms);
         config_save_vdelay();
@@ -691,6 +714,10 @@ void config_load_all(void)
         EE_READ(EE_ADDR_VALVE_ALARM_CLOSED, &g_valve_alarm_closed, 1);
         EE_READ(EE_ADDR_VALVE_PRE_ALARM_ORDER, &g_valve_pre_alarm_order, 1);
         EE_READ(EE_ADDR_CH4_ALARM_CLOSED, &g_ch4_alarm_closed, 1);
+        g_report_delay_min = ee_read_float(EE_ADDR_REPORT_DELAY);
+        /* 合法性: NaN/越界(0~60)回退 0 */
+        if(!(g_report_delay_min >= 0.0f && g_report_delay_min <= 60.0f))
+            g_report_delay_min = 0.0f;
         EE_READ(EE_ADDR_LCD_ENABLED, &g_lcd_enabled, 1);
         EE_READ(EE_ADDR_VLP_FLAG, &voltage_low_power, 1);
 
@@ -742,6 +769,7 @@ void config_load_all(void)
         g_valve_alarm_closed = 0;
         g_valve_pre_alarm_order = 0;
         g_ch4_alarm_closed = 0;
+        g_report_delay_min = 0.0f;
         voltage_low_power = 0;
 
         g_interval.collect_interval_hours = (float)cycle_to_seconds(&g_collect_cycle) / 3600.0f;
@@ -810,5 +838,24 @@ void config_load_all(void)
         window_dottime_from_str(DEF_LASER_TIME_DEFAULT, g_laser_time_mask);
         printf_debug("[CFG] No LASER config, using defaults\r\n");
         config_save_laser();
+    }
+
+    /* ---------- 区块14: 出气端/激光异常关阀 ---------- */
+    EE_READ(EE_ADDR_ABN2_MAGIC, &magic, 1);
+    if(magic == EE_MAGIC_ABN23)
+    {
+        ee_read_string(EE_ADDR_ABNORMAL2_CLOSE, g_abnormal2_close, 16);
+        EE_READ(EE_ADDR_ABNORMAL3_CLOSE, &g_abnormal3_close, 1);
+        if(g_abnormal3_close > 1) g_abnormal3_close = 0;
+        printf_debug("[CFG] ABN23: abn2=%s abn3=%d\r\n",
+                     g_abnormal2_close, g_abnormal3_close);
+    }
+    else
+    {
+        strncpy(g_abnormal2_close, APP_DEFAULT_ABNORMAL_CLOSE, sizeof(g_abnormal2_close) - 1);
+        g_abnormal2_close[sizeof(g_abnormal2_close) - 1] = '\0';
+        g_abnormal3_close = 0;
+        printf_debug("[CFG] No ABN23, using defaults\r\n");
+        config_save_abn23();
     }
 }

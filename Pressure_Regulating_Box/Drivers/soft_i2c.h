@@ -7,10 +7,10 @@
 /* =====================================================================
  * 软件 I2C 总线驱动 (GPIO 模拟, 三组独立实例)
  *
- * 硬件 (Vertical_pipe_valve):
- *   IIC0: EEPROM        SCL=PB6 SDA=PB7   (常供电, 常上拉, 与 PC3 无关)
- *   IIC1: 中压传感器    SCL=PD4 SDA=PD5   (PC3 供电/上拉)
- *   IIC2: 低压传感器    SCL=PC0 SDA=PC1   (PC3 供电/上拉)
+ * 硬件:
+ *   IIC0: EEPROM        SCL=PB6 SDA=PB7   (常供电, 常上拉)
+ *   IIC1: 中压传感器    SCL=PD4 SDA=PD5   (常供电, 常上拉)
+ *   IIC2: 低压传感器    SCL=PC0 SDA=PC1   (仅双传感器旧板; 新板 PC0/PC1 为 4G, 不可用)
  *
  * 引脚映射收敛在 app_config.h, 换板只改宏, 本驱动代码零改动。
  * ===================================================================== */
@@ -28,7 +28,7 @@ typedef struct {
 /* 三组总线实例 (定义于 soft_i2c.c) */
 extern const SoftI2C_t g_iic0;   /* IIC0: EEPROM       (PB6/PB7) */
 extern const SoftI2C_t g_iic1;   /* IIC1: 中压传感器   (PD4/PD5) */
-extern const SoftI2C_t g_iic2;   /* IIC2: 低压传感器   (PC0/PC1) */
+extern const SoftI2C_t g_iic2;   /* IIC2: 低压传感器 (PC0/PC1, 双传感器旧板) */
 
 /* 底层引脚操作宏 (寄存器直操, 单指令置位/清零, 效率最高) */
 #define I2C_SCL_H(bus)   GPIO_BOP((bus)->scl_port) = (bus)->scl_pin
@@ -51,11 +51,11 @@ uint8_t soft_i2c_write_byte(const SoftI2C_t *bus, uint8_t data); /* 写1字节�
 uint8_t soft_i2c_read_byte(const SoftI2C_t *bus, uint8_t ack);   /* 读1字节, ack=1发送ACK */
 uint8_t soft_i2c_check(const SoftI2C_t *bus, uint8_t addr);      /* 探测设备(7bit地址): 0=存在 */
 
-/* ---- 传感器总线与电源管理 ----
- * PC3 = 传感器供电 + I2C 上拉源: 采集前 sensor_pwr_on(), 结束后 sensor_pwr_off()。
- * SENSOR_PWR_ENABLED=0 时 sensor_pwr_on/off 为空实现 (传感器常供电板型)。 */
+/* ---- 传感器总线管理 ----
+ * I2C 常供电板型: sensor_pwr_on/off 为空实现 (兼容旧调用点)。
+ * PC3 已改作电压采集基准, 由 adc_bat 模块管理, 严禁在此驱动 PC3。 */
 void soft_i2c_sensors_init(void);   /* 初始化 IIC1+IIC2 总线 GPIO (开漏释放) */
-void sensor_pwr_on(void);           /* PC3 推挽输出高 + 上电稳定延时 */
-void sensor_pwr_off(void);          /* PC3 输出低: 传感器断电 */
+void sensor_pwr_on(void);           /* 空实现: 常供电板型 */
+void sensor_pwr_off(void);          /* 空实现: 常供电板型 */
 
 #endif /* SOFT_I2C_H */

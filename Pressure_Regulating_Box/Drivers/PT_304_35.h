@@ -21,24 +21,23 @@
  * Per-sensor driver binding (effective only when both drivers are enabled)
  * value: 7 = 7-byte protocol, 4 = 4-byte protocol
  *****************************************************************************/
-#define PT304D_S1_DRIVER   4     // S1 (outlet, PC0/PC1) driver protocol
-#define PT304D_S2_DRIVER   4     // S2 (inlet,  PB6/PB7) driver protocol
+#define PT304D_S1_DRIVER   4     // S1 (outlet, IIC2/PC0/PC1, 双传感器旧板)
+#define PT304D_S2_DRIVER   4     // S2 (inlet,  IIC1/PD4/PD5)
 
 /*****************************************************************************
  * Per-sensor full scale (unit: Pa)
  * (per-sensor full scale is compile-time only)
  *****************************************************************************/
-#define PT304D_S1_FS       35000.0f    // S1 full scale (Pa): 35kPa
+#define PT304D_S1_FS       40000.0f    // S1 full scale (Pa): 40kPa
 #define PT304D_S2_FS       600000.0f   // S2 full scale (Pa): 600kPa
 //#define PT304D_S2_FS       35000.0f    // S2 full scale (Pa): 35kPa (single-sensor variant)
 
 /************************** Dual sensor index **************************/
-#define PT304D_SENSOR_1    0   // low-pressure/outlet sensor: IIC2 (PC0/PC1), powered by PC3
-#define PT304D_SENSOR_2    1   // mid-pressure/inlet  sensor: IIC1 (PD4/PD5), powered by PC3
+#define PT304D_SENSOR_1    0   // low-pressure/outlet sensor: IIC2 (PC0/PC1) — 仅双传感器旧板, 新板不可用
+#define PT304D_SENSOR_2    1   // mid-pressure/inlet  sensor: IIC1 (PD4/PD5)
 
-/************************** Sensor power / pull-up (PC3, see soft_i2c.h) **************************/
-/* PC3 = sensor power + I2C pull-up: sensor_pwr_on() before reading, sensor_pwr_off() after */
-/* Power-on stabilization delay: SENSOR_PWRUP_DELAY_MS (app_config.h) */
+/************************** Sensor power (always-powered variant, see soft_i2c.h) **************************/
+/* I2C 常供电: sensor_pwr_on/off 为空实现; PC3 已改作电压采集基准, 归 adc_bat 管理 */
 
 /************************** 7-byte protocol (0xAA command mode) **************************/
 #ifdef PT304D_DRV_7BYTE

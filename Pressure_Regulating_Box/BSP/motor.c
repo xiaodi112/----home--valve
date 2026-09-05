@@ -120,15 +120,21 @@ static void pwm_set_duty(uint8_t ch, float duty)
     }
 }
 
+/* ==================== 限位引脚初始化 ==================== */
+void motor_limit_init(void)
+{
+    rcu_periph_clock_enable(RCU_GPIOA);
+
+    /* PA11: 限位1(开阀到位), PA12: 限位2(关阀到位), 内部上拉（低电平=到位） */
+    gpio_mode_set(GPIOA, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPIO_PIN_11 | GPIO_PIN_12);
+}
+
 /* ==================== 电机初始化 ==================== */
 void motor_init(uint8_t enabled)
 {
     if(!enabled) return;
 
-    rcu_periph_clock_enable(RCU_GPIOA);
-
-    /* PA11: 限位1(开阀到位), PA12: 限位2(关阀到位), 内部上拉（低电平=到位） */
-    gpio_mode_set(GPIOA, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPIO_PIN_11 | GPIO_PIN_12);
+    motor_limit_init();
 
 #if MOTOR_DRV_MODE == 1
     /* PWM 驱动: PA6/PA7 复用 TIMER2 CH0/CH1 */

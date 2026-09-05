@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "gd32l23x.h"
+#include "power.h"
 #include "PT_304_35.h"
 #include "sensor_record.h"
 #include "threshold.h"
@@ -17,8 +18,11 @@ typedef enum {
 } EC_Status_t;
 
 // ==================== 硬件引脚 ====================
-#define EC_PWRKEY_PORT       GPIOB
-#define EC_PWRKEY_PIN        GPIO_PIN_5
+/* V4G_EN=PC0 / 4G_PWRKEY=PC1 引脚映射统一在 BSP/power.h.
+ * PWRKEY 经 NPN 低侧开关: MCU 输出高电平 → 模块 PWRKEY 被拉低;
+ * 平时保持高阻释放态, 仅开关机脉冲期间驱动 (见 ec800e.c). */
+#define EC_PWRKEY_PORT       PWR_4G_KEY_PORT
+#define EC_PWRKEY_PIN        PWR_4G_KEY_PIN
 
 // ==================== 接口函数 ====================
 
@@ -99,7 +103,7 @@ EC_Status_t EC801E_HttpDownloadToFlash(const char *url,
                                        uint32_t *actual_size);
 
 // 上报4G开关状态: on=1上线, on=0下线
-void report_4g_power_state(uint8_t on);
+//void report_4g_power_state(uint8_t on);
 
 // ==================== 用户端MQTT (id=1, 双实例) ====================
 

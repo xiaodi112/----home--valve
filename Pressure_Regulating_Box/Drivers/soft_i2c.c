@@ -5,9 +5,18 @@
 /* ==================== 三组总线实例 ==================== */
 /* half_period 统一取 SOFT_I2C_HALF_PERIOD (app_config.h), 默认 150 与原驱动一致;
  * 需要提速时改小该宏即可, 不必动驱动代码。 */
+#if APP_DEFAULT_SENSOR_COUNT == 1
 const SoftI2C_t g_iic0 = { RCU_GPIOB, IIC0_SCL_PORT, IIC0_SCL_PIN, IIC0_SDA_PORT, IIC0_SDA_PIN, SOFT_I2C_HALF_PERIOD };
 const SoftI2C_t g_iic1 = { RCU_GPIOD, IIC1_SCL_PORT, IIC1_SCL_PIN, IIC1_SDA_PORT, IIC1_SDA_PIN, SOFT_I2C_HALF_PERIOD };
+/* 单传感器(新板): IIC2 不实例化, PC0/PC1 已让给 4G (V4G_EN/PWRKEY) */
+const SoftI2C_t g_iic2;
+#endif /* APP_DEFAULT_SENSOR_COUNT == 1 */
+#if APP_DEFAULT_SENSOR_COUNT == 2
+const SoftI2C_t g_iic0 = { RCU_GPIOB, IIC0_SCL_PORT, IIC0_SCL_PIN, IIC0_SDA_PORT, IIC0_SDA_PIN, SOFT_I2C_HALF_PERIOD };
+const SoftI2C_t g_iic1 = { RCU_GPIOD, IIC1_SCL_PORT, IIC1_SCL_PIN, IIC1_SDA_PORT, IIC1_SDA_PIN, SOFT_I2C_HALF_PERIOD };
+/* 双传感器(旧板): IIC2 占用 PC0/PC1. 注意: 与"新板 PC0/PC1=4G"硬件冲突, 不可同板共存 */
 const SoftI2C_t g_iic2 = { RCU_GPIOC, IIC2_SCL_PORT, IIC2_SCL_PIN, IIC2_SDA_PORT, IIC2_SDA_PIN, SOFT_I2C_HALF_PERIOD };
+#endif /* APP_DEFAULT_SENSOR_COUNT == 2 */
 
 /* 半周期延时: 空循环, 编译后每条约1~2周期 */
 static void i2c_delay(uint16_t n)
@@ -140,33 +149,17 @@ uint8_t soft_i2c_check(const SoftI2C_t *bus, uint8_t addr)
     return ack;
 }
 
-/* 初始化两条传感器总线 GPIO (开漏释放); 采集前调用, 避免传感器上电瞬间看到毛刺 */
+/* 初始化传感器总线 GPIO (开漏释放); 采集前调用 */
 void soft_i2c_sensors_init(void)
 {
     soft_i2c_init(&g_iic1);
+	#if APP_DEFAULT_SENSOR_COUNT == 2
     soft_i2c_init(&g_iic2);
+	#endif /* 双传感器 */
 }
 
-/* ==================== 传感器电源/上拉控制 (PC3) ==================== */
-#if SENSOR_PWR_ENABLED
-void sensor_pwr_on(void)
-{
-    /* 显式配置 PC3 为推挽输出再置位: 最小唤醒路径不调用 gpio_init,
-     * 休眠时 gpio_enter_low_power 已把 PC3 置为 ANALOG, 直接写 ODR 无效,
-     * 会导致传感器供电/上拉缺失、I2C 读到全 0 (历史数据异常) */
-    rcu_periph_clock_enable(RCU_GPIOC);
-    gpio_mode_set(PWR_SENSOR_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, PWR_SENSOR_PIN);
-    gpio_output_options_set(PWR_SENSOR_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, PWR_SENSOR_PIN);
-    power_sensor_set(1);
-    trea_delay_ms(SENSOR_PWRUP_DELAY_MS);   /* 传感器上电稳定 */
-}
-
-void sensor_pwr_off(void)
-{
-    power_sensor_set(0);
-}
-#else
-/* 传感器常供电板型: 电源控制为空实现 */
+/* ==================== 传感器电源控制 (常供电板型) ==================== */
+/* 传感器/EEPROM 常供电. PC3 已改作电压采集基准 (归 adc_bat 管理, 采样时输出低),
+ * 保留空接口仅为兼容旧调用点, 严禁在此拉高 PC3 */
 void sensor_pwr_on(void)  { }
 void sensor_pwr_off(void) { }
-#endif

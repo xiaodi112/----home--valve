@@ -48,8 +48,13 @@ extern uint8_t g_lcd_active;   // LCD当前是否显示 (运行状态, 区别于
 
 // 供其他模块使用 (main.c 实现, downlink.c 等模块调用)
 void lcd_shutdown(void);
+
+const char* alarm_try_close_valve_all(const char *policy_str, ThresholdResult_t result);
+
 const char* alarm_try_close_valve(ThresholdResult_t result);
+const char* alarm_try_close_valve2(ThresholdResult_t result);   /* 出气端 (abnormal2_close) */
 const char* ch4_alarm_try_close_valve(void);
 void threshold_alarm_reset_rt(void);
+void upload_schedule_reset(void);   /* 上报周期/后延配置变更后调用, 重置延迟上报锁存 */
 
 #endif

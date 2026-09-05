@@ -173,17 +173,61 @@ static EC_Status_t EC_SendCmdRetry(const char *cmd, const char *expect,
 }
 
 // ==================== 电源控制 ====================
+/* 新板电源语义 (引脚映射见 power.h):
+ *   PC0 V4G_EN = 模块总电源 (HIGH=供电), 深睡期间由 MCU 保持 HIGH
+ *   PC1 PWRKEY = NPN 低侧开关: MCU 高电平 → 三极管导通 → 模块 PWRKEY 被拉低
+ * 开机: V4G_EN 上电 → 稳定 ≥30ms → PWRKEY 低 ≥500ms → 释放(高阻)
+ * 关机: PWRKEY 低 ≥650ms → 释放(高阻) → 掉电裕量 → 断开 V4G_EN */
+#define EC_V4G_ON_STABLE_MS      30u
+#define EC_PWRKEY_ON_PULSE_MS    500u
+#define EC_PWRKEY_OFF_PULSE_MS   650u
+#define EC_PWRKEY_OFF_SETTLE_MS  300u
+
+/* PWRKEY 驱动: on=1 切换为推挽输出并拉高(NPN导通); on=0 释放回高阻输入 */
+static void ec_pwrkey_drive(uint8_t on)
+{
+    rcu_periph_clock_enable(RCU_GPIOC);
+    if(on)
+    {
+        gpio_mode_set(EC_PWRKEY_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, EC_PWRKEY_PIN);
+        gpio_output_options_set(EC_PWRKEY_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, EC_PWRKEY_PIN);
+        gpio_bit_set(EC_PWRKEY_PORT, EC_PWRKEY_PIN);
+    }
+    else
+    {
+        /* 深睡后 PC1 可能为 Analog, 释放统一恢复为输入高阻, 保证三极管截止 */
+        gpio_mode_set(EC_PWRKEY_PORT, GPIO_MODE_INPUT, GPIO_PUPD_NONE, EC_PWRKEY_PIN);
+    }
+}
+
 void EC801E_PowerOn(void)
 {
-    gpio_bit_set(EC_PWRKEY_PORT, EC_PWRKEY_PIN);
+    /* 已供电(模块在线)时禁止再发脉冲, 避免把在线模块误关机;
+     * 模块挂死需要硬复位时走 EC801E_InitAndConnect (先 PowerOff 再 PowerOn) */
+    if(power_4g_is_on())
+        return;
+
+    power_4g_set(1);                            /* V4G_EN 上电 */
+    trea_delay_ms(EC_V4G_ON_STABLE_MS);         /* 电源稳定 ≥30ms */
+    ec_pwrkey_drive(1);                         /* PWRKEY 低脉冲 (NPN 导通) */
+    trea_delay_ms(EC_PWRKEY_ON_PULSE_MS);
+    ec_pwrkey_drive(0);                         /* 释放回高阻 */
     printf_debug("[EC] Power ON\r\n");
 }
 
 void EC801E_PowerOff(void)
 {
-    gpio_bit_reset(EC_PWRKEY_PORT, EC_PWRKEY_PIN);
+    if(!power_4g_is_on())                       /* 已断电: 快速返回 */
+        return;
+
+    ec_pwrkey_drive(1);                         /* PWRKEY 低 ≥650ms 关机 */
+    trea_delay_ms(EC_PWRKEY_OFF_PULSE_MS);
+    ec_pwrkey_drive(0);                         /* 释放回高阻 */
+    trea_delay_ms(EC_PWRKEY_OFF_SETTLE_MS);     /* 模块掉电完成裕量 */
+    power_4g_set(0);                            /* 断开 V4G_EN, 状态机以 PC0 为准 */
     printf_debug("[EC] Power OFF\r\n");
 }
+
 
 // ==================== 网络初始化 ====================
 EC_Status_t EC801E_InitNetwork(void)
@@ -659,7 +703,7 @@ EC_Status_t EC801E_InitAndConnect(void)
 
 	
     EC801E_PowerOff();
-	trea_delay_ms(100);
+	trea_delay_ms(500);   /* V4G_EN 断电后再等500ms: 确保挂死模块VCC完全放电复位 */
 	EC801E_PowerOn();
 	EC801E_SetPSM(0);
     printf_debug("[EC] === InitAndConnect ===\r\n");
@@ -1304,14 +1348,14 @@ EC_Status_t EC801E_QueryIMEI(char *out, uint16_t size)
 }
 
 // ==================== 4G 开关状态上报 ====================
-void report_4g_power_state(uint8_t on)
-{
-    char val[2];
-    val[0] = on ? '1' : '0';
-    val[1] = '\0';
-    if(EC801E_EnsureConnected() == EC_OK)
-        EC801E_PublishResponse("4Gpower_control", val);
-}
+//void report_4g_power_state(uint8_t on)
+//{
+//    char val[2];
+//    val[0] = on ? '1' : '0';
+//    val[1] = '\0';
+//    if(EC801E_EnsureConnected() == EC_OK)
+//        EC801E_PublishResponse("4Gpower_control", val);
+//}
 
 // ==================== 用户端MQTT (id=1, 双实例) ====================
 

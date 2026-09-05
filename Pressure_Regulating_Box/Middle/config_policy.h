@@ -26,6 +26,7 @@ int abnormal_should_close_valve(AbnormalClose_t policy, ThresholdResult_t result
 
 /* 窗口/采集决策 */
 int config_is_active_window(void);
+int config_is_active_window_at(uint32_t hhmmss);
 uint8_t config_need_adc_sampling(void);
 
 #endif /* CONFIG_POLICY_H */

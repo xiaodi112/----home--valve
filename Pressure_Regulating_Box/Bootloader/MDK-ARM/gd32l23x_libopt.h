@@ -1,6 +1,6 @@
 /**
- * Bootloader ç”¨çš„æœ€å° libopt: åªå¯ç”¨ BL çœŸæ­£ç”¨åˆ°çš„å¤–è®¾,
- * ç¼©å°ä»£ç ä½“ç§¯ (FMC + RCU + GPIO + MISC).
+ * Bootloader ÓÃµÄ×îÐ¡ libopt: Ö»ÆôÓÃ BL ÕæÕýÓÃµ½µÄÍâÉè,
+ * ËõÐ¡´úÂëÌå»ý (FMC + RCU + GPIO + MISC).
  */
 #ifndef GD32L23X_LIBOPT_H
 #define GD32L23X_LIBOPT_H

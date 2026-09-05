@@ -114,23 +114,41 @@ static void publish_status_batch(float last_p1, float last_p2)
 
     jb_add_float(&s_rpt_jb, "temp", g_sensor.raw.temperature, s_rpt_ts);
     jb_add_float(&s_rpt_jb, "pressure", g_sensor.raw.pressure, s_rpt_ts);
-    jb_add_str(&s_rpt_jb, "temp_status",
-               threshold_temp_status_str(threshold_get_temp_status(g_sensor.raw.temperature)), s_rpt_ts);
-    jb_add_str(&s_rpt_jb, "pressure_status",
-               threshold_pressure_status_str(threshold_get_pressure_status(g_sensor.raw.pressure, last_p1)), s_rpt_ts);
+    /* 进气端传感器未采到数据: 状态上报 temp_err/pressure_err */
+    if(g_sensor.raw.err != PT304D_OK)
+    {
+        jb_add_str(&s_rpt_jb, "temp_status", "temp_err", s_rpt_ts);
+        jb_add_str(&s_rpt_jb, "pressure_status", "pressure_err", s_rpt_ts);
+    }
+    else
+    {
+        jb_add_str(&s_rpt_jb, "temp_status",
+                   threshold_temp_status_str(threshold_get_temp_status(g_sensor.raw.temperature)), s_rpt_ts);
+        jb_add_str(&s_rpt_jb, "pressure_status",
+                   threshold_pressure_status_str(threshold_get_pressure_status(g_sensor.raw.pressure, last_p1)), s_rpt_ts);
+    }
 
-    if(g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
+    if(g_sensor_count >= 2)
     {
         jb_add_float(&s_rpt_jb, "temp2", g_sensor.raw2.temperature, s_rpt_ts);
         jb_add_float(&s_rpt_jb, "pressure2", g_sensor.raw2.pressure, s_rpt_ts);
-        jb_add_str(&s_rpt_jb, "temp2_status",
-                   threshold_temp_status_str(threshold_get_temp_status2(g_sensor.raw2.temperature)), s_rpt_ts);
-        jb_add_str(&s_rpt_jb, "pressure2_status",
-                   threshold_pressure_status_str(threshold_get_pressure_status2(g_sensor.raw2.pressure, last_p2)), s_rpt_ts);
+        /* 出气端传感器未采到数据: 状态上报 temp_err/pressure_err */
+        if(g_sensor.raw2.err != PT304D_OK)
+        {
+            jb_add_str(&s_rpt_jb, "temp2_status", "temp_err", s_rpt_ts);
+            jb_add_str(&s_rpt_jb, "pressure2_status", "pressure_err", s_rpt_ts);
+        }
+        else
+        {
+            jb_add_str(&s_rpt_jb, "temp2_status",
+                       threshold_temp_status_str(threshold_get_temp_status2(g_sensor.raw2.temperature)), s_rpt_ts);
+            jb_add_str(&s_rpt_jb, "pressure2_status",
+                       threshold_pressure_status_str(threshold_get_pressure_status2(g_sensor.raw2.pressure, last_p2)), s_rpt_ts);
+        }
     }
 
     jb_end(&s_rpt_jb);
-    printf_debug("[RPT] ALARM batch: %s\r\n", s_rpt_buf);
+//    printf_debug("[RPT] ALARM batch: %s\r\n", s_rpt_buf);
     EC801E_PublishRawJson(s_rpt_buf);
 }
 
@@ -202,19 +220,35 @@ void report_publish_upload_summary(void)
     jb_add_str(&s_rpt_jb, "rsrp", rsrp_buf, s_rpt_ts);
     jb_add_str(&s_rpt_jb, "snr", sinr_buf, s_rpt_ts);
 
-    // 4. 压力+温度状态
+    // 4. 压力+温度状态 (传感器未采到数据 → temp_err/pressure_err)
     {
-        PressureStatus_t ps = threshold_get_pressure_status(g_sensor.raw.pressure, g_sensor.last_pressure_collect);
-        jb_add_str(&s_rpt_jb, "pressure_status", threshold_pressure_status_str(ps), s_rpt_ts);
-        TempStatus_t ts = threshold_get_temp_status(g_sensor.raw.temperature);
-        jb_add_str(&s_rpt_jb, "temp_status", threshold_temp_status_str(ts), s_rpt_ts);
-
-        if(g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
+        if(g_sensor.raw.err != PT304D_OK)
         {
-            PressureStatus_t ps2 = threshold_get_pressure_status2(g_sensor.raw2.pressure, g_sensor.last_pressure_collect2);
-            jb_add_str(&s_rpt_jb, "pressure2_status", threshold_pressure_status_str(ps2), s_rpt_ts);
-            TempStatus_t ts2 = threshold_get_temp_status2(g_sensor.raw2.temperature);
-            jb_add_str(&s_rpt_jb, "temp2_status", threshold_temp_status_str(ts2), s_rpt_ts);
+            jb_add_str(&s_rpt_jb, "pressure_status", "pressure_err", s_rpt_ts);
+            jb_add_str(&s_rpt_jb, "temp_status", "temp_err", s_rpt_ts);
+        }
+        else
+        {
+            PressureStatus_t ps = threshold_get_pressure_status(g_sensor.raw.pressure, g_sensor.last_pressure_collect);
+            jb_add_str(&s_rpt_jb, "pressure_status", threshold_pressure_status_str(ps), s_rpt_ts);
+            TempStatus_t ts = threshold_get_temp_status(g_sensor.raw.temperature);
+            jb_add_str(&s_rpt_jb, "temp_status", threshold_temp_status_str(ts), s_rpt_ts);
+        }
+
+        if(g_sensor_count >= 2)
+        {
+            if(g_sensor.raw2.err != PT304D_OK)
+            {
+                jb_add_str(&s_rpt_jb, "pressure2_status", "pressure_err", s_rpt_ts);
+                jb_add_str(&s_rpt_jb, "temp2_status", "temp_err", s_rpt_ts);
+            }
+            else
+            {
+                PressureStatus_t ps2 = threshold_get_pressure_status2(g_sensor.raw2.pressure, g_sensor.last_pressure_collect2);
+                jb_add_str(&s_rpt_jb, "pressure2_status", threshold_pressure_status_str(ps2), s_rpt_ts);
+                TempStatus_t ts2 = threshold_get_temp_status2(g_sensor.raw2.temperature);
+                jb_add_str(&s_rpt_jb, "temp2_status", threshold_temp_status_str(ts2), s_rpt_ts);
+            }
         }
     }
     jb_end(&s_rpt_jb);
@@ -265,12 +299,9 @@ void report_publish_upload_summary(void)
 		jb_end(&s_rpt_jb);
 		EC801E_PublishRawJson(s_rpt_buf);
     }
-
-    // 8. 异常关阀策略
-	jb_begin(&s_rpt_jb, s_rpt_buf, sizeof(s_rpt_buf));
-    jb_add_str(&s_rpt_jb, "abnormal_close", g_abnormal_close, s_rpt_ts);
-
+	
     // 9. 电池电压 + 电压状态
+	jb_begin(&s_rpt_jb, s_rpt_buf, sizeof(s_rpt_buf));
     {
         float bat_v = adc_bat_read_voltage();
         if(bat_v >= 0.0f)

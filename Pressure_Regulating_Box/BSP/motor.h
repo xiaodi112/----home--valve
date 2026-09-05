@@ -12,6 +12,10 @@
 #define MOTOR_DRV_MODE             1
 
 #if MOTOR_ENABLED
+/* 限位引脚初始化: PA11/PA12 恢复为输入+上拉 (深休眠 gpio_enter_low_power 会转 Analog,
+ * 动作或读取限位前必须先调用) */
+void motor_limit_init(void);
+
 /* ==================== 电机初始化 ==================== */
 /* enabled: 1=产品带电机, 初始化限位输入+驱动输出; 0=无电机, 跳过硬件配置 */
 void motor_init(uint8_t enabled);
@@ -33,6 +37,7 @@ void motor_drive_close(void);    /* 使能+关阀方向 */
 void motor_stop(void);           /* 停止驱动并拉低使能 */
 #else
 /* 无电机硬件: 提供空实现, 调用点无需 #if 保护 */
+static inline void motor_limit_init(void)           { }
 static inline void motor_init(uint8_t enabled)      { (void)enabled; }
 static inline uint8_t motor_limit1_reached(void)    { return 0; }
 static inline uint8_t motor_limit2_reached(void)    { return 0; }

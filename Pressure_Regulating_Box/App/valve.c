@@ -6,9 +6,6 @@
 #include "buzzer.h"
 #include <string.h>
 
-/* 限位到位等待最长超时 (ms): 40s */
-#define VALVE_LIMIT_TIMEOUT_MS   40000
-
 // ==================== 阀门动作执行 (含valve_err检测) ====================
 #if MOTOR_ENABLED
 const char* valve_execute(const char *action, uint8_t update_last_order)
@@ -21,7 +18,7 @@ const char* valve_execute(const char *action, uint8_t update_last_order)
         printf_debug("[SM] Valve OPEN\r\n");
         motor_drive_open();
         t = trea_millis();
-        while(!motor_limit1_reached() && (trea_millis() - t) < VALVE_LIMIT_TIMEOUT_MS);
+        while(!motor_limit1_reached() && (trea_millis() - t) < g_valve_timeout_ms);
 
         // 到位后保持原动作 (delay_switch=1 时), 用于压紧阀芯
         // 安全 clamp: 即使 g_vdelay.delay_ms 被外部误修改, 也不超过 VDLY_DELAY_MS_MAX
@@ -56,7 +53,7 @@ const char* valve_execute(const char *action, uint8_t update_last_order)
         printf_debug("[SM] Valve CLOSE\r\n");
         motor_drive_close();
         t = trea_millis();
-        while(!motor_limit2_reached() && (trea_millis() - t) < VALVE_LIMIT_TIMEOUT_MS);
+        while(!motor_limit2_reached() && (trea_millis() - t) < g_valve_timeout_ms);
 
         // 到位后保持原动作 (delay_switch=1 时), 用于压紧阀芯
         // 安全 clamp 与 OPEN 分支一致

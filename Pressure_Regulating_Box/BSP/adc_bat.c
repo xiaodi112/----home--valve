@@ -7,11 +7,28 @@
 // 分压比: R3=2M, R5=2M → V_BAT = V_ADC * (R3+R5)/R5 = V_ADC * 2
 #define DIVIDER_RATIO   2.0f
 
+/* PC3: 电压采集基准/使能脚. 采样前必须输出低(作为分压低端), 深睡可转Analog */
+#define ADC_REF_PORT    GPIOC
+#define ADC_REF_PIN     GPIO_PIN_3
+
+/* PC3 配置为推挽输出并拉低. 每次采样前调用: 兼容最小唤醒路径(深睡后 PC3 为 Analog,
+ * 不依赖 power_gpio_init 的调用顺序) */
+static void adc_bat_ref_low(void)
+{
+    rcu_periph_clock_enable(RCU_GPIOC);
+    gpio_mode_set(ADC_REF_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, ADC_REF_PIN);
+    gpio_output_options_set(ADC_REF_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, ADC_REF_PIN);
+    gpio_bit_reset(ADC_REF_PORT, ADC_REF_PIN);
+}
+
 void adc_bat_init(void)
 {
     // 使能时钟
     rcu_periph_clock_enable(RCU_GPIOC);
     rcu_periph_clock_enable(RCU_ADC);
+
+    // 先拉低采集基准 (PC3), 再配置/使能 ADC
+    adc_bat_ref_low();
 
     // ADC时钟 = APB2/6
     rcu_adc_clock_config(RCU_ADCCK_APB2_DIV6);
@@ -43,6 +60,9 @@ float adc_bat_read_voltage(void)
     uint16_t adc_raw;
     float v_adc, v_bat;
     volatile uint32_t timeout = 0;
+
+    // 确保采集基准已拉低 (深睡唤醒的最小路径可能未调用 adc_bat_init)
+    adc_bat_ref_low();
 
     // 启动转换
     adc_software_trigger_enable(ADC_ROUTINE_CHANNEL);

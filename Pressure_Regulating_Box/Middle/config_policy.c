@@ -114,17 +114,14 @@ uint32_t cycle_to_seconds(const CycleConfig_t *cfg)
 // ==================== 异常关阀工具函数 ====================
 AbnormalClose_t abnormal_from_str(const char *str)
 {
-    if(strcmp(str, "high") == 0)           return ABNORMAL_HIGH;
-    if(strcmp(str, "low") == 0)            return ABNORMAL_LOW;
-    if(strcmp(str, "mutation") == 0)       return ABNORMAL_MUTATION;
-    if(strcmp(str, "highorlow") == 0)      return ABNORMAL_HIGH_OR_LOW;
-    if(strcmp(str, "highormutation") == 0) return ABNORMAL_HIGH_OR_MUTATION;
-    if(strcmp(str, "lowormutation") == 0)  return ABNORMAL_LOW_OR_MUTATION;
-    if(strcmp(str, "all") == 0)            return ABNORMAL_ALL;
-    if(strcmp(str, "temph") == 0)          return ABNORMAL_TEMP_HIGH;
-    if(strcmp(str, "templ") == 0)          return ABNORMAL_TEMP_LOW;
-    if(strcmp(str, "jgclose") == 0)        return ABNORMAL_JGCLOSE;
-    /* 注: 电压报警 (voltage_high/low) 不参与策略, 只上报不动阀 */
+    /* 平台 pv* 协议; 旧值/未知值一律按关闭处理 */
+    if(strcmp(str, "pvhigh") == 0)             return ABNORMAL_PV_HIGH;
+    if(strcmp(str, "pvlow") == 0)              return ABNORMAL_PV_LOW;
+    if(strcmp(str, "pvmutation") == 0)         return ABNORMAL_PV_MUTATION;
+    if(strcmp(str, "pvhighorlow") == 0)        return ABNORMAL_PV_HIGH_OR_LOW;
+    if(strcmp(str, "pvhighormutation") == 0)   return ABNORMAL_PV_HIGH_OR_MUTATION;
+    if(strcmp(str, "pvlowormutation") == 0)    return ABNORMAL_PV_LOW_OR_MUTATION;
+    if(strcmp(str, "all") == 0)                return ABNORMAL_PV_ALL;
     return ABNORMAL_NONE;
 }
 
@@ -132,62 +129,53 @@ const char* abnormal_to_str(AbnormalClose_t ac)
 {
     switch(ac)
     {
-        case ABNORMAL_HIGH:             return "high";
-        case ABNORMAL_LOW:              return "low";
-        case ABNORMAL_MUTATION:         return "mutation";
-        case ABNORMAL_HIGH_OR_LOW:      return "highorlow";
-        case ABNORMAL_HIGH_OR_MUTATION: return "highormutation";
-        case ABNORMAL_LOW_OR_MUTATION:  return "lowormutation";
-        case ABNORMAL_ALL:              return "all";
-        case ABNORMAL_TEMP_HIGH:        return "temph";
-        case ABNORMAL_TEMP_LOW:         return "templ";
-        case ABNORMAL_JGCLOSE:          return "jgclose";
-        default:                        return "none";
+        case ABNORMAL_PV_HIGH:             return "pvhigh";
+        case ABNORMAL_PV_LOW:              return "pvlow";
+        case ABNORMAL_PV_MUTATION:         return "pvmutation";
+        case ABNORMAL_PV_HIGH_OR_LOW:      return "pvhighorlow";
+        case ABNORMAL_PV_HIGH_OR_MUTATION: return "pvhighormutation";
+        case ABNORMAL_PV_LOW_OR_MUTATION:  return "pvlowormutation";
+        case ABNORMAL_PV_ALL:              return "all";
+        default:                           return "none";
     }
 }
 
 int abnormal_should_close_valve(AbnormalClose_t policy, ThresholdResult_t result)
 {
     // 电压报警 VPROTECT/VOLT_HIGH/VOLT_LOW: 只上报不动阀
-    // 单档/组合档严格匹配普通档; 仅 ABNORMAL_ALL 额外包含压力超高/超低
-    int is_high  = (result == THRESHOLD_OVER_LIMIT);
-    int is_low   = (result == THRESHOLD_UNDER_LIMIT);
-    int is_mut   = (result == THRESHOLD_MUTATION);
+    // pv* 协议仅匹配极值档(超高/超低)与突变; 普通档/温度不参与关阀
     int is_vhigh = (result == THRESHOLD_VERY_HIGH);
     int is_vlow  = (result == THRESHOLD_VERY_LOW);
-    int is_temph = (result == THRESHOLD_TEMP_HIGH);
-    int is_templ = (result == THRESHOLD_TEMP_LOW);
+    int is_mut   = (result == THRESHOLD_MUTATION);
 
     switch(policy)
     {
-        case ABNORMAL_HIGH:             return is_high;
-        case ABNORMAL_LOW:              return is_low;
-        case ABNORMAL_MUTATION:         return is_mut;
-        case ABNORMAL_HIGH_OR_LOW:      return (is_high || is_low);
-        case ABNORMAL_HIGH_OR_MUTATION: return (is_high || is_mut);
-        case ABNORMAL_LOW_OR_MUTATION:  return (is_low || is_mut);
-        case ABNORMAL_ALL:              return (is_high || is_low || is_mut || is_vhigh || is_vlow);
-        case ABNORMAL_TEMP_HIGH:        return is_temph;
-        case ABNORMAL_TEMP_LOW:         return is_templ;
-        default:                        return 0;
+        case ABNORMAL_PV_HIGH:             return is_vhigh;
+        case ABNORMAL_PV_LOW:              return is_vlow;
+        case ABNORMAL_PV_MUTATION:         return is_mut;
+        case ABNORMAL_PV_HIGH_OR_LOW:      return (is_vhigh || is_vlow);
+        case ABNORMAL_PV_HIGH_OR_MUTATION: return (is_vhigh || is_mut);
+        case ABNORMAL_PV_LOW_OR_MUTATION:  return (is_vlow || is_mut);
+        case ABNORMAL_PV_ALL:              return (is_vhigh || is_vlow || is_mut);
+        default:                           return 0;
     }
 }
 
 // ==================== 判断当前RTC时间是否在活动窗口 ====================
-int config_is_active_window(void)
+/* 按指定时刻(HHMMSS)判断是否在活动窗口内 (dot模式视为全天有效) */
+int config_is_active_window_at(uint32_t hhmmss)
 {
-    uint32_t now, start, stop;
+    uint32_t start, stop;
 
     // dot模式不使用窗口概念, 由do_collect按整点判断
-if(strcmp(g_window.pattern, "dot") == 0) return 1;
+    if(strcmp(g_window.pattern, "dot") == 0) return 1;
 
     // long/short: 基于HHMMSS窗口判断
-now   = rtc_get_hhmmss();
     start = (uint32_t)atol(g_window.start);
     stop  = (uint32_t)atol(g_window.stop);
 
     // 未配置窗口时(start==0 && stop==0), 全天有效
-if(start == 0 && stop == 0) return 1;
+    if(start == 0 && stop == 0) return 1;
 
     // stop 加 2 分钟容差(HHMMSS +200), 覆盖 RTC 闹钟偏移导致的边界踩空
     {
@@ -201,9 +189,14 @@ if(start == 0 && stop == 0) return 1;
     }
 
     if(start < stop)
-        return (now >= start && now <= stop);
+        return (hhmmss >= start && hhmmss <= stop);
     else
-        return (now >= start || now <= stop);  // 跨午夜
+        return (hhmmss >= start || hhmmss <= stop);  // 跨午夜
+}
+
+int config_is_active_window(void)
+{
+    return config_is_active_window_at(rtc_get_hhmmss());
 }
 
 // ==================== 智能决策当前采集周期是否需要采样电池电压 ====================

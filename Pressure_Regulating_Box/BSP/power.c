@@ -6,22 +6,22 @@ void power_gpio_init(void)
     rcu_periph_clock_enable(RCU_GPIOB);
     rcu_periph_clock_enable(RCU_GPIOC);
 
-    /* PA0 (4G_DTR): 默认 HIGH (保持 EC800E 唤醒) */
+    /* PA0 (4G_DTR): 默认 HIGH (允许模块进入轻休眠) */
     gpio_mode_set(PWR_4G_DTR_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, PWR_4G_DTR_PIN);
     gpio_output_options_set(PWR_4G_DTR_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, PWR_4G_DTR_PIN);
     gpio_bit_set(PWR_4G_DTR_PORT, PWR_4G_DTR_PIN);
 
-    /* PB5 (V4G_EN): 默认 LOW (4G 默认断电) */
+    /* PC0 (V4G_EN): 默认 LOW (4G 默认断电) */
     gpio_mode_set(PWR_4G_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, PWR_4G_PIN);
     gpio_output_options_set(PWR_4G_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, PWR_4G_PIN);
+
+    /* PC1 (4G_PWRKEY): 高阻释放态(输入). NPN 低侧开关, 脉冲期间由 EC 驱动
+     * 临时切换为推挽输出并拉高, 脉冲结束后回到此状态 */
+    gpio_mode_set(PWR_4G_KEY_PORT, GPIO_MODE_INPUT, GPIO_PUPD_NONE, PWR_4G_KEY_PIN);
 
     /* PC12 (SW_BT): 默认 LOW (蓝牙默认断电) */
     gpio_mode_set(PWR_BLE_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, PWR_BLE_PIN);
     gpio_output_options_set(PWR_BLE_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, PWR_BLE_PIN);
-
-    /* PC3 (SENSOR_PWR): 默认 LOW */
-    gpio_mode_set(PWR_SENSOR_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, PWR_SENSOR_PIN);
-    gpio_output_options_set(PWR_SENSOR_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, PWR_SENSOR_PIN);
 
     /* PC13 (SW_Sensor/CH4_PWR): 默认 LOW */
     gpio_mode_set(PWR_CH4_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, PWR_CH4_PIN);
@@ -43,12 +43,6 @@ void power_ble_set(uint8_t on)
 {
     if(on) gpio_bit_set(PWR_BLE_PORT, PWR_BLE_PIN);
     else   gpio_bit_reset(PWR_BLE_PORT, PWR_BLE_PIN);
-}
-
-void power_sensor_set(uint8_t on)
-{
-    if(on) gpio_bit_set(PWR_SENSOR_PORT, PWR_SENSOR_PIN);
-    else   gpio_bit_reset(PWR_SENSOR_PORT, PWR_SENSOR_PIN);
 }
 
 void power_4g_dtr_set(uint8_t level)

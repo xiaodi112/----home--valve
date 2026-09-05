@@ -118,6 +118,8 @@ static const CmdMap s_cmd_map[] = {
     {"report_get",        "report_cycle",    "",      NULL},
     {"window_get",        "window_pattern",  "",      NULL},
     {"abnormal_get",      "abnormal_close",  "",      NULL},
+    {"abnormal2_get",     "abnormal2_close", "",      NULL},
+    {"abnormal3_get",     "abnormal3_close", "",      NULL},
     {"first_ip_get",      "get_ip",          "1",     NULL},
     {"scend_ip_get",      "get_scend_ip",    "1",     NULL},
     {"valve_last_get",    "valve_last_order","1",     NULL},
@@ -129,6 +131,8 @@ static const CmdMap s_cmd_map[] = {
     {"report_set",        "report_cycle",    NULL,    "report_once"},
     {"window_set",        "window_pattern",  NULL,    "window_pattern"},
     {"abnormal_set",      "abnormal_close",  NULL,    "abnormal_close"},
+    {"abnormal2_set",     "abnormal2_close", NULL,    "abnormal2_close"},
+    {"abnormal3_set",     "abnormal3_close", NULL,    "abnormal3_close"},
     {"first_ip_set",      "first_ip_set",    NULL,    "first_ip"},
     {"scend_ip_set",      "scend_ip_set",    NULL,    "scend_ip"},
     {"real_set",          "real_set",        NULL,    "real_enabled"},
@@ -430,12 +434,16 @@ static void h_sensor_read(const char *id_val, const char *cmd_val, const char *r
             report_publish_feedback(30);   /* 压力状态获取成功 */
         }
 
-        // 阈值告警 + 异常自动关阀
+        // 阈值告警 + 异常自动关阀 (进气端 abnormal_close, 出气端 abnormal2_close)
         {
             ThresholdResult_t tr = threshold_check(g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, g_need_adc_sampling, 0);
-            if(tr != THRESHOLD_OK)
+            ThresholdResult_t tr2 = THRESHOLD_OK;
+            if(g_sensor_count >= 2 && g_sensor.raw2.err == PT304D_OK)
+                tr2 = threshold_check2(g_sensor.raw2.pressure, g_sensor.raw2.temperature, g_sensor.last_pressure_collect2, 0);
+            if(tr != THRESHOLD_OK || tr2 != THRESHOLD_OK)
             {
-                printf_debug("[SM] sensor_read ALARM: %s\r\n", threshold_alarm_type_str(tr));
+                ThresholdResult_t tr_eff = (tr != THRESHOLD_OK) ? tr : tr2;
+                printf_debug("[SM] sensor_read ALARM: %s\r\n", threshold_alarm_type_str(tr_eff));
                 if(EC801E_EnsureConnected() == EC_OK)
                 {
                     report_publish_alarm_batch(g_sensor.last_pressure_collect, g_sensor.last_pressure_collect2);
@@ -443,7 +451,9 @@ static void h_sensor_read(const char *id_val, const char *cmd_val, const char *r
                         report_publish_ly06(1, g_sensor.voltage);
                 }
 
-                const char *vr = alarm_try_close_valve(tr);
+                const char *vr1 = alarm_try_close_valve(tr);
+                const char *vr2 = alarm_try_close_valve2(tr2);
+                const char *vr = vr1 ? vr1 : vr2;
                 if(vr && EC801E_EnsureConnected() == EC_OK)
                     EC801E_PublishValveStatus(vr, g_valve_last_order);
             }
@@ -707,6 +717,39 @@ static void h_abnormal_close(const char *id_val, const char *cmd_val, const char
         report_publish_feedback(cmd_val[0] != '\0' ? 29 : 28);
 }
 
+/* 出气端异常自动关阀 (abnormal2_close pv* 策略) */
+static void h_abnormal2_close(const char *id_val, const char *cmd_val, const char *raw_buf)
+{
+        if(cmd_val[0] != '\0')
+        {
+            strncpy(g_abnormal2_close, cmd_val, 15); g_abnormal2_close[15] = '\0';
+            config_save_abn23();
+            printf_debug("[SM] abnormal2_close -> %s\r\n", g_abnormal2_close);
+        }
+        if(EC801E_EnsureConnected() == EC_OK)
+            EC801E_PublishResponse("abnormal2_close", g_abnormal2_close);
+        report_publish_feedback(cmd_val[0] != '\0' ? 29 : 28);
+}
+
+/* 激光甲烷异常自动关阀 (abnormal3_close: 0=关 1=开) */
+static void h_abnormal3_close(const char *id_val, const char *cmd_val, const char *raw_buf)
+{
+        if(cmd_val[0] != '\0')
+        {
+            g_abnormal3_close = (uint8_t)atoi(cmd_val);
+            if(g_abnormal3_close > 1) g_abnormal3_close = 0;
+            config_save_abn23();
+            printf_debug("[SM] abnormal3_close -> %d\r\n", g_abnormal3_close);
+        }
+        if(EC801E_EnsureConnected() == EC_OK)
+        {
+            char v[4];
+            snprintf(v, sizeof(v), "%d", g_abnormal3_close);
+            EC801E_PublishResponse("abnormal3_close", v);
+        }
+        report_publish_feedback(cmd_val[0] != '\0' ? 29 : 28);
+}
+
 static void h_valve_last_order(const char *id_val, const char *cmd_val, const char *raw_buf)
 {
 char v[4];
@@ -882,21 +925,21 @@ char val_buf[8];
 static void h_restart_off(const char *id_val, const char *cmd_val, const char *raw_buf)
 {
 printf_debug("[SM] Restart_off: closing valve then reset\r\n");
-        valve_execute("close", 1);
+//        valve_execute("close", 1);
         if(EC801E_EnsureConnected() == EC_OK)
             EC801E_PublishResponse("restart", "0");
         trea_delay_ms(50);
         NVIC_SystemReset();
 }
 
-static void h_4gpower_off(const char *id_val, const char *cmd_val, const char *raw_buf)
-{
-printf_debug("[SM] 4G power off\r\n");
-        report_4g_power_state(0);
-        trea_delay_ms(200);
-        EC801E_PowerOff();
-        fourG_user_off = 1;
-}
+//static void h_4gpower_off(const char *id_val, const char *cmd_val, const char *raw_buf)
+//{
+//printf_debug("[SM] 4G power off\r\n");
+//        report_4g_power_state(0);
+//        trea_delay_ms(200);
+//        EC801E_PowerOff();
+//        fourG_user_off = 1;
+//}
 
 static void h_real_set(const char *id_val, const char *cmd_val, const char *raw_buf)
 {
@@ -1211,6 +1254,8 @@ static const CmdHandler_t s_cmd_handlers[] = {
     { "delay", h_delay },
     { "window_pattern", h_window_pattern },
     { "abnormal_close", h_abnormal_close },
+    { "abnormal2_close", h_abnormal2_close },
+    { "abnormal3_close", h_abnormal3_close },
     { "valve_last_order", h_valve_last_order },
     { "keepalive", h_keepalive },
     { "get_sim", h_get_sim },
@@ -1223,7 +1268,7 @@ static const CmdHandler_t s_cmd_handlers[] = {
     { "LY06_get", h_ly06_get },
     { "restart", h_restart_off },
     { "restart_off", h_restart_off },
-    { "4Gpower_off", h_4gpower_off },
+//    { "4Gpower_off", h_4gpower_off },
     { "real_set", h_real_set },
     { "real_get", h_real_set },
     { "lcd_switch", h_lcd_switch },

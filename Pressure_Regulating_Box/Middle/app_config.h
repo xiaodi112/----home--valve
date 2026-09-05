@@ -32,8 +32,8 @@
  * 当前: 10*60/3600 = 0.1667h (10min) / 1*3600/3600 = 1h
  * EXT 区有效时, g_interval 由 cycle 推导, 两者必须保持同步。
  */
-#define APP_DEFAULT_COLLECT_HOURS     (20.0f / 60.0f)   /* 10 min */
-#define APP_DEFAULT_UPLOAD_HOURS      (120.0f / 60.0f)   /* 1 h */
+#define APP_DEFAULT_COLLECT_HOURS     (20.0f / 60.0f)   /* 20 min */
+#define APP_DEFAULT_UPLOAD_HOURS      (120.0f / 60.0f)   /* 2 h */
 
 /* ---------- MQTT默认值（EEPROM无数据时使用） ---------- */
 #define APP_DEFAULT_MQTT_CLIENT_ID    "S&D54GRG29T5HB0&149&1"
@@ -84,19 +84,19 @@
 /* ---------- LCD显示模式编译开关 ---------- */
 #define LCD_LOCK_ENABLED              0         /* 1=LCD按键锁定(60s超时关屏/20s回默认页); 0=LCD常亮+采集周期自动翻页 */
 
-#define LCD_SINGLE_SENSOR             0         /* 1=6页界面显示（6,一个传感器); 0=8页界面显示(8,2个传感器) */
+#define LCD_SINGLE_SENSOR             1         /* 1=6页界面显示（6,一个传感器); 0=8页界面显示(8,2个传感器) */
 
 /* ---------- 激光甲烷传感器硬件选配 (编译开关) ----------
  * 1=硬件带激光甲烷传感器: 编译 CH4 采集驱动/状态机/gas_get/laser_get/laser_set
  * 0=无此硬件: 相关代码不编译, 平台下发 laser/gas 命令时直接忽略(仅打印调试日志)
  */
-#define LASER_CH4_ENABLED             1
+#define LASER_CH4_ENABLED             0
 
 /* ---------- 电机(阀门执行器)硬件选配 (编译开关) ----------
  * 1=硬件带电机: 编译电机驱动/阀门动作(删除运行时门控, 直接生效)
  * 0=无电机: 电机代码整块剔除, 节省 RAM/Flash, 阀门指令返回 valve_err
  */
-#define MOTOR_ENABLED                 1
+#define MOTOR_ENABLED                 0
 
 /* ---------- 三组独立 I2C 总线引脚映射 ---------- */
 #define IIC0_SCL_PORT  GPIOB    /* IIC0: EEPROM    SCL */
@@ -107,23 +107,26 @@
 #define IIC1_SCL_PIN   GPIO_PIN_4
 #define IIC1_SDA_PORT  GPIOD    /* IIC1: 中压传感器 SDA S2*/
 #define IIC1_SDA_PIN   GPIO_PIN_5
+
+#if APP_DEFAULT_SENSOR_COUNT == 2
 #define IIC2_SCL_PORT  GPIOC    /* IIC2: 低压传感器 SCL S1*/
 #define IIC2_SCL_PIN   GPIO_PIN_0
 #define IIC2_SDA_PORT  GPIOC    /* IIC2: 低压传感器 SDA S1*/
 #define IIC2_SDA_PIN   GPIO_PIN_1
+#endif /*  */
 
 /* ---------- 软件 I2C 总线速率 (半周期延时计数, 越小越快) ---------- */
 #define SOFT_I2C_HALF_PERIOD       150
 
-/* 传感器供电 (SENSOR_PWR_ENABLED/SENSOR_PWRUP_DELAY_MS) 已移至 BSP/power.h */
+/* 注: 本板 I2C 常供电, 无传感器电源开关; PC3 为电压采集基准, 归 BSP/adc_bat.c 管理 */
 /* 电机引脚 (MOTOR_SLEEP_PORT/PIN, MOTOR_DRV_MODE) 已移至 BSP/motor.h */
 
 #define APP_DEFAULT_REAL_ENABLED      1         /* 0=禁用, 1=启用秒级采集 */
 #define APP_DEFAULT_REAL_FREQUENCY    5         /* 秒数 (1-10) */
 
 /* ---------- 产品复用配置默认值 ---------- */
-#define APP_DEFAULT_LCD_ENABLED       0         /* 0=无LCD产品, 1=有LCD产品 */
-#define APP_DEFAULT_SENSOR_COUNT      2         /* 1=单路传感器(进气端), 2=双路传感器 */
+#define APP_DEFAULT_LCD_ENABLED       1         /* 0=无LCD产品, 1=有LCD产品 */
+#define APP_DEFAULT_SENSOR_COUNT      1         /* 1=单路传感器(进气端), 2=双路传感器 */
 
 /* ---------- 阈值默认值 ---------- */
 /* 注: 阈值结构已拆分为 4 组独立配置, 默认值定义在 eeprom_config.h:
@@ -135,7 +138,7 @@
  */
 
 /* ---------- 异常自动关阀策略默认值 ---------- */
-#define APP_DEFAULT_ABNORMAL_CLOSE    "none"  /* 默认: 超上限或超下限自动关阀 */
+#define APP_DEFAULT_ABNORMAL_CLOSE    "none"  /* 默认: 关闭 */
 
 /* ---------- 报警确认参数 ---------- */
 #define APP_ALARM_RECHECK_COUNT       3         /* 异常重采次数 */
@@ -166,21 +169,21 @@ typedef struct {
 } CycleConfig_t;
 
 /* ---------- 异常自动关阀策略枚举 ---------- */
+/* ---------- 异常自动关阀策略枚举 (平台协议 pv* 极值档) ----------
+ * 进气端 abnormal_close / 出气端 abnormal2_close 共用:
+ *   pvhigh=压力超高(VERY_HIGH), pvlow=压力超低(VERY_LOW), pvmutation=压力骤变,
+ *   pvhighorlow / pvhighormutation / pvlowormutation / all(三档全含) / none(关闭)
+ * 注: 普通档(pmax/pmin)与温度不再参与关阀; 激光由 abnormal3_close(0/1) 独立控制;
+ *     电压报警(含VPROTECT)只上报, 不关阀。 */
 typedef enum {
-    ABNORMAL_NONE = 0,         /* 不自动关阀 */
-    ABNORMAL_HIGH,             /* 压力超上限 */
-    ABNORMAL_LOW,              /* 压力超下限 */
-    ABNORMAL_MUTATION,         /* 压力突变 */
-    ABNORMAL_HIGH_OR_LOW,      /* 超上限或超下限 */
-    ABNORMAL_HIGH_OR_MUTATION, /* 超上限或突变 */
-    ABNORMAL_LOW_OR_MUTATION,  /* 超下限或突变 */
-    ABNORMAL_ALL,              /* 全部 (压力超高/超低/突变) */
-    ABNORMAL_TEMP_HIGH,        /* 温度过高关阀 (temph)  含 TEMP_HIGH + TEMP_VERY_HIGH */
-    ABNORMAL_TEMP_LOW,         /* 温度过低关阀 (templ)  含 TEMP_LOW  + TEMP_VERY_LOW */
-    ABNORMAL_JGCLOSE           /* 激光甲烷报警关阀 (jgclose): CH4浓度>=门限(报警)即关阀, 平台 valve_open 恢复 */
-    /* 注: 电压报警 (voltage_high/voltage_low) 只上报, 不动阀。
-     *     电压保护 (voltage_protect, VPROTECT) 也只上报/进入VLP省电, 不关阀。
-     */
+    ABNORMAL_NONE = 0,
+    ABNORMAL_PV_HIGH,             /* 压力超高关阀 (pvhigh)    = VERY_HIGH */
+    ABNORMAL_PV_LOW,              /* 压力超低关阀 (pvlow)     = VERY_LOW */
+    ABNORMAL_PV_MUTATION,         /* 压力骤变关阀 (pvmutation)= MUTATION */
+    ABNORMAL_PV_HIGH_OR_LOW,      /* 超高或超低 (pvhighorlow) */
+    ABNORMAL_PV_HIGH_OR_MUTATION, /* 超高或骤变 (pvhighormutation) */
+    ABNORMAL_PV_LOW_OR_MUTATION,  /* 超低或骤变 (pvlowormutation) */
+    ABNORMAL_PV_ALL               /* 超高/超低/骤变 (all) */
 } AbnormalClose_t;
 
 /* ---------- 温度状态枚举(上报用) ---------- */

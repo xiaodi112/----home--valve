@@ -1,29 +1,31 @@
 #include "PT_304_35.h"
 #include "soft_i2c.h"
 
-/* ==================== 传感器总线映射与电源管理 ==================== */
-/* S1=低压/出气 → IIC2 (PC0/PC1), S2=中压/进气 → IIC1 (PD4/PD5)
- * 两路传感器均由 PC3 供电+上拉 (见 soft_i2c.h / app_config.h) */
+/* ==================== 传感器总线映射 ==================== */
+/* S1=低压/出气 → IIC2 (PC0/PC1, 双传感器旧板), S2=中压/进气 → IIC1 (PD4/PD5)
+ * 本板 I2C 常供电, sensor_pwr_on/off 为空实现 */
 static const SoftI2C_t *pt304d_bus_of(uint8_t sensor_idx)
 {
     return (sensor_idx == PT304D_SENSOR_1) ? &g_iic2 : &g_iic1;
 }
 
-/* 传感器断电后: IIC1/IIC2 引脚转 Analog, 彻底杜绝悬空漏电; 下次采集时 soft_i2c_init 重新配置 */
+/* 采集结束后: IIC1/IIC2 引脚转 Analog, 彻底杜绝悬空漏电; 下次采集时 soft_i2c_init 重新配置 */
 static void pt304d_bus_release(void)
 {
     gpio_mode_set(IIC1_SCL_PORT, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, IIC1_SCL_PIN | IIC1_SDA_PIN);
+	#if APP_DEFAULT_SENSOR_COUNT == 2
     gpio_mode_set(IIC2_SCL_PORT, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, IIC2_SCL_PIN | IIC2_SDA_PIN);
+	#endif /* 一个传感器 */
 }
 
-/* 采集统一上电: 先开漏释放总线(防毛刺), 再 PC3 供电(含上电稳定延时) */
+/* 采集前: 先初始化总线(开漏释放), 常供电板型无需切换电源 */
 static void pt304d_power_on(void)
 {
     soft_i2c_sensors_init();
     sensor_pwr_on();
 }
 
-/* 采集统一断电: PC3 拉低 + 总线转 Analog */
+/* 采集结束后: 总线转 Analog */
 static void pt304d_power_off(void)
 {
     sensor_pwr_off();
@@ -121,6 +123,14 @@ static PT304D_Status pt304d_4b_read(uint8_t sensor_idx, PT304D_Data *p_data)
     uint8_t i;
 
     trea_delay_ms(50);
+    soft_i2c_start(bus);
+    if(soft_i2c_write_byte(bus, (uint8_t)((PT304D_4B_ADDR << 1) | IIC_RD)) != 0)
+    {
+        soft_i2c_stop(bus);
+        p_data->err = PT304D_ERR_I2C;
+        return PT304D_ERR_I2C;
+    }
+	trea_delay_ms(15);
     soft_i2c_start(bus);
     if(soft_i2c_write_byte(bus, (uint8_t)((PT304D_4B_ADDR << 1) | IIC_RD)) != 0)
     {

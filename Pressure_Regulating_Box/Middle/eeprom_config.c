@@ -14,6 +14,7 @@
 #include "threshold.h"
 #include "tim.h"
 #include "PT_304_35.h"
+#include "main.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -227,7 +228,8 @@ static int parse_spupower_line(const char *cmd)
 // time 范围 0~VDLY_DELAY_MS_MAX (默认 5000ms), 超出后 config_save_vdelay 内 clamp
 static int parse_vdelay_line(const char *cmd)
 {
-    if(!strstr(cmd, "id:delay")) return 0;
+    /* 严格边界匹配: 避免吞掉 {id:delay_report,...} (delay_report 含子串 id:delay) */
+    if(!strstr(cmd, "id:delay,") && !strstr(cmd, "id:delay}")) return 0;
 
     char val_buf[24];
     int changed = 0;
@@ -268,6 +270,7 @@ EE_WRITE_BYTE(EE_ADDR_INTERVAL_MAGIC, 0xFF);
         EE_WRITE_BYTE(EE_ADDR_VTIMING_MAGIC,  0xFF);
         EE_WRITE_BYTE(EE_ADDR_CH4_MAGIC,      0xFF);
         EE_WRITE_BYTE(EE_ADDR_LASER_MAGIC,    0xFF);
+        EE_WRITE_BYTE(EE_ADDR_ABN2_MAGIC,     0xFF);
         NVIC_SystemReset();
         return -1;  // 不会到达
         }
@@ -278,6 +281,47 @@ EE_WRITE_BYTE(EE_ADDR_INTERVAL_MAGIC, 0xFF);
     if(parse_vpthreshold_line(cmd))  return 1;
     if(parse_tthreshold_line(cmd))   return 1;
     if(parse_spupower_line(cmd))     return 1;
+
+    // ---- 周期上报后延(分钟, 支持小数) ----
+    // 格式: {id:delay_report,value:1.5}  (1.5 = 后延1分30秒; 范围 0~60)
+    // 注意: 必须放在 parse_vdelay_line 之前, 且 vdelay 已用严格边界匹配
+    if(strstr(cmd, "id:delay_report"))
+    {
+        char val_buf[16];
+        if(extract_field(cmd, "value", val_buf, sizeof(val_buf)))
+        {
+            float d = (float)atof(val_buf);
+            if(!(d >= 0.0f && d <= 60.0f))   /* NaN/越界回退 0 */
+                d = 0.0f;
+            g_report_delay_min = d;
+            config_save_ext();
+            upload_schedule_reset();   /* 后延变更: 重置延迟上报锁存 */
+            printf_debug("[CFG] delay_report -> %.1f min\r\n", g_report_delay_min);
+        }
+        else
+            printf_debug("[CFG] delay_report: %.1f min\r\n", g_report_delay_min);
+        return 1;
+    }
+
+    // ---- 阀门限位到位等待超时(ms) ----
+    // 格式: {id:valve_timeout,value:40000}  (范围 1000~120000, 默认40000)
+    if(strstr(cmd, "id:valve_timeout"))
+    {
+        char val_buf[16];
+        if(extract_field(cmd, "value", val_buf, sizeof(val_buf)))
+        {
+            uint32_t v = (uint32_t)atol(val_buf);
+            if(v < VALVE_TIMEOUT_MS_MIN) v = VALVE_TIMEOUT_MS_MIN;
+            if(v > VALVE_TIMEOUT_MS_MAX) v = VALVE_TIMEOUT_MS_MAX;
+            g_valve_timeout_ms = v;
+            config_save_vdelay();
+            printf_debug("[CFG] valve_timeout -> %u ms\r\n", g_valve_timeout_ms);
+        }
+        else
+            printf_debug("[CFG] valve_timeout: %u ms\r\n", g_valve_timeout_ms);
+        return 1;
+    }
+
     if(parse_vdelay_line(cmd))       return 1;
 
     // ---- 异常关阀策略 ----
@@ -312,6 +356,7 @@ if(strstr(cmd, "id:collect_cycle"))
             config_save_interval();
             config_save_ext();
             config_recalc_interval();
+            upload_schedule_reset();   /* 上报周期变更: 重置延迟上报锁存 */
         }
         printf_debug("[CFG] collect_cycle: %d*%s (%.2fh)\r\n",
                      g_collect_cycle.once, cycle_type_to_str(g_collect_cycle.type),
@@ -562,11 +607,14 @@ void config_print_current(void)
                  g_interval.upload_interval_hours, g_interval.upload_interval_min,
                  g_report_cycle.once, cycle_type_to_str(g_report_cycle.type),
                  g_interval.upload_every_n);
+    printf_debug("  Delay_report: %.1f min\r\n", g_report_delay_min);
     char dot_str[64]; window_dottime_to_str(g_window.dottime_mask, dot_str, sizeof(dot_str));
     printf_debug("  Window: pattern=%s start=%s stop=%s er=%d dot=%s\r\n",
                  g_window.pattern, g_window.start, g_window.stop,
                  g_window.end_result, dot_str);
     printf_debug("  Abnormal: %s\r\n", g_abnormal_close);
+    printf_debug("  Abnormal2(outlet): %s   \r\nAbnormal3(laser): %d\r\n",
+                 g_abnormal2_close, g_abnormal3_close);
     printf_debug("  Valve: last_order=%d\r\n", g_valve_last_order);
     printf_debug("  Sensor: count=%d type=PT304D-4B S1(out)=%.1fkPa S2(in)=%.1fkPa temp=%.0f~%.0fC\r\n",
                  g_sensor_count,
@@ -589,6 +637,7 @@ void config_print_current(void)
     printf_debug("  SPUP en=%d high=%.2f low=%.2f protect=%.2f\r\n",
                  g_spupower.enabled, g_spupower.high, g_spupower.low, g_spupower.protect);
     printf_debug("  VDLY en=%d delay_ms=%d\r\n", g_vdelay.enabled, g_vdelay.delay_ms);
+    printf_debug("  Valve_timeout: %u ms\r\n", g_valve_timeout_ms);
     printf_debug("  Realtime: enabled=%d frequency=%ds\r\n",
                  g_real_enabled, g_real_frequency);
     printf_debug("  CH4  en=%d warmup=%ds threshold=%.2f\r\n",

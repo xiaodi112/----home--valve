@@ -49,7 +49,7 @@ void system_wakeup_reinit(void)
     my_systick_config();
     timer1_delay_init(); // 深休眠后 APB1 停摆, 必须重新启动 TIMER1 计数器
 
-    // 无论哪种唤醒源，都必须关闭LPUART唤醒模式和中断 + RI EXTI
+    // 无论哪种唤醒源，都必须关闭LPUART唤醒模式和中断
     lpuart_wakeup_disable(LPUART0);
     lpuart_interrupt_disable(LPUART0, LPUART_INT_WU);
     exti_flag_clear(EXTI_28);
