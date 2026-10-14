@@ -47,3 +47,4 @@ DebugConfig/
 # 构建日志
 build_verify.log
 build_revert.log
+build_rebuild.log
