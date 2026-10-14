@@ -174,8 +174,9 @@ static EC_Status_t EC_SendCmdRetry(const char *cmd, const char *expect,
 
 // ==================== 电源控制 ====================
 /* 新板电源语义 (引脚映射见 power.h):
- *   PC0 V4G_EN = 模块总电源 (HIGH=供电), 深睡期间由 MCU 保持 HIGH
- *   PC1 PWRKEY = NPN 低侧开关: MCU 高电平 → 三极管导通 → 模块 PWRKEY 被拉低
+ *   PB13 V4G_EN = 模块总电源使能 (推挽输出):
+ *                 高电平 = 供电, 低电平 = 断电; 深睡期间引脚保持该电平
+ *   PB14 PWRKEY = NPN 低侧开关: MCU 高电平 → 三极管导通 → 模块 PWRKEY 被拉低
  * 开机: V4G_EN 上电 → 稳定 ≥30ms → PWRKEY 低 ≥500ms → 释放(高阻)
  * 关机: PWRKEY 低 ≥650ms → 释放(高阻) → 掉电裕量 → 断开 V4G_EN */
 #define EC_V4G_ON_STABLE_MS      30u
@@ -186,7 +187,7 @@ static EC_Status_t EC_SendCmdRetry(const char *cmd, const char *expect,
 /* PWRKEY 驱动: on=1 切换为推挽输出并拉高(NPN导通); on=0 释放回高阻输入 */
 static void ec_pwrkey_drive(uint8_t on)
 {
-    rcu_periph_clock_enable(RCU_GPIOC);
+    rcu_periph_clock_enable(RCU_GPIOB);   /* PWRKEY 在 GPIOB(PB14), 时钟必须跟随引脚端口 */
     if(on)
     {
         gpio_mode_set(EC_PWRKEY_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, EC_PWRKEY_PIN);
@@ -195,7 +196,7 @@ static void ec_pwrkey_drive(uint8_t on)
     }
     else
     {
-        /* 深睡后 PC1 可能为 Analog, 释放统一恢复为输入高阻, 保证三极管截止 */
+        /* 深睡后 PWRKEY 可能为 Analog, 释放统一恢复为输入高阻, 保证三极管截止 */
         gpio_mode_set(EC_PWRKEY_PORT, GPIO_MODE_INPUT, GPIO_PUPD_NONE, EC_PWRKEY_PIN);
     }
 }
@@ -224,7 +225,7 @@ void EC801E_PowerOff(void)
     trea_delay_ms(EC_PWRKEY_OFF_PULSE_MS);
     ec_pwrkey_drive(0);                         /* 释放回高阻 */
     trea_delay_ms(EC_PWRKEY_OFF_SETTLE_MS);     /* 模块掉电完成裕量 */
-    power_4g_set(0);                            /* 断开 V4G_EN, 状态机以 PC0 为准 */
+    power_4g_set(0);                            /* 拉低 V4G_EN 断电 (供电状态以 power_4g_is_on 为准) */
     printf_debug("[EC] Power OFF\r\n");
 }
 
@@ -585,17 +586,146 @@ EC_Status_t EC801E_SubscribeTopic(void)
     return EC_OK;
 }
 
-// ==================== 读取MQTT下发消息(主动查询) ====================
+// ==================== 通用主题推导 ====================
+// 上报主题: /<productId>/<deviceNum>/property/post
+// 派生规则: 把末尾的 "/property/post" 整体换成 suffix
+//   例: "/155/202607280001/property/post" + "/leak/set"
+//       → "/155/202607280001/leak/set"
+// topic_up 不含 "/property/post" 时按整串追加 (兜底, 与旧 upgrade 推导一致)
+void EC801E_DeriveTopic(const char *suffix, char *out, uint16_t out_size)
+{
+    const char *p;
+    size_t base_len;
+
+    if(out == NULL || out_size == 0) return;
+    out[0] = '\0';
+    if(suffix == NULL || suffix[0] == '\0') return;
+
+    p = strstr(g_mqtt.topic_up, "/property/post");
+    base_len = (p != NULL) ? (size_t)(p - g_mqtt.topic_up) : strlen(g_mqtt.topic_up);
+    if(base_len >= (size_t)out_size) base_len = (size_t)out_size - 1u;
+
+    memcpy(out, g_mqtt.topic_up, base_len);
+    out[base_len] = '\0';
+    strncat(out, suffix, (size_t)out_size - base_len - 1u);
+}
+
+// ==================== 订阅静态测漏下发 topic ====================
+// /<productId>/<deviceNum>/leak/set  (msgid=3, QoS0; msgid 1/2 已被常规指令/OTA占用)
+EC_Status_t EC801E_SubscribeLeakTopic(void)
+{
+    // 共享 s_topic / s_cmd_buf (模块级, 主循环串行调用)
+    EC801E_DeriveTopic("/leak/set", s_topic, sizeof(s_topic));
+
+    snprintf(s_cmd_buf, sizeof(s_cmd_buf),
+             "AT+QMTSUB=0,3,\"%s\",0\r\n", s_topic);
+
+    if(EC_SendCmdRetry(s_cmd_buf, "OK", APP_AT_TIMEOUT_MQTT, APP_EC_MAX_RETRY) != EC_OK)
+    {
+        printf_debug("[EC] Subscribe leak FAILED: %s\r\n", s_topic);
+        return EC_ERROR;
+    }
+    printf_debug("[EC] Subscribed leak: %s\r\n", s_topic);
+    return EC_OK;
+}
+
+// ==================== 一次性订阅全部下发 topic ====================
+// 常规指令(function/get) + OTA(upgrade/set) + 静态测漏(leak/set)
+// 供上电首次连接 / 改IP / 重连后统一调用, 避免新增主题在重订阅路径上被漏掉
+EC_Status_t EC801E_SubscribeAll(void)
+{
+    EC_Status_t ret = EC_OK;
+
+    if(EC801E_SubscribeTopic() != EC_OK)
+        ret = EC_ERROR;
+
+    trea_delay_ms(300);
+    if(EC801E_SubscribeUpgradeTopic() != EC_OK)
+        ret = EC_ERROR;
+
+    trea_delay_ms(300);
+    if(EC801E_SubscribeLeakTopic() != EC_OK)
+        ret = EC_ERROR;
+
+    return ret;
+}
+
+// ==================== QMTRECV 槽位查询 ====================
+// 模块 MQTT 接收缓冲是 5 个固定槽位(0..4): 不看槽位标志盲读 AT+QMTRECV=0
+// 会漏掉落在槽位 1..4 的消息(指令永久滞留), 因此先查槽位再按槽位读。
+
+/* 解析 "+QMTRECV: " 之后的逗号分隔整数 (最多 6 个: client_idx + 5 个槽位标志) */
+static uint8_t ec_parse_recv_fields(const char *p, uint8_t *out, uint8_t max_n)
+{
+    uint8_t n = 0;
+
+    while(*p && n < max_n)
+    {
+        while(*p == ' ' || *p == '\t') p++;
+        if(*p < '0' || *p > '9') break;
+        out[n++] = (uint8_t)atol(p);
+        while(*p >= '0' && *p <= '9') p++;
+        while(*p == ' ' || *p == '\t') p++;
+        if(*p != ',') break;
+        p++;
+    }
+    return n;
+}
+
+/* AT+QMTRECV? → +QMTRECV: <client>,<slot0>,<slot1>,<slot2>,<slot3>,<slot4>
+ * flags[i]=1 表示槽位 i 有消息, 用 EC801E_ReadDownlinkById(i, ...) 读取 */
+EC_Status_t EC801E_QueryRecvSlots(uint8_t flags[5])
+{
+    const char *p;
+    uint8_t i;
+
+    for(i = 0; i < 5; i++) flags[i] = 0;
+
+    EC801E_Wakeup();
+    lpuart_rx_flush();
+
+    if(EC_SendCmd("AT+QMTRECV?\r\n", "\nOK", APP_AT_TIMEOUT_MQTT) != EC_OK)
+    {
+        printf_debug("[EC] QMTRECV? query failed\r\n");
+        return EC_TIMEOUT;
+    }
+
+    /* 可能同时返回 client0/client1 两行, 只取 client_idx=0 的那行 */
+    p = ec_rx_buf;
+    while((p = strstr(p, "+QMTRECV:")) != NULL)
+    {
+        uint8_t v[6];
+
+        p += 9;
+        if(ec_parse_recv_fields(p, v, 6) == 6 && v[0] == 0)
+        {
+            for(i = 0; i < 5; i++) flags[i] = (v[i + 1] != 0) ? 1 : 0;
+            printf_debug("[EC] QMTRECV? slots=%d%d%d%d%d\r\n",
+                         flags[0], flags[1], flags[2], flags[3], flags[4]);
+            return EC_OK;
+        }
+        p++;
+    }
+    printf_debug("[EC] QMTRECV? no client0 line\r\n");
+    return EC_TIMEOUT;
+}
+
+// ==================== 读取MQTT下发消息(按槽位主动查询) ====================
 // LPUART唤醒时URC已丢失(system_wakeup_reinit禁用了LPUART)
-// 因此使用AT+QMTRECV主动查询模块缓存的消息(需配合recv/mode=1)
-EC_Status_t EC801E_ReadDownlink(char *payload_buf, uint16_t buf_size)
+// 因此使用AT+QMTRECV=0,<slot>主动查询模块缓存的消息(需配合recv/mode=1)
+// 返回: EC_OK=读到一条(topic_out/payload_buf 有效), EC_TIMEOUT=该槽位无消息, EC_ERROR=响应格式异常
+EC_Status_t EC801E_ReadDownlinkById(uint8_t recv_id, char *topic_out, uint16_t topic_size,
+                                    char *payload_buf, uint16_t buf_size)
 {
     char *json;
     char *json_end;
     char end_ch;
     uint16_t len;
+    char *q1, *q2, *q3;
 
+    if(payload_buf == NULL || buf_size == 0) return EC_ERROR;
     payload_buf[0] = '\0';
+    if(topic_out != NULL && topic_size > 0) topic_out[0] = '\0';
 
     // 唤醒模块(QSCLK=2下首字节可能丢失)
     EC801E_Wakeup();
@@ -605,35 +735,48 @@ EC_Status_t EC801E_ReadDownlink(char *payload_buf, uint16_t buf_size)
 
     // 主动查询缓存的下发消息
     // (LPUART已改为中断+环形缓冲, 不再有轮询丢字节/ORE问题)
-    if(EC_SendCmd("AT+QMTRECV=0\r\n", "\nOK", APP_AT_TIMEOUT_MQTT) != EC_OK)
+    snprintf(s_cmd_buf, sizeof(s_cmd_buf), "AT+QMTRECV=0,%d\r\n", recv_id);
+    if(EC_SendCmd(s_cmd_buf, "\nOK", APP_AT_TIMEOUT_MQTT) != EC_OK)
     {
-        printf_debug("[EC] No buffered downlink\r\n");
+        printf_debug("[EC] No buffered downlink (slot %d)\r\n", recv_id);
         return EC_TIMEOUT;
     }
 
-    printf_debug("[EC] QMTRECV(%d): %s\r\n", ec_rx_len, ec_rx_buf);
+    printf_debug("[EC] QMTRECV[%d](%d): %s\r\n", recv_id, ec_rx_len, ec_rx_buf);
 
     // 检查是否有+QMTRECV:消息头(无则表示无缓存消息)
     if(!strstr(ec_rx_buf, "+QMTRECV:"))
     {
-        printf_debug("[EC] No buffered downlink\r\n");
+        printf_debug("[EC] No buffered downlink (slot %d)\r\n", recv_id);
         return EC_TIMEOUT;
     }
 
-    // 提取JSON payload: 定位+QMTRECV响应中payload的起始引号
+    // 提取 topic + JSON payload: 定位+QMTRECV响应中的两段引号字段
     // 格式: +QMTRECV: 0,0,"<topic>","<payload>"
     // payload可能是 [...] (格式A) 或 {...} (格式B含commandStr)
     // 必须跳过topic字段, 从payload起始位置提取, 否则commandParms中的[会被误取
     {
         char *recv = strstr(ec_rx_buf, "+QMTRECV:");
-        char *p;
         if(!recv) { printf_debug("[EC] No +QMTRECV header\r\n"); return EC_ERROR; }
-        // 跳到第1个"(topic开始), 第2个"(topic结束), 第3个"(payload开始)
-        p = strchr(recv, '"');                       // 1st " : topic start
-        if(p) p = strchr(p + 1, '"');                // 2nd " : topic end
-        if(p) p = strchr(p + 1, '"');                // 3rd " : payload start
-        if(!p) { printf_debug("[EC] No JSON in downlink\r\n"); return EC_ERROR; }
-        json = p + 1;  // payload首字符 ( [ 或 { )
+
+        q1 = strchr(recv, '"');                                  // 1st " : topic start
+        q2 = (q1 != NULL) ? strchr(q1 + 1, '"') : NULL;           // 2nd " : topic end
+        q3 = (q2 != NULL) ? strchr(q2 + 1, '"') : NULL;           // 3rd " : payload start
+        if(q1 == NULL || q2 == NULL || q3 == NULL)
+        {
+            printf_debug("[EC] No JSON in downlink\r\n");
+            return EC_ERROR;
+        }
+
+        if(topic_out != NULL && topic_size > 0)
+        {
+            uint16_t tlen = (uint16_t)(q2 - (q1 + 1));
+            if(tlen >= topic_size) tlen = (uint16_t)(topic_size - 1);
+            memcpy(topic_out, q1 + 1, tlen);
+            topic_out[tlen] = '\0';
+        }
+
+        json = q3 + 1;   // payload首字符 ( [ 或 { )
     }
 
     end_ch = (*json == '[') ? ']' : '}';
@@ -641,11 +784,12 @@ EC_Status_t EC801E_ReadDownlink(char *payload_buf, uint16_t buf_size)
     if(!json_end) { printf_debug("[EC] Incomplete JSON\r\n"); return EC_ERROR; }
 
     len = (uint16_t)(json_end - json + 1);
-    if(len >= buf_size) len = buf_size - 1;
+    if(len >= buf_size) len = (uint16_t)(buf_size - 1);
     memcpy(payload_buf, json, len);
     payload_buf[len] = '\0';
 
-    printf_debug("[EC] Downlink: %s\r\n", payload_buf);
+    printf_debug("[EC] Downlink[%s]: %s\r\n",
+                 (topic_out != NULL) ? topic_out : "-", payload_buf);
     return EC_OK;
 }
 
@@ -752,12 +896,9 @@ EC_Status_t EC801E_InitAndConnect(void)
 
         trea_delay_ms(500);
 
-        // 订阅下发topic
-        EC801E_SubscribeTopic();
-
-        // 订阅升级 topic (FastBee /upgrade/set)
-        trea_delay_ms(300);
-        EC801E_SubscribeUpgradeTopic();
+        // 订阅全部下发 topic: 常规指令(function/get) + OTA(upgrade/set) + 静态测漏(leak/set)
+        // 统一入口, 避免后续新增主题在重连路径上被漏订阅
+        EC801E_SubscribeAll();
 
         // 同步时间
         trea_delay_ms(300);
@@ -826,24 +967,24 @@ EC_Status_t EC801E_PublishAlarmStatus(ThresholdResult_t result, float voltage)
             id = "LY06"; value = "1"; is_voltage_alarm = 1; break;
 
         case THRESHOLD_OVER_LIMIT:
-            id = "pressure_status"; value = "pressure_high"; break;
+            id = "pressure-status"; value = "pressure_high"; break;
         case THRESHOLD_UNDER_LIMIT:
-            id = "pressure_status"; value = "pressure_low"; break;
+            id = "pressure-status"; value = "pressure_low"; break;
         case THRESHOLD_VERY_HIGH:
-            id = "pressure_status"; value = "pressure_veryhigh"; break;
+            id = "pressure-status"; value = "pressure_veryhigh"; break;
         case THRESHOLD_VERY_LOW:
-            id = "pressure_status"; value = "pressure_verylow"; break;
+            id = "pressure-status"; value = "pressure_verylow"; break;
         case THRESHOLD_MUTATION:
-            id = "pressure_status"; value = "pressure_mutation"; break;
+            id = "pressure-status"; value = "pressure_mutation"; break;
 
         case THRESHOLD_TEMP_HIGH:
-            id = "temp_status"; value = "temp_high"; break;
+            id = "temp-status"; value = "temp_high"; break;
         case THRESHOLD_TEMP_LOW:
-            id = "temp_status"; value = "temp_low"; break;
+            id = "temp-status"; value = "temp_low"; break;
         case THRESHOLD_TEMP_VERY_HIGH:
-            id = "temp_status"; value = "temp_very_high"; break;
+            id = "temp-status"; value = "temp_very_high"; break;
         case THRESHOLD_TEMP_VERY_LOW:
-            id = "temp_status"; value = "temp_very_low"; break;
+            id = "temp-status"; value = "temp_very_low"; break;
 
         case THRESHOLD_OK:
         default:
@@ -881,7 +1022,7 @@ EC_Status_t EC801E_PublishResponse(const char *id, const char *value)
     return EC801E_PublishRawJson(s_payload);
 }
 
-// ==================== 发布阀门状态 (合并 valve_control + valve_last_order) ====================
+// ==================== 发布阀门状态 (合并 valve-control + valve-last-order) ====================
 EC_Status_t EC801E_PublishValveStatus(const char *valve_result, int last_order)
 {
 
@@ -889,34 +1030,42 @@ EC_Status_t EC801E_PublishValveStatus(const char *valve_result, int last_order)
     snprintf(v_order, sizeof(v_order), "%d", last_order);
     rtc_get_time_str(s_timestamp, sizeof(s_timestamp));
     snprintf(s_payload, sizeof(s_payload),
-        "[{\"id\":\"valve_control\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
-         "{\"id\":\"valve_last_order\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"}]",
+        "[{\"id\":\"valve-control\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"},"
+         "{\"id\":\"valve-last-order\",\"value\":\"%s\",\"ts\":\"%s\",\"remark\":\"\"}]",
         valve_result, s_timestamp, v_order, s_timestamp);
     printf_debug("[EC] ValveStatus: %s order=%s\r\n", valve_result, v_order);
     return EC801E_PublishRawJson(s_payload);
 }
 
-// ==================== 发布任意JSON字符串 ====================
-EC_Status_t EC801E_PublishRawJson(const char *json_str)
+// ==================== 发布任意JSON到指定topic ====================
+// 用于静态测漏 reply 等自定义主题; 发布前会等待模块 '>' 提示并按需重试
+EC_Status_t EC801E_PublishOnTopic(const char *topic, const char *json_str)
 {
     // 共享 s_cmd_buf (模块级); json_str 可指向 s_payload (本函数仅写 s_cmd_buf)
     uint16_t payload_len;
+    EC_Status_t pr;
 
-
-    if(!json_str || json_str[0] == '\0') return EC_ERROR;
+    if(topic == NULL || topic[0] == '\0') return EC_ERROR;
+    if(json_str == NULL || json_str[0] == '\0') return EC_ERROR;
 
     payload_len = (uint16_t)strlen(json_str);
 
     snprintf(s_cmd_buf, sizeof(s_cmd_buf),
-             "AT+QMTPUBEX=0,0,0,0,\"%s\",%d\r\n", g_mqtt.topic_up, payload_len);
+             "AT+QMTPUBEX=0,0,0,0,\"%s\",%d\r\n", topic, payload_len);
 
-    EC_Status_t pr2 = ec_pubex_send(s_cmd_buf, json_str, payload_len);
-    if(pr2 == EC_PREEMPT) return EC_PREEMPT;
-    if(pr2 != EC_OK)
+    pr = ec_pubex_send(s_cmd_buf, json_str, payload_len);
+    if(pr == EC_PREEMPT) return EC_PREEMPT;
+    if(pr != EC_OK)
         return EC_TIMEOUT;
 
-    printf_debug("[EC] RawJson published (%d bytes)\r\n", payload_len);
+    printf_debug("[EC] published %d B -> %s\r\n", payload_len, topic);
     return EC_OK;
+}
+
+// ==================== 发布任意JSON字符串 (原接口: 发到上报topic) ====================
+EC_Status_t EC801E_PublishRawJson(const char *json_str)
+{
+    return EC801E_PublishOnTopic(g_mqtt.topic_up, json_str);
 }
 
 // ==================== 查询信号强度 ====================
@@ -1024,27 +1173,11 @@ EC_Status_t EC801E_QueryICCID(char *out, uint16_t size)
 // 状态回执: /<productId>/<deviceMac>/upgrade/reply
 static void ec_derive_upgrade_topic(const char *suffix, char *out, uint16_t out_size)
 {
-    char *p;
+    /* 统一走通用主题推导: /property/post → /upgrade/<suffix> */
+    char path[48];
 
-    out[0] = '\0';
-    strncpy(out, g_mqtt.topic_up, out_size - 1);
-    out[out_size - 1] = '\0';
-
-    /* 把末尾的 /property/post 替换为 /upgrade/<suffix> */
-    p = strstr(out, "/property/post");
-    if(p)
-    {
-        /* 截断到 /property/post 之前 */
-        *p = '\0';
-        strncat(out, "/upgrade/", out_size - strlen(out) - 1);
-        strncat(out, suffix, out_size - strlen(out) - 1);
-    }
-    else
-    {
-        /* 兜底: 直接追加 (不太可能) */
-        strncat(out, "/upgrade/", out_size - strlen(out) - 1);
-        strncat(out, suffix, out_size - strlen(out) - 1);
-    }
+    snprintf(path, sizeof(path), "/upgrade/%s", suffix);
+    EC801E_DeriveTopic(path, out, out_size);
 }
 
 // ==================== OTA: 订阅升级下发 topic ====================
@@ -1056,7 +1189,7 @@ EC_Status_t EC801E_SubscribeUpgradeTopic(void)
     ec_derive_upgrade_topic("set", s_topic, sizeof(s_topic));
 
     snprintf(s_cmd_buf, sizeof(s_cmd_buf),
-             "AT+QMTSUB=0,2,\"%s\",1\r\n", s_topic);
+             "AT+QMTSUB=0,2,\"%s\",0\r\n", s_topic);
 
     if(EC_SendCmdRetry(s_cmd_buf, "OK", APP_AT_TIMEOUT_MQTT, APP_EC_MAX_RETRY) != EC_OK)
     {
@@ -1354,7 +1487,7 @@ EC_Status_t EC801E_QueryIMEI(char *out, uint16_t size)
 //    val[0] = on ? '1' : '0';
 //    val[1] = '\0';
 //    if(EC801E_EnsureConnected() == EC_OK)
-//        EC801E_PublishResponse("4Gpower_control", val);
+//        EC801E_PublishResponse("4Gpower-control", val);
 //}
 
 // ==================== 用户端MQTT (id=1, 双实例) ====================

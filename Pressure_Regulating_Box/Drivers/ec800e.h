@@ -49,13 +49,31 @@ EC_Status_t EC801E_InitAndConnect(void);
 // 订阅下发topic (从topic_up推导: /post → /get)
 EC_Status_t EC801E_SubscribeTopic(void);
 
+// ==================== 主题推导 / 静态测漏链路 (新增, 不改动既有行为) ====================
+// 通用主题推导: 把 topic_up 末尾的 "/property/post" 换成 suffix (如 "/leak/set")
+// 例: topic_up="/155/202607280001/property/post" + "/leak/set"
+//     → "/155/202607280001/leak/set"
+void EC801E_DeriveTopic(const char *suffix, char *out, uint16_t out_size);
+
+// 订阅静态测漏下发 topic: /<productId>/<deviceNum>/leak/set (msgid=3, QoS0)
+EC_Status_t EC801E_SubscribeLeakTopic(void);
+
+// 一次性订阅全部下发 topic (常规指令 + OTA + 静态测漏)
+// 用于上电首次连接/改IP/重连后的统一重订阅, 避免新增主题被漏订阅
+EC_Status_t EC801E_SubscribeAll(void);
+
 // 确保MQTT已连接 (断线自动重连)
 EC_Status_t EC801E_EnsureConnected(void);
 
-// 读取MQTT下发消息 (LPUART唤醒后调用)
-// payload_buf: 输出JSON payload, buf_size: 缓冲区大小
-// 返回: EC_OK=收到下发, EC_TIMEOUT=无数据
-EC_Status_t EC801E_ReadDownlink(char *payload_buf, uint16_t buf_size);
+// 查询 MQTT 接收缓冲的 5 个槽位标志: flags[i]=1 表示槽位 i 有消息
+// 返回: EC_OK=查询成功(flags 有效), EC_TIMEOUT=查询失败(缓存保持不动)
+EC_Status_t EC801E_QueryRecvSlots(uint8_t flags[5]);
+
+// 按槽位读取一条MQTT下发消息(含topic): 多主题场景需要按topic分流
+// recv_id: 0..4 (对应 EC801E_QueryRecvSlots 的 flags 下标)
+// topic_out可为NULL; 返回: EC_OK=读到一条 / EC_TIMEOUT=该槽位无消息 / EC_ERROR=响应格式异常
+EC_Status_t EC801E_ReadDownlinkById(uint8_t recv_id, char *topic_out, uint16_t topic_size,
+                                    char *payload_buf, uint16_t buf_size);
 
 // 唤醒模块 (QSCLK模式下首字节可能丢失,先发AT)
 void EC801E_Wakeup(void);
@@ -69,11 +87,14 @@ EC_Status_t EC801E_PublishAlarmStatus(ThresholdResult_t result, float voltage);
 // 发布下发响应结果 (单字段)
 EC_Status_t EC801E_PublishResponse(const char *id, const char *value);
 
-// 发布阀门状态 (合并 valve_control + valve_last_order 为一条JSON)
+// 发布阀门状态 (合并 valve-control + valve-last-order 为一条JSON)
 EC_Status_t EC801E_PublishValveStatus(const char *valve_result, int last_order);
 
 // 发布任意已组装好的JSON字符串 (用于多字段回传: 阈值/窗口/周期等)
 EC_Status_t EC801E_PublishRawJson(const char *json_str);
+
+// 发布任意JSON到指定topic (静态测漏 reply 等自定义主题)
+EC_Status_t EC801E_PublishOnTopic(const char *topic, const char *json_str);
 
 // 查询模块信息
 EC_Status_t EC801E_QueryCSQ(char *out, uint16_t size);      // 信号强度 (CSQ 0~31)

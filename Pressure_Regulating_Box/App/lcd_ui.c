@@ -1,4 +1,10 @@
+/* 无 LCD 产品 (LCD_ENABLED=0): 整个 LCD UI 不参与编译, 不占用 Flash */
+#include "app_config.h"
+
+#if LCD_ENABLED
+
 #include "lcd_ui.h"
+#include "calib_mode.h"
 #include "slcd_seg.h"
 #include "mygpio.h"
 #include "power.h"
@@ -9,7 +15,6 @@
 
 // ==================== 全局状态 ====================
 uint8_t g_lcd_page = 0;
-uint8_t g_bt_on = 0;
 uint8_t g_last_csq = 99;
 
 // ==================== 内部缓存 ====================
@@ -221,8 +226,6 @@ void lcd_ui_init(void)
 // ==================== 刷新当前页面 (采集后调用) ====================
 void lcd_ui_refresh(PT304D_Data *inlet, PT304D_Data *outlet, float voltage)
 {
-    uint8_t need_redraw = 0;
-
     // 空闲超时20s自动回默认页
 #if LCD_SINGLE_SENSOR
     if(g_lcd_page != LCD_PAGE_OUTLET_PRESSURE)
@@ -245,17 +248,26 @@ void lcd_ui_refresh(PT304D_Data *inlet, PT304D_Data *outlet, float voltage)
         }
     }
 
+    lcd_ui_update_data(inlet, outlet, voltage);
+}
+
+/* ==================== 校零轮显专用: 只更新数据, 不触发20s回默认页 ==================== */
+void lcd_ui_update_data(PT304D_Data *inlet, PT304D_Data *outlet, float voltage)
+{
+    uint8_t need_redraw = 0;
+
     /* LCD常亮模式(LCD_LOCK_ENABLED=0): 常亮不超时, 页面由采集周期每次刷新后自动进行翻页 */
 
     // 缓存数据并检测变化
 #if LCD_SINGLE_SENSOR
     if(inlet != NULL)
     {
-        if(s_outlet_pressure != inlet->pressure ||
+        float p_disp = calib_lcd_zero() ? 0.0f : inlet->pressure;   /* 校零期压力显示0 */
+        if(s_outlet_pressure != p_disp ||
            s_outlet_temp    != inlet->temperature ||
            s_outlet_err     != inlet->err)
         {
-            s_outlet_pressure = inlet->pressure;
+            s_outlet_pressure = p_disp;
             s_outlet_temp = inlet->temperature;
             s_outlet_err = inlet->err;
             if(g_lcd_page == LCD_PAGE_OUTLET_PRESSURE || g_lcd_page == LCD_PAGE_OUTLET_TEMP)
@@ -265,11 +277,12 @@ void lcd_ui_refresh(PT304D_Data *inlet, PT304D_Data *outlet, float voltage)
 #else
     if(inlet != NULL)
     {
-        if(s_inlet_pressure != inlet->pressure ||
+        float p_disp = calib_lcd_zero() ? 0.0f : inlet->pressure;
+        if(s_inlet_pressure != p_disp ||
            s_inlet_temp    != inlet->temperature ||
            s_inlet_err     != inlet->err)
         {
-            s_inlet_pressure = inlet->pressure;
+            s_inlet_pressure = p_disp;
             s_inlet_temp = inlet->temperature;
             s_inlet_err = inlet->err;
             if(g_lcd_page == LCD_PAGE_INLET_PRESSURE || g_lcd_page == LCD_PAGE_INLET_TEMP)
@@ -278,11 +291,12 @@ void lcd_ui_refresh(PT304D_Data *inlet, PT304D_Data *outlet, float voltage)
     }
     if(outlet != NULL)
     {
-        if(s_outlet_pressure != outlet->pressure ||
+        float p_disp2 = calib_lcd_zero() ? 0.0f : outlet->pressure;
+        if(s_outlet_pressure != p_disp2 ||
            s_outlet_temp    != outlet->temperature ||
            s_outlet_err     != outlet->err)
         {
-            s_outlet_pressure = outlet->pressure;
+            s_outlet_pressure = p_disp2;
             s_outlet_temp = outlet->temperature;
             s_outlet_err = outlet->err;
             if(g_lcd_page == LCD_PAGE_OUTLET_PRESSURE || g_lcd_page == LCD_PAGE_OUTLET_TEMP)
@@ -309,6 +323,15 @@ void lcd_ui_refresh(PT304D_Data *inlet, PT304D_Data *outlet, float voltage)
 void lcd_ui_next_page(void)
 {
     g_lcd_page = (g_lcd_page + 1) % LCD_PAGE_COUNT;
+    s_page_change_sec = hhmmss_to_total_sec(rtc_get_hhmmss());
+    lcd_ui_display_page();
+}
+
+/* 切换到指定页 (越界忽略) */
+void lcd_ui_set_page(uint8_t page)
+{
+    if(page >= LCD_PAGE_COUNT) return;
+    g_lcd_page = page;
     s_page_change_sec = hhmmss_to_total_sec(rtc_get_hhmmss());
     lcd_ui_display_page();
 }
@@ -474,7 +497,9 @@ static void lcd_ui_update_common_icons(void)
 	// 信号
     lcd_ui_update_signal(g_last_csq);
 	// 阀门
-    lcd_ui_update_valve(g_valve_last_order);
+    lcd_ui_update_valve(g_valve_pos_state);   /* 阀门图标跟随"物理位置", 与用户指令解耦 */
     // 蓝牙
     slcd_seg_icon_display(SLCD_ICON_LY, g_bt_on ? SET : RESET);
 }
+
+#endif /* LCD_ENABLED */

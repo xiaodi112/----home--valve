@@ -157,14 +157,14 @@ void USART0_IRQHandler(void)
 }
 
 /*!
-    \brief      this function handles EXTI0 interrupt request (PD0 Btn1 wakeup)
+    \brief      this function handles EXTI4 interrupt request (PA4 Btn1 wakeup)
 */
-void EXTI0_IRQHandler(void)
+void EXTI4_IRQHandler(void)
 {
-    if(RESET != exti_flag_get(EXTI_0)) {
-        exti_flag_clear(EXTI_0);
-        // 自动禁用EXTI0, 防止唤醒后再次触发中断导致ISR死循环
-        exti_interrupt_disable(EXTI_0);
+    if(RESET != exti_flag_get(EXTI_4)) {
+        exti_flag_clear(EXTI_4);
+        // 自动禁用EXTI4, 防止唤醒后再次触发中断导致ISR死循环
+        exti_interrupt_disable(EXTI_4);
         button_wakeup_flag = 1;
     }
 }

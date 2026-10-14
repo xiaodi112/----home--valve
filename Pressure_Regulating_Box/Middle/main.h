@@ -18,7 +18,8 @@ typedef enum {
     STATE_DOWNLINK,
     STATE_ALARM,
     STATE_BLE_OTA,
-    STATE_CH4
+    STATE_CH4,
+    STATE_LEAK          /* 静态测漏任务: 采集→分包上报→清除 (独立链路) */
 } AppState_t;
 
 extern AppState_t app_state;
@@ -48,6 +49,8 @@ extern uint8_t g_lcd_active;   // LCD当前是否显示 (运行状态, 区别于
 
 // 供其他模块使用 (main.c 实现, downlink.c 等模块调用)
 void lcd_shutdown(void);
+/* 安装事件一次性上报: 传感器记录 + product-status=1 (未安装→已安装瞬间调用) */
+void install_event_report(void);
 
 const char* alarm_try_close_valve_all(const char *policy_str, ThresholdResult_t result);
 
@@ -56,5 +59,10 @@ const char* alarm_try_close_valve2(ThresholdResult_t result);   /* 出气端 (ab
 const char* ch4_alarm_try_close_valve(void);
 void threshold_alarm_reset_rt(void);
 void upload_schedule_reset(void);   /* 上报周期/后延配置变更后调用, 重置延迟上报锁存 */
+
+/* 定时开关阀检查: 最高优先级, 立刻执行到期的定时开关阀事件
+ * 静态测漏任务运行期间也需周期调用, 否则 RTC ISR 置位的 g_timing_pending
+ * 不清零会导致所有 AT 指令返回 EC_PREEMPT (4G 通信失效) */
+void vtiming_check_now(void);
 
 #endif

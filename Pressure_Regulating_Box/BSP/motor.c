@@ -1,4 +1,5 @@
 #include "motor.h"
+#include "adc.h"
 
 #if MOTOR_ENABLED
 
@@ -120,7 +121,18 @@ static void pwm_set_duty(uint8_t ch, float duty)
     }
 }
 
-/* ==================== 限位引脚初始化 ==================== */
+/* ==================== 到位检测硬件初始化 (按板级方式分派) ==================== */
+void motor_pos_init(void)
+{
+#if VALVE_POS_SENSE == VALVE_POS_SENSE_LIMIT
+    motor_limit_init();
+#else
+    motor_current_init();
+#endif
+}
+
+#if VALVE_POS_SENSE == VALVE_POS_SENSE_LIMIT
+/* ==================== 限位开关 (旧板) ==================== */
 void motor_limit_init(void)
 {
     rcu_periph_clock_enable(RCU_GPIOA);
@@ -129,23 +141,6 @@ void motor_limit_init(void)
     gpio_mode_set(GPIOA, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPIO_PIN_11 | GPIO_PIN_12);
 }
 
-/* ==================== 电机初始化 ==================== */
-void motor_init(uint8_t enabled)
-{
-    if(!enabled) return;
-
-    motor_limit_init();
-
-#if MOTOR_DRV_MODE == 1
-    /* PWM 驱动: PA6/PA7 复用 TIMER2 CH0/CH1 */
-    pwm_init(160000, 0.0f, 0.0f);
-#else
-    /* GPIO 直驱: PA6/PA7 推挽输出 */
-    gpio_mode_set(GPIOA, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_6 | GPIO_PIN_7);
-#endif
-}
-
-/* ==================== 限位开关读取 ==================== */
 /* PA11: K1-S 开阀到位（低电平=到位） */
 uint8_t motor_limit1_reached(void)
 {
@@ -156,6 +151,54 @@ uint8_t motor_limit1_reached(void)
 uint8_t motor_limit2_reached(void)
 {
     return (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) ? 1 : 0;
+}
+#else
+/* ==================== 堵转电流采样 (本板: PB0 = ADC_IN8, 1Ω 采样电阻) ==================== */
+void motor_current_init(void)
+{
+    rcu_periph_clock_enable(RCU_GPIOB);
+
+    /* PB0 模拟输入: 由 adc_svc_read_raw() 在读取时切换通道 */
+    gpio_mode_set(MOTOR_CS_PORT, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, MOTOR_CS_PIN);
+
+    /* ADC 初始化兜底: 最小唤醒/按键快检路径可能未调用 adc_bat_init(),
+     * 此处在采样前保证 ADC 已使能并校准 (adc_svc_init 幂等) */
+    adc_svc_init();
+}
+
+uint16_t motor_current_raw(void)
+{
+    return adc_svc_read_raw(MOTOR_CS_ADC_CH);
+}
+
+uint32_t motor_current_ma(void)
+{
+    uint16_t raw = motor_current_raw();
+
+    if(raw == ADC_SVC_RAW_INVALID)
+        return 0xFFFFFFFFu;
+
+    /* I(mA) = V(mV) / R(Ω) ; V(mV) = raw * VREF / 4095 */
+    if(MOTOR_CS_R_SHUNT <= 0.0f)
+        return 0xFFFFFFFFu;
+    return (uint32_t)(((float)adc_svc_raw_to_mv(raw)) / MOTOR_CS_R_SHUNT);
+}
+#endif /* VALVE_POS_SENSE */
+
+/* ==================== 电机初始化 ==================== */
+void motor_init(uint8_t enabled)
+{
+    if(!enabled) return;
+
+    motor_pos_init();
+
+#if MOTOR_DRV_MODE == 1
+    /* PWM 驱动: PA6/PA7 复用 TIMER2 CH0/CH1 */
+    pwm_init(160000, 0.0f, 0.0f);
+#else
+    /* GPIO 直驱: PA6/PA7 推挽输出 */
+    gpio_mode_set(GPIOA, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO_PIN_6 | GPIO_PIN_7);
+#endif
 }
 
 /* ==================== 方向驱动(语义接口) ==================== */

@@ -11,6 +11,7 @@
 #include "threshold.h"
 #include "PT_304_35.h"
 #include "main.h"
+#include "calib_mode.h"
 #include "adc_bat.h"
 #include "valve.h"
 #include "tim.h"
@@ -81,7 +82,7 @@ void report_query_signal_info(char *csq, uint8_t csq_size,
     }
 }
 
-/* 上报传感器在线状态 (rtu_have/rtu_status 各 2) */
+/* 上报传感器在线状态 (rtu-have/rtu-status 各 2) */
 void report_publish_sensor_status(void)
 {
     const char *have    = (g_sensor.raw.err != PT304D_ERR_I2C) ? "1" : "0";
@@ -89,15 +90,15 @@ void report_publish_sensor_status(void)
 
     rtc_get_time_str(s_rpt_ts, sizeof(s_rpt_ts));
     jb_begin(&s_rpt_jb, s_rpt_buf, sizeof(s_rpt_buf));
-    jb_add_str(&s_rpt_jb, "rtu_have", have, s_rpt_ts);
-    jb_add_str(&s_rpt_jb, "rtu_status", rstatus, s_rpt_ts);
+    jb_add_str(&s_rpt_jb, "rtu-have", have, s_rpt_ts);
+    jb_add_str(&s_rpt_jb, "rtu-status", rstatus, s_rpt_ts);
 
     if(g_sensor_count >= 2)
     {
         const char *have2    = (g_sensor.raw2.err != PT304D_ERR_I2C) ? "1" : "0";
         const char *rstatus2 = (g_sensor.raw2.err == PT304D_OK) ? "1" : "0";
-        jb_add_str(&s_rpt_jb, "rtu2_have", have2, s_rpt_ts);
-        jb_add_str(&s_rpt_jb, "rtu2_status", rstatus2, s_rpt_ts);
+        jb_add_str(&s_rpt_jb, "rtu2-have", have2, s_rpt_ts);
+        jb_add_str(&s_rpt_jb, "rtu2-status", rstatus2, s_rpt_ts);
     }
 
     jb_end(&s_rpt_jb);
@@ -105,7 +106,7 @@ void report_publish_sensor_status(void)
 }
 
 /* 状态批量上报(实测值+状态同一条消息): 报警/正常/恢复共用
- * 双传感器: temp/pressure/temp_status/pressure_status + temp2/pressure2/temp2_status/pressure2_status
+ * 双传感器: temp/pressure/temp-status/pressure-status + temp2/pressure2/temp2-status/pressure2-status
  * 单传感器: 仅前四字段 */
 static void publish_status_batch(float last_p1, float last_p2)
 {
@@ -114,17 +115,17 @@ static void publish_status_batch(float last_p1, float last_p2)
 
     jb_add_float(&s_rpt_jb, "temp", g_sensor.raw.temperature, s_rpt_ts);
     jb_add_float(&s_rpt_jb, "pressure", g_sensor.raw.pressure, s_rpt_ts);
-    /* 进气端传感器未采到数据: 状态上报 temp_err/pressure_err */
+    /* 进气端传感器未采到数据: 状态上报 temp-err/pressure-err */
     if(g_sensor.raw.err != PT304D_OK)
     {
-        jb_add_str(&s_rpt_jb, "temp_status", "temp_err", s_rpt_ts);
-        jb_add_str(&s_rpt_jb, "pressure_status", "pressure_err", s_rpt_ts);
+        jb_add_str(&s_rpt_jb, "temp-status", "temp-err", s_rpt_ts);
+        jb_add_str(&s_rpt_jb, "pressure-status", "pressure-err", s_rpt_ts);
     }
     else
     {
-        jb_add_str(&s_rpt_jb, "temp_status",
+        jb_add_str(&s_rpt_jb, "temp-status",
                    threshold_temp_status_str(threshold_get_temp_status(g_sensor.raw.temperature)), s_rpt_ts);
-        jb_add_str(&s_rpt_jb, "pressure_status",
+        jb_add_str(&s_rpt_jb, "pressure-status",
                    threshold_pressure_status_str(threshold_get_pressure_status(g_sensor.raw.pressure, last_p1)), s_rpt_ts);
     }
 
@@ -132,17 +133,17 @@ static void publish_status_batch(float last_p1, float last_p2)
     {
         jb_add_float(&s_rpt_jb, "temp2", g_sensor.raw2.temperature, s_rpt_ts);
         jb_add_float(&s_rpt_jb, "pressure2", g_sensor.raw2.pressure, s_rpt_ts);
-        /* 出气端传感器未采到数据: 状态上报 temp_err/pressure_err */
+        /* 出气端传感器未采到数据: 状态上报 temp-err/pressure-err */
         if(g_sensor.raw2.err != PT304D_OK)
         {
-            jb_add_str(&s_rpt_jb, "temp2_status", "temp_err", s_rpt_ts);
-            jb_add_str(&s_rpt_jb, "pressure2_status", "pressure_err", s_rpt_ts);
+            jb_add_str(&s_rpt_jb, "temp2-status", "temp-err", s_rpt_ts);
+            jb_add_str(&s_rpt_jb, "pressure2-status", "pressure-err", s_rpt_ts);
         }
         else
         {
-            jb_add_str(&s_rpt_jb, "temp2_status",
+            jb_add_str(&s_rpt_jb, "temp2-status",
                        threshold_temp_status_str(threshold_get_temp_status2(g_sensor.raw2.temperature)), s_rpt_ts);
-            jb_add_str(&s_rpt_jb, "pressure2_status",
+            jb_add_str(&s_rpt_jb, "pressure2-status",
                        threshold_pressure_status_str(threshold_get_pressure_status2(g_sensor.raw2.pressure, last_p2)), s_rpt_ts);
         }
     }
@@ -214,40 +215,41 @@ void report_publish_upload_summary(void)
     rtc_get_time_str(s_rpt_ts, sizeof(s_rpt_ts));
     jb_begin(&s_rpt_jb, s_rpt_buf, sizeof(s_rpt_buf));
 
+
     // 2. 信号强度
     report_query_signal_info(csq_buf, sizeof(csq_buf), rsrp_buf, sizeof(rsrp_buf), sinr_buf, sizeof(sinr_buf));
     jb_add_str(&s_rpt_jb, "csq", csq_buf, s_rpt_ts);
     jb_add_str(&s_rpt_jb, "rsrp", rsrp_buf, s_rpt_ts);
     jb_add_str(&s_rpt_jb, "snr", sinr_buf, s_rpt_ts);
 
-    // 4. 压力+温度状态 (传感器未采到数据 → temp_err/pressure_err)
+    // 4. 压力+温度状态 (传感器未采到数据 → temp-err/pressure-err)
     {
         if(g_sensor.raw.err != PT304D_OK)
         {
-            jb_add_str(&s_rpt_jb, "pressure_status", "pressure_err", s_rpt_ts);
-            jb_add_str(&s_rpt_jb, "temp_status", "temp_err", s_rpt_ts);
+            jb_add_str(&s_rpt_jb, "pressure-status", "pressure-err", s_rpt_ts);
+            jb_add_str(&s_rpt_jb, "temp-status", "temp-err", s_rpt_ts);
         }
         else
         {
             PressureStatus_t ps = threshold_get_pressure_status(g_sensor.raw.pressure, g_sensor.last_pressure_collect);
-            jb_add_str(&s_rpt_jb, "pressure_status", threshold_pressure_status_str(ps), s_rpt_ts);
+            jb_add_str(&s_rpt_jb, "pressure-status", threshold_pressure_status_str(ps), s_rpt_ts);
             TempStatus_t ts = threshold_get_temp_status(g_sensor.raw.temperature);
-            jb_add_str(&s_rpt_jb, "temp_status", threshold_temp_status_str(ts), s_rpt_ts);
+            jb_add_str(&s_rpt_jb, "temp-status", threshold_temp_status_str(ts), s_rpt_ts);
         }
 
         if(g_sensor_count >= 2)
         {
             if(g_sensor.raw2.err != PT304D_OK)
             {
-                jb_add_str(&s_rpt_jb, "pressure2_status", "pressure_err", s_rpt_ts);
-                jb_add_str(&s_rpt_jb, "temp2_status", "temp_err", s_rpt_ts);
+                jb_add_str(&s_rpt_jb, "pressure2-status", "pressure-err", s_rpt_ts);
+                jb_add_str(&s_rpt_jb, "temp2-status", "temp-err", s_rpt_ts);
             }
             else
             {
                 PressureStatus_t ps2 = threshold_get_pressure_status2(g_sensor.raw2.pressure, g_sensor.last_pressure_collect2);
-                jb_add_str(&s_rpt_jb, "pressure2_status", threshold_pressure_status_str(ps2), s_rpt_ts);
+                jb_add_str(&s_rpt_jb, "pressure2-status", threshold_pressure_status_str(ps2), s_rpt_ts);
                 TempStatus_t ts2 = threshold_get_temp_status2(g_sensor.raw2.temperature);
-                jb_add_str(&s_rpt_jb, "temp2_status", threshold_temp_status_str(ts2), s_rpt_ts);
+                jb_add_str(&s_rpt_jb, "temp2-status", threshold_temp_status_str(ts2), s_rpt_ts);
             }
         }
     }
@@ -263,7 +265,10 @@ void report_publish_upload_summary(void)
         jb_add_str(&s_rpt_jb, "MQTT_password", g_user_mqtt.password, s_rpt_ts);
         jb_add_str(&s_rpt_jb, "MQTT_client_id", g_user_mqtt.client_id, s_rpt_ts);
         jb_add_str(&s_rpt_jb, "MQTT_subject", g_user_mqtt.topic_up, s_rpt_ts);
+		jb_end(&s_rpt_jb);
+        EC801E_PublishRawJson(s_rpt_buf);
 
+		jb_begin(&s_rpt_jb, s_rpt_buf, sizeof(s_rpt_buf));
         jb_add_str(&s_rpt_jb, "window_pattern", g_window.pattern, s_rpt_ts);
         jb_add_int(&s_rpt_jb, "window_end_result", g_window.end_result, s_rpt_ts);
         jb_add_str(&s_rpt_jb, "window_start", g_window.start, s_rpt_ts);
@@ -275,27 +280,32 @@ void report_publish_upload_summary(void)
         EC801E_PublishRawJson(s_rpt_buf);
     }
 
-    jb_begin(&s_rpt_jb, s_rpt_buf, sizeof(s_rpt_buf));
     // 5. 阀门状态
     {
+	    jb_begin(&s_rpt_jb, s_rpt_buf, sizeof(s_rpt_buf));
         const char *valve_status = valve_get_status();
-        jb_add_str(&s_rpt_jb, "valve_control", valve_status, s_rpt_ts);
+        jb_add_str(&s_rpt_jb, "valve-control", valve_status, s_rpt_ts);
+		jb_end(&s_rpt_jb);
+		EC801E_PublishRawJson(s_rpt_buf);
     }
 
     // 6. 用户IP / 主IP / 副IP
     {
-        char ip_str[48];
-
-        snprintf(ip_str, sizeof(ip_str), "%s.%d",
+		char ip_str[48];
+		jb_begin(&s_rpt_jb, s_rpt_buf, sizeof(s_rpt_buf));
+		 snprintf(ip_str, sizeof(ip_str), "%s.%d",
                      g_user_mqtt.server[0] ? g_user_mqtt.server : "0.0.0.0", g_user_mqtt.port);
-        jb_add_str(&s_rpt_jb, "user_ip", ip_str, s_rpt_ts);
-
+        jb_add_str(&s_rpt_jb, "user-ip", ip_str, s_rpt_ts);
+		jb_end(&s_rpt_jb);
+		EC801E_PublishRawJson(s_rpt_buf);
+		 
+		jb_begin(&s_rpt_jb, s_rpt_buf, sizeof(s_rpt_buf));
         snprintf(ip_str, sizeof(ip_str), "%s.%d", g_mqtt.server, g_mqtt.port);
-        jb_add_str(&s_rpt_jb, "first_ip", ip_str, s_rpt_ts);
+        jb_add_str(&s_rpt_jb, "first-ip", ip_str, s_rpt_ts);
 
         snprintf(ip_str, sizeof(ip_str), "%s.%d",
                      g_mqtt.server2[0] ? g_mqtt.server2 : "0.0.0.0", g_mqtt.port2);
-        jb_add_str(&s_rpt_jb, "scend_ip", ip_str, s_rpt_ts);
+        jb_add_str(&s_rpt_jb, "scend-ip", ip_str, s_rpt_ts);
 		jb_end(&s_rpt_jb);
 		EC801E_PublishRawJson(s_rpt_buf);
     }
@@ -315,6 +325,16 @@ void report_publish_upload_summary(void)
         int volt_alarm = threshold_voltage_alarm(g_sensor.voltage);
         snprintf(va_buf, sizeof(va_buf), "%d", volt_alarm);
         jb_add_str(&s_rpt_jb, "LY06", va_buf, s_rpt_ts);
+		
+		// 产品状态: 读取真实安装状态 (已安装=1, 校零未安装=0)
+#if CALIB_MODE_ENABLED
+        uint8_t prod_installed = calib_is_installed() ? 1u : 0u;
+
+        char prod_buf[2];
+        prod_buf[0] = (char)('0' + prod_installed);
+        prod_buf[1] = '\0';
+        jb_add_str(&s_rpt_jb, "product-status", prod_buf, s_rpt_ts);
+#endif
     }
 
     jb_end(&s_rpt_jb);

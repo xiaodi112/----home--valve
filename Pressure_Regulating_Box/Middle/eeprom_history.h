@@ -21,8 +21,14 @@
 // ==================== 地址定义 ====================
 /* ==================== EEPROM partition (per chip) ====================
  * AT24C64 (8KB) : config 0x000~0x7FF (2KB) + history 0x800~0x1FFF (6KB/191 rec)
- * M24M01 (128KB): config 0x000~0xFFF (4KB) + static-leak reserved 0x1000~0x5AFF
- *                 (600 rec x 32B) + history 0x5B00~0x1FFFF (~3367 rec)
+ *                 静态测漏仅 M24M01 支持, AT24C64 无该分区
+ * M24M01 (128KB): config 0x000~0xFFF (4KB)
+ *                 + static-leak 0x1000~0x10FFF (32B头 + 2047 rec x 32B, 64KB)
+ *                 + history     0x11000~0x1FFFF (32B头 + 1919 rec x 32B, 60KB)
+ *
+ * 布局版本记录在配置区 0x4F0 (EE_ADDR_LAYOUT_*, Magic 0xCC):
+ *   布局变更后由 eeprom_layout_check_and_migrate() 主动迁移(格式化旧区+写版本号),
+ *   避免"新地址恰好命中旧 magic"这种概率性误判。
  */
 #define EE_HIST_RECORD_SIZE   32       /* record size = page size */
 
@@ -33,18 +39,22 @@
 #define EE_HIST_END_ADDR      0x1FFF
 #define EE_HIST_MAX_RECORDS   191
 #else   /* M24M01: 128KB full range */
-#define EE_HIST_BASE          0x5B00   /* after config(4KB)+sideleak(600x32B) */
-#define EE_HIST_HEADER_ADDR   0x5B00
-#define EE_HIST_DATA_ADDR     0x5B20
+#define EE_HIST_BASE          0x11000  /* after config(4KB)+sideleak(64KB) */
+#define EE_HIST_HEADER_ADDR   0x11000
+#define EE_HIST_DATA_ADDR     0x11020
 #define EE_HIST_END_ADDR      0x1FFFF
-#define EE_HIST_MAX_RECORDS   3367     /* (0x1FFFF-0x5B20+1)/32 */
+#define EE_HIST_MAX_RECORDS   1919     /* (0x1FFFF-0x11020+1)/32 */
 #endif
 
-/* Static leak reserved region (M24M01 only; feature not implemented yet) */
+/* Static leak region (仅 M24M01; 读写实现见 Middle/leak_store.c)
+ *   管理头 32B @0x1000 + 数据 2047 x 32B @0x1020~0x10FFF */
 #if defined(EEPROM_DRV_M24M01)
-#define EE_SIDELEAK_BASE      0x1000   /* after 4KB config */
-#define EE_SIDELEAK_RECORDS   600
-#define EE_SIDELEAK_SIZE      (EE_SIDELEAK_RECORDS * EE_HIST_RECORD_SIZE)
+#define EE_SIDELEAK_BASE        0x1000   /* after 4KB config */
+#define EE_SIDELEAK_HEADER_ADDR EE_SIDELEAK_BASE
+#define EE_SIDELEAK_DATA_ADDR   (EE_SIDELEAK_BASE + EE_HIST_RECORD_SIZE)
+#define EE_SIDELEAK_RECORDS     2047
+#define EE_SIDELEAK_END_ADDR    0x10FFF
+#define EE_SIDELEAK_SIZE        (EE_SIDELEAK_RECORDS * EE_HIST_RECORD_SIZE)
 #endif
 
 

@@ -4,7 +4,7 @@
  *
  * 架构: MQTT持久连接 + MCU深休眠 + LPUART唤醒接收下发
  *
- * 状态机 (9个状态):
+ * 状态机 (10个状态):
  *   STATE_INIT     → 上电初始化 → MQTT连接+订阅+首次上报 → STATE_SLEEP
  *   STATE_SLEEP    → 设闹钟 → 深休眠 → 模块QSCLK保持MQTT) → STATE_WAKEUP
  *   STATE_WAKEUP   → 恢复外设+判断唤醒源
@@ -16,6 +16,8 @@
  *   STATE_ALARM    → 5次重采确认 → 报警上报 → STATE_SLEEP
  *   STATE_BLE_OTA  → BLE蓝牙固件升级(等待连接→接收数据→写Flash→提交)
  *   STATE_CH4  	→ 激光甲烷传感器采集: 上电→预热(20s)→采集→阈值判断→上报→断电。
+ *   STATE_LEAK 	→ 静态测漏: 平台下发任务→按频率采集(不休眠/传感器不断电)→
+ *                  每5条一包上报→回执3→清空暂存区→补执行阀门指令→回睡。
  */
 
 #include "gd32l23x.h"
@@ -37,9 +39,12 @@
 #include "report.h"
 #include "app_config.h"
 #include "eeprom_config.h"
+#include "config_policy.h"
+#include "calib_mode.h"
 #include "m24m01.h"
 #include "main.h"
 #include "adc_bat.h"
+#include "adc.h"
 #include "soft_i2c.h"
 #include "motor.h"
 #include "sensor_record.h"
@@ -53,12 +58,22 @@
 #include "json_builder.h"
 #include "eeprom_history.h"
 #include "ch4_alarm.h"
+#include "zero_cal.h"
+#include "led.h"
+#include "leak_task.h"
+#include "leak_store.h"
 
 // ==================== 状态机 ====================
 /* AppState_t moved to main.h */
 
 // ==================== 全局变量 ====================
 SensorContext_t g_sensor = { .last_pressure_collect = -1.0f, .last_pressure_realtime = -1.0f, .last_pressure_collect2 = -1.0f, .last_pressure_realtime2 = -1.0f, .prev_online = 1, .offline_cnt = 0, .online_cnt = 0, .prev_online2 = 1, .offline_cnt2 = 0, .online_cnt2 = 0, .last_normal_voltage = 3.6f };
+
+#if CALIB_MODE_ENABLED
+/* 未安装校零期: 不写历史, 只保留最新一条实时记录供周期上报 */
+static SensorRecord_t s_calib_latest;
+static uint8_t s_calib_latest_valid = 0;
+#endif
 
 #define SENSOR_OFFLINE_DEBOUNCE  3   // 连续N次离线才确认状态变化
 #define SENSOR_ONLINE_DEBOUNCE   2   // 连续N次在线才确认状态变化(比离线快)
@@ -70,7 +85,24 @@ volatile uint8_t g_ch4_request = 0;
 uint8_t g_alarm_recover_reported = 0;   // 报警关阀恢复"已上报一次"标志 (RAM, 防重复上报)
 static uint8_t dot_uploaded_mask[3] = {0};
 static uint16_t dot_uploaded_day = 0xFFFF;  // RTC day of uploaded bitmap (cross-day reset)  // dot pattern: uploaded-hour bitmap
-static uint32_t s_last_upload_target = 0xFFFFFFFF;  // 周期上报后延: 本周期已上报的目标秒(当日), 防重
+
+/* ==================== 周期上报: 整点网格 + 标志位式调度 ====================
+ * 上报点 = 绝对分钟轴(upload_interval_min 整数倍, 与采集点同轴, 0 点起算)
+ *          → 固定对齐整点/整周期点(如采集20min+上报2h → 00:00,02:00,04:00...),
+ *            与"上电时刻/上次上报时刻"无关, 不会因重启把相位带偏。
+ * 触发**不依赖时间窗口/目标点**, 只看"待上报标志":
+ *   s_upload_pending      : 1 = 有数据待上报(未确认成功); 只有"上报成功(缓冲清空)"才清零
+ *   s_last_upload_idx     : 上次成功上报的"上报周期序号" = 绝对分钟/上报周期分钟 (持久化, 防重)
+ *   s_pending_due_abs_min : 后延到期(绝对分钟), 只在 pending 时比较
+ * 进入新的上报周期且该周期未上报 → 置 pending; 失败自动重试(标志不清), 成功即清 → 不漏不重。
+ * 命中容差 = 整个上报周期(周期内任意一拍判定都命中), 抗长流程/被抢占/重启补报。
+ * 好处: RTC 校时跳变/窗口外/唤醒被占用都不会造成"永久漏报" */
+static uint8_t  s_upload_pending      = 0;
+static uint32_t s_last_upload_idx     = 0xFFFFFFFFu;
+static uint32_t s_pending_due_abs_min = 0;
+
+/* 上报调度辅助函数 (定义在下方, 但实时循环里已使用, 故前置声明) */
+static uint8_t  upload_due_now(void);
 // valve_alarm_closed / valve_pre_alarm_order / ch4_alarm_closed 定义为 g_* 全局 (EEPROM 持久化, OTA 升级后自动恢复), 见 eeprom_config.h
 uint8_t voltage_low_power = 0;              // 低电压省电模式; 8:00/18:00上报
 uint8_t fourG_user_off = 0;                 // 用户手动关闭4G标志(防止do_wakeup盲目恢复PD9)
@@ -117,10 +149,12 @@ void threshold_alarm_reset_rt(void)
 {
     alarm_state_reset(&s_last_rt_state);
 }
+#if BLE_ENABLED
 static uint32_t g_ble_on_hhmmss = 0;                          // BLE开启时的RTC时间 (HHMMSS), 超过60s未连接超时自动关闭
+#endif
 static uint8_t g_is_minimal_wakeup = 0;            // 标志是否为最小唤醒(纯RTC采集或按键快检状态)
 uint8_t g_need_adc_sampling = 1;                   // 标志当前唤醒是否需要执行电池电压采样
-static uint16_t last_grid_collect_min = 0xFFFF;    // 标志最后一次执行网格采集的分钟序号, 防止同一采集分钟重复上报
+static uint32_t last_grid_collect_abs_min = 0xFFFFFFFF;  // 最后一次网格采集的"绝对分钟"(跨天不误判/不重复)
 #if LASER_CH4_ENABLED
 static uint8_t s_laser_done_hour = 0xFF;           // 激光定时采集: 本小时已触发标志(跨小时自动恢复)
 #endif
@@ -137,6 +171,9 @@ uint8_t  g_lcd_active     = 0;      // LCD当前是否正在显示(运行状态,
 static uint32_t g_lcd_on_hhmmss = 0; // LCD开启时的RTC时间 (HHMMSS格式)
 #define LCD_DISPLAY_TIMEOUT_SEC  60  // LCD无操作显示超时
 
+/* LCD 硬件初始化 (无 LCD 产品为空操作) — 前向声明, 供 install_event_report/main 调用 */
+static void lcd_hw_init(void);
+
 static uint32_t hhmmss_to_seconds(uint32_t hhmmss)
 {
     uint8_t h = (uint8_t)(hhmmss / 10000);
@@ -144,8 +181,437 @@ static uint32_t hhmmss_to_seconds(uint32_t hhmmss)
     uint8_t s = (uint8_t)(hhmmss % 100);
     return (uint32_t)h * 3600 + (uint32_t)m * 60 + s;
 }
+
+/* 有效采集间隔(分钟): 未安装校零期使用 CALIB_SAMPLE_MIN, 其它情况用配置值 */
+static uint16_t sched_collect_min(void)
+{
+#if CALIB_MODE_ENABLED
+    return calib_is_active() ? CALIB_SAMPLE_MIN : g_interval.collect_interval_min;
+#else
+    return g_interval.collect_interval_min;
+#endif
+}
+
+/* ==================== 跨天周期调度 (绝对时间轴) ====================
+ * 到期点 = 绝对分钟轴上的 collect_min 整数倍; 支持 2 天/1 周等 >1 天的周期。 */
+
+/* 当前时刻是否为采集到期点 (同一分钟只算一次) */
+static uint8_t sched_collect_due_now(void)
+{
+    uint16_t cm = sched_collect_min();
+    uint32_t abs_min = sched_abs_min();
+
+    if(cm == 0u) return 1u;
+    if(abs_min == last_grid_collect_abs_min) return 0u;   /* 本分钟已采集过, 防重复 */
+    return ((abs_min % (uint32_t)cm) == 0u) ? 1u : 0u;
+}
+
+/* 下一个采集到期点(绝对分钟) */
+static uint32_t sched_next_collect_abs_min(void)
+{
+    uint16_t cm = sched_collect_min();
+    uint32_t now_abs = sched_abs_min();
+
+    if(cm == 0u) cm = 1u;
+    return ((now_abs / (uint32_t)cm) + 1u) * (uint32_t)cm;
+}
+
+/* 设定下一个采集闹钟: 锚定"到期时刻", 但最多睡 24h
+ * —— 跨天周期在到期日之前每天醒一次判定(非到期点由 do_wakeup 直接回睡) */
+static void sched_set_next_collect_alarm(void)
+{
+    uint32_t now_abs  = sched_abs_min();
+    uint32_t due      = sched_next_collect_abs_min();
+    uint32_t wait_min;
+    uint32_t tod;
+
+    /* 待上报且配了后延: 若后延点早于下一个采集点, 把唤醒提前到后延点(保证后延精度) */
+    if(s_upload_pending && s_pending_due_abs_min > now_abs && s_pending_due_abs_min < due)
+        due = s_pending_due_abs_min;
+
+    wait_min = due - now_abs;
+    if(wait_min > 1440u) wait_min = 1440u;
+    tod = (now_abs + wait_min) % 1440u;
+    rtc_set_alarm_at_hhmmss((tod / 60u) * 10000u + (tod % 60u) * 100u);
+    printf_debug("[SM] RTC collect alarm: in %lumin (abs_due=%lu)\r\n",
+                 (unsigned long)wait_min, (unsigned long)due);
+}
+
+/* 有效实时模式: 未安装校零期禁止秒级实时采集, 只用分钟节拍 */
+static uint8_t real_mode_active(void)
+{
+#if CALIB_MODE_ENABLED
+    return (g_real_enabled && !calib_is_active()) ? 1 : 0;
+#else
+    return g_real_enabled;
+#endif
+}
+
+#if CALIB_MODE_ENABLED
+/* 未安装校零诊断日志: 每个节拍样本打印一条 */
+static void calib_log_sample(float p_raw, float p_cal)
+{
+    CalibStatus_t st;
+    char ts[24];
+
+    calib_get_status(&st);
+    rtc_get_time_str(ts, sizeof(ts));
+    printf_debug("[CALIB] sample %s P_raw=%.0fPa P_cal=%.0fPa zero=%ldPa(%d) "
+                 "warm=%u hi=%u med=%u/%u cnt=%lu\r\n",
+                 ts, p_raw, p_cal, (long)st.zero_pa, st.zero_valid,
+                 st.warm, st.hi, st.med_n, (unsigned)CALIB_MEDIAN_CNT,
+                 (unsigned long)st.samples);
+}
+#endif
+
+#if (CALIB_MODE_ENABLED && LCD_ENABLED)
+/* ==================== 未安装期LCD: 非阻塞短亮 ====================
+ * 单路: 压力页亮5s → 息屏; 双路: 进口压力2s → 出口压力3s → 息屏.
+ * (RTC闹钟秒级分辨, 双路2.5s近似为2s+3s, 合计5s)
+ * 按键/下行事件优先: 按键点亮并允许翻页, 5s无操作再息屏. */
+#define CALIB_LCD_PAGE_SEC       5u
+
+/* 前向声明: LCD开关函数定义在本块之后 */
+static void lcd_activate(void);
+void lcd_shutdown(void);
+
+static uint8_t  s_cal_lcd_wait = 0;       /* 1=有待处理LCD定时事件 */
+static uint8_t  s_cal_lcd_state = 0;      /* 1=AUTO, 3=MANUAL */
+static uint8_t  s_cal_lcd_step = 0;       /* 自动序列当前页序号 */
+static uint32_t s_cal_lcd_deadline = 0;   /* 当日秒 */
+
+static uint32_t calib_lcd_now(void)
+{
+    return hhmmss_to_seconds(rtc_get_hhmmss());
+}
+
+static void calib_lcd_deadline_set(uint16_t sec)
+{
+    s_cal_lcd_deadline = (calib_lcd_now() + sec) % 86400u;
+    s_cal_lcd_wait = 1;
+}
+
+static int32_t calib_lcd_left(void)
+{
+    int32_t d = (int32_t)s_cal_lcd_deadline - (int32_t)calib_lcd_now();
+
+    if(d >= 0)
+        return d;                       /* 未到期 */
+    if(d >= -3600)
+        return 0;                       /* 短时已过期: 立即处理, 不跨天 */
+    return d + 86400;                   /* 跨天: 明天该时刻 */
+}
+
+static void calib_lcd_alarm_set(void)
+{
+    uint32_t t = s_cal_lcd_deadline;
+    rtc_set_alarm_at_hhmmss((t / 3600u) * 10000u + ((t / 60u) % 60u) * 100u + (t % 60u));
+}
+
+static void calib_lcd_refresh(void)
+{
+    lcd_ui_update_data(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
+}
+
+/* 自动序列长度: 单路 压力→温度; 双路 S2压力→S2温度→S1压力→S1温度 */
+static uint8_t calib_lcd_seq_len(void)
+{
+#if LCD_SINGLE_SENSOR
+    return 2u;
+#else
+    return 4u;
+#endif
+}
+
+static void calib_lcd_show_step(uint8_t step)
+{
+#if LCD_SINGLE_SENSOR
+    switch(step)
+    {
+        case 0: lcd_ui_set_page(LCD_PAGE_OUTLET_PRESSURE); break;
+        case 1: lcd_ui_set_page(LCD_PAGE_OUTLET_TEMP);     break;
+        default: break;
+    }
+#else
+    switch(step)
+    {
+        case 0: lcd_ui_set_page(LCD_PAGE_INLET_PRESSURE);  break;
+        case 1: lcd_ui_set_page(LCD_PAGE_INLET_TEMP);      break;
+        case 2: lcd_ui_set_page(LCD_PAGE_OUTLET_PRESSURE); break;
+        case 3: lcd_ui_set_page(LCD_PAGE_OUTLET_TEMP);     break;
+        default: break;
+    }
+#endif
+}
+
+/* 默认页(退出未安装/恢复正常显示时使用) */
+static void calib_lcd_page_a(void)
+{
+#if LCD_SINGLE_SENSOR
+    lcd_ui_set_page(LCD_PAGE_OUTLET_PRESSURE);
+#else
+    lcd_ui_set_page(LCD_PAGE_INLET_PRESSURE);
+#endif
+}
+
+static void calib_lcd_off(void)
+{
+    if(g_lcd_active) lcd_shutdown();
+    s_cal_lcd_wait = 0;
+    s_cal_lcd_state = 0;
+    printf_debug("[CALIB] LCD off (blank)\r\n");
+}
+
+/* 节拍点亮: 自动序列开始 (每页5s; 压力页显示0, 温度页真实值) */
+static void calib_lcd_auto_begin(void)
+{
+    if(!calib_is_active() || !g_lcd_enabled) return;
+    lcd_activate();
+    s_cal_lcd_step = 0;
+    calib_lcd_show_step(0);
+    calib_lcd_refresh();
+    s_cal_lcd_state = 1;
+    calib_lcd_deadline_set(CALIB_LCD_PAGE_SEC);
+    printf_debug("[CALIB] LCD seq start: %u page(s), %us each\r\n",
+                 calib_lcd_seq_len(), CALIB_LCD_PAGE_SEC);
+}
+
+/* LCD定时到期: 自动序列切下一页或息屏; 手动模式到期直接息屏 */
+static void calib_lcd_next_step(void)
+{
+    if(s_cal_lcd_state == 3)                 /* 手动模式: 5s无操作 → 息屏 */
+    {
+        calib_lcd_off();
+        return;
+    }
+
+    s_cal_lcd_step++;
+    if(s_cal_lcd_step >= calib_lcd_seq_len())
+    {
+        calib_lcd_off();
+        return;
+    }
+    calib_lcd_show_step(s_cal_lcd_step);
+    calib_lcd_refresh();
+    calib_lcd_deadline_set(CALIB_LCD_PAGE_SEC);
+    printf_debug("[CALIB] LCD page %u/%u, next in %us\r\n",
+                 s_cal_lcd_step + 1, calib_lcd_seq_len(), CALIB_LCD_PAGE_SEC);
+}
+
+/* 按键等人工事件: 点亮并重置5秒无操作计时 */
+static void calib_lcd_activity(void)
+{
+    if(!calib_is_active() || !g_lcd_enabled) return;
+    lcd_activate();
+    s_cal_lcd_state = 3;                 /* 手动模式: 不再自动切页 */
+    calib_lcd_deadline_set(5u);
+}
+
+/* 锁定/退出未安装: 取消短亮逻辑, 恢复默认页与正常LCD策略 */
+static void calib_lcd_exit_to_normal(void)
+{
+    if(!s_cal_lcd_wait && s_cal_lcd_state == 0) return;
+    s_cal_lcd_wait = 0;
+    s_cal_lcd_state = 0;
+    if(g_lcd_enabled)
+    {
+        lcd_activate();
+        calib_lcd_page_a();
+        calib_lcd_refresh();
+    }
+}
+
+#define CALIB_LCD_BLOCKED()   (calib_is_active())
+#else
+#define CALIB_LCD_BLOCKED()   (0)
+#endif /* CALIB_MODE_ENABLED && LCD_ENABLED */
+
+#if CALIB_MODE_ENABLED
+/* ==================== 安装事件上报 (未安装→已安装 一次性) ====================
+ * 立即尝试一次4G(必要时冷启动), 上报:
+ *   1) 单条传感器记录(双路自动带 temp/temp2/pressure/pressure2)
+ *   2) product-status=1
+ * 失败不重试; 引脚的初始化按 调试串口→GPIO→LPUART→4G→传感器→ADC 顺序处理 */
+void install_event_report(void)
+{
+    PT304D_Data d1, d2;
+    SensorRecord_t rec;
+    float v;
+    uint8_t was_online;
+    uint8_t ok;
+
+    /* 1. 恢复调试串口(休眠后PC4/PC5为Analog) */
+    trea_uart_init();
+    /* 2. 恢复电源/控制引脚(PB13/PB14/PA0/PC3等) */
+    gpio_init();
+    /* 3. 恢复4G LPUART (PD8/PD9) */
+    com_lpuart_init();
+    trea_delay_ms(50);
+
+    /* 4. 4G: 在线则唤醒确认, 断电则冷启动一次; 失败不重试 */
+    was_online = power_4g_is_on();
+    if(was_online)
+    {
+        EC801E_Wakeup();
+        ok = (EC801E_EnsureConnected() == EC_OK);
+    }
+    else
+    {
+        ok = (EC801E_InitAndConnect() == EC_OK);
+    }
+    if(!ok)
+    {
+        if(!was_online) EC801E_PowerOff();
+        printf_debug("[CALIB] install event report: 4G unavailable, skip\r\n");
+#if LCD_ENABLED
+        calib_lcd_exit_to_normal();
+#endif
+        return;
+    }
+
+    /* 5. 现场采集压力/温度 (双路一起采) 与电压 */
+    memset(&d1, 0, sizeof(d1));
+    memset(&d2, 0, sizeof(d2));
+    PT304D_CollectAll((g_sensor_count >= 2) ? &d2 : NULL, &d1);
+    v = adc_bat_read_voltage();
+    if(v < 0.0f) v = g_sensor.last_normal_voltage;
+
+    memset(&rec, 0, sizeof(rec));
+	if(g_sensor_count >= 2)
+	{
+		rec.pressure     = d1.pressure;
+		rec.temperature  = d1.temperature;
+		rec.pressure2    = d2.pressure;
+		rec.temperature2 = d2.temperature;
+		if(d1.pressure<=0) d1.pressure = 0;
+		if(d2.pressure<=0) d2.pressure = 0;
+	}
+	else
+	{
+		rec.pressure     = d1.pressure;
+		rec.temperature  = d1.temperature;
+		if(d1.pressure<=0) d1.pressure = 0;
+	}
+	rec.voltage      = v;
+    rtc_get_time_str(rec.timestamp, sizeof(rec.timestamp));
+
+    /* 6. 上报: 传感器记录 + 安装状态 */
+    EC801E_PublishSingleRecord(&rec);
+    trea_delay_ms(300);
+    report_publish_field("product-status", "1");
+    printf_debug("[CALIB] install event reported: P=%.2f T=%.2f V=%.2f status=1\r\n",
+                 rec.pressure, rec.temperature, rec.voltage);
+
+    /* 7. 收尾: 长连接保持在线 / 短连接断电 */
+    if(was_online) EC801E_SetPSM(1);
+    else
+    {
+        fourG_drain_before_power_off();   /* 断电前必读: 防排队指令随断电丢失 */
+        EC801E_PowerOff();
+    }
+
+    /* 8. LCD: 退出未安装短亮状态, 显示真实压力 (无 LCD 产品为空操作) */
+    lcd_hw_init();
+#if LCD_ENABLED
+    calib_lcd_exit_to_normal();
+#endif
+}
+#else
+void install_event_report(void) { }
+#endif /* CALIB_MODE_ENABLED */
+
+// ==================== 周期上报: 整点网格 + 标志位式调度 ====================
+/* 上报周期序号 = 绝对分钟 / 上报周期分钟 (00:00 起算): 整个上报周期内取值不变
+ *   → 命中容差 = 整个上报周期(周期内任意一拍判定都命中), 抗阀动作等长流程推迟/
+ *     被抢占/重启补报; 跨出周期才等下一个上报点。
+ *   注: 判定与采集节拍解耦(不用采集点序号), 采集周期变化/校零期都不影响上报网格 */
+static uint32_t upload_grid_index(void)
+{
+    uint32_t um = (uint32_t)g_interval.upload_interval_min;
+    if(um == 0u) return 0xFFFFFFFFu;
+    return sched_abs_min() / um;
+}
+
+/* 上报周期起点(绝对分钟): 后延的基准 */
+static uint32_t upload_period_start(void)
+{
+    uint32_t um = (uint32_t)g_interval.upload_interval_min;
+    if(um == 0u) return sched_abs_min();
+    return (sched_abs_min() / um) * um;
+}
+
+/* 采集完成后调用: 进入新的上报周期且该周期未上报 → 置"待上报"标志(并算出到期时刻)
+ *   上报点 = 绝对时间轴上"上报周期"的整数倍(00:00 起算) → 固定整点, 与上电/重启时刻无关 */
+static void upload_pending_update(void)
+{
+    uint32_t idx;
+
+    if(g_interval.upload_interval_min == 0u)
+        return;
+
+    idx = upload_grid_index();
+    if(s_last_upload_idx == 0xFFFFFFFFu)
+    {
+        s_last_upload_idx = idx;         /* 首次上电: 以当前周期为基准, 严格等一个完整周期 */
+        return;
+    }
+    if(idx == s_last_upload_idx)
+        return;                          /* 本周期已成功上报过(防重, 跨重启保持) */
+
+    if(!s_upload_pending)
+    {
+        /* 后延到期时刻 = 本上报周期起点 + 后延:
+         *   1) 单位必须与 sched_abs_min() 一致(绝对分钟) —— 不能乘 60 (那是秒);
+         *   2) 以"周期起点"为基准而非"判定拍": 判定拍被阀动作等长流程推迟时,
+         *      上报时刻仍是"网格点+后延", 不会跟着往后漂; 若该时刻已过则下一拍立即上报;
+         *   3) 唤醒闹钟按分钟设置 → 后延分辨率为 1 分钟 (1.5min 四舍五入为 2min) */
+        s_upload_pending      = 1;
+        s_pending_due_abs_min = upload_period_start()
+                              + (uint32_t)(g_report_delay_min + 0.5f);
+        printf_debug("[SM] UPLOAD pending set (period=%lu um=%umin delay=%.1fmin due=%lu)\r\n",
+                     (unsigned long)idx, (unsigned)g_interval.upload_interval_min,
+                     g_report_delay_min,
+                     (unsigned long)s_pending_due_abs_min);
+    }
+}
+
+/* 是否该执行上报: 只看"待上报标志 + 后延" (与时间窗口/目标点无关) */
+static uint8_t upload_due_now(void)
+{
+    if(!s_upload_pending)
+        return 0;
+    if(sched_abs_min() < s_pending_due_abs_min)
+        return 0;                     /* 后延未到 */
+    return 1;
+}
+
+/* 上报成功(历史缓冲清空)后提交: 清标志 + 记录本周期序号(持久化, 跨重启防重) */
+static void upload_commit(void)
+{
+    if(!s_upload_pending)
+        return;
+    s_upload_pending  = 0;
+    s_last_upload_idx = upload_grid_index();
+    config_save_upload_idx(s_last_upload_idx);
+    printf_debug("[SM] UPLOAD committed (period=%lu)\r\n", (unsigned long)s_last_upload_idx);
+}
+
+/* LCD 硬件初始化: 必须在 rtc_init_all 之后 (LXTAL 已启动)。
+ * 无 LCD 产品 (LCD_ENABLED=0) 为空操作, g_lcd_active 恒为 0。 */
+static void lcd_hw_init(void)
+{
+#if LCD_ENABLED
+    if(!g_lcd_enabled) return;
+    slcd_seg_configuration();
+    lcd_ui_init();
+    g_lcd_active = 1;
+    g_lcd_on_hhmmss = rtc_get_hhmmss();
+#endif
+}
+
 static void lcd_activate(void)
 {
+#if LCD_ENABLED
     if(!g_lcd_enabled) return;
     if(!g_lcd_active)
     {
@@ -154,17 +620,24 @@ static void lcd_activate(void)
     }
     g_lcd_active = 1;
     g_lcd_on_hhmmss = rtc_get_hhmmss();
+#endif
 }
 
 void lcd_shutdown(void)
 {
+#if LCD_ENABLED
     if(!g_lcd_active) return;
     slcd_shutdown();   /* 关闭SLCD并释放引脚 (硬件关屏由BSP实现) */
     g_lcd_active = 0;
+#endif
 }
 
 static void lcd_check_timeout(void)
 {
+#if LCD_ENABLED
+#if CALIB_MODE_ENABLED
+    if(calib_is_active()) return;       /* 未安装期用5s短亮逻辑, 不走正常超时 */
+#endif
 #if LCD_LOCK_ENABLED
     /* LCD锁定模式: 取消60s超时, 改用lcd_shutdown关闭 */
     if(!g_lcd_active) return;
@@ -181,6 +654,7 @@ static void lcd_check_timeout(void)
     /* LCD常亮模式: 不做超时, 保持常开 */
     (void)0;
 #endif
+#endif /* LCD_ENABLED */
 }
 
 // 传感器在线/离线消抖状态机 (进气端raw + 出气端raw2 共用; do_collect/do_realtime_check 复用)
@@ -273,9 +747,9 @@ static void sys_init(void)
 
     gpio_init();
 
-    // PC0(V4G_EN 4G电源) 默认低电平: power_gpio_init 后 ODR=0 即 PC0=LOW
+    // PB13(V4G_EN) 上电默认断电: power_gpio_init 内 power_4g_apply_state() 已拉低
     // 若4G 需保持在线(long模式+活动窗口), 则在此处补一次上电, 避免 1s+ 的延时导致4G 复位
-    // 弱信号模式: 4G已断电, 无需恢复PC0
+    // 弱信号模式: 4G已断电, 无需恢复
     if(!voltage_low_power && !fourG_user_off && !fourG_init_failed && !fourG_weak_signal &&
        strcmp(g_window.pattern, "long") == 0 &&
        (config_is_active_window() || g_window.end_result == 1))
@@ -284,7 +758,7 @@ static void sys_init(void)
     motor_init(MOTOR_ENABLED);
     soft_i2c_sensors_init();
     adc_bat_init();
-    // PC0 (V4G_EN 4G电源) 状态由上层业务逻辑控制，此处不再重复操作
+    // PB13 (V4G_EN 4G电源) 状态由上层业务逻辑控制，此处不再重复操作
     // PA5 (M_SLP 电机使能) 由 valve_execute() 内部控制，此处不做提前处理
     // PD4 (I2C 传感器接口) 默认保持 LOW; 由采集点按需 set/reset
 
@@ -293,6 +767,7 @@ static void sys_init(void)
 
 // ==================== 前向声明 ====================
 static void ensure_full_init(void);
+static void fourG_drain_before_power_off(void);   /* 断电前必读下行(定义在 4G 电源管理段) */
 
 // ==================== LCD信号强度更新 (仅在线时调用, 同时上报给平台) ====================
 static void lcd_update_csq(void)
@@ -334,7 +809,7 @@ static int fourG_ensure_ready(int *p_was_online)
 
     if(was_online)
     {
-//        EC801E_Wakeup();
+        EC801E_Wakeup();
         return (EC801E_EnsureConnected() == EC_OK);
     }
     else
@@ -346,11 +821,42 @@ static int fourG_ensure_ready(int *p_was_online)
         {
             fourG_init_failed = 0;
             EC801E_SetPSM(0);
+            ri_exti_init();   /* 冷启动这一路此前 RI 未布防 → 本周期到达的下行脉冲可锁存 */
 //            trea_delay_ms(300);
 //            report_4g_power_state(1);
         }
         return ok;
     }
+}
+
+// ==================== 弱信号检测 (单次 CSQ 查询) ====================
+/* 单次探测: 返回 1 = 本次信号"不好"; *out_csq 输出本次值(查询失败记 0xFF)
+ * 注: 曾用过"两次确认"(第一次不好时延时 1s 再读一次, 两次都不好才断电),
+ *     现按现场要求退回单次判定 —— 每次判定只发一条 AT+CSQ, 无额外延时。 */
+static uint8_t fourG_csq_probe_bad(uint8_t *out_csq)
+{
+    char csq_buf[8] = {0};
+
+    if(EC801E_QueryCSQ(csq_buf, sizeof(csq_buf)) != EC_OK)
+    {
+        *out_csq = 0xFF;
+        return 1;
+    }
+    *out_csq = (uint8_t)atoi(csq_buf);
+    return (*out_csq < CSQ_WEAK_THRESHOLD || *out_csq == 99) ? 1 : 0;
+}
+
+/* 断电前必读下行: 模块 QMTRECV 缓冲在模块 RAM 里, 断电即消失 → "临时连一次就断电"的
+ * 业务路径必须在断电前把已缓存的平台指令读出来, 否则指令永久丢失(QoS0 平台不补发)。 */
+static void fourG_drain_before_power_off(void)
+{
+    uint8_t n;
+
+    if(!power_4g_is_on())
+        return;                     /* 已断电: 无缓冲可读 */
+
+    n = drain_pending_downlink();
+    printf_debug("[SM] PWR-OFF drain: %d msg(s)\r\n", n);
 }
 
 // 恢复4G到休眠状态:
@@ -366,26 +872,24 @@ static void fourG_restore(int was_online, int success)
     }
     if(was_online)
     {
-        // long模式: 根据信号强度决定是否保持在线
+        // long模式: 根据信号强度决定是否保持在线 (单次 CSQ 查询)
         if(strcmp(g_window.pattern, "long") == 0)
         {
-            char csq_buf[8] = {0};
-            if(EC801E_QueryCSQ(csq_buf, sizeof(csq_buf)) == EC_OK)
+            uint8_t csq_val = 0;
+
+            if(fourG_csq_probe_bad(&csq_val))
             {
-                uint8_t csq_val = (uint8_t)atoi(csq_buf);
-                if(csq_val < CSQ_WEAK_THRESHOLD || csq_val == 99)
-                {
-                    printf_debug("[SM] CSQ=%d weak, power off 4G\r\n", csq_val);
-                    fourG_weak_signal = 1;
+                printf_debug("[SM] CSQ weak, power off 4G\r\n");
+                fourG_weak_signal = 1;
 //                    report_4g_power_state(0);
-                    EC801E_PowerOff();
-                    return;
-                }
-                else if(fourG_weak_signal)
-                {
-                    printf_debug("[SM] CSQ=%d recovered, restoring long mode\r\n", csq_val);
-                    fourG_weak_signal = 0;
-                }
+                fourG_drain_before_power_off();   /* 断电前必读: 防排队指令随断电丢失 */
+                EC801E_PowerOff();
+                return;
+            }
+            if(fourG_weak_signal)
+            {
+                printf_debug("[SM] CSQ=%d recovered, restoring long mode\r\n", csq_val);
+                fourG_weak_signal = 0;
             }
         }
         EC801E_SetPSM(1);
@@ -395,23 +899,21 @@ static void fourG_restore(int was_online, int success)
         // 之前断电(冷启动): 判断是否为弱信号恢复路径
         if(fourG_weak_signal && strcmp(g_window.pattern, "long") == 0)
         {
-            // 弱信号断电后重新检查信号是否恢复
-            char csq_buf[8] = {0};
-            if(EC801E_QueryCSQ(csq_buf, sizeof(csq_buf)) == EC_OK)
+            uint8_t csq_val = 0;
+
+            /* 弱信号断电后重新检查信号是否恢复: 单次查询正常即算恢复 */
+            if(!fourG_csq_probe_bad(&csq_val))
             {
-                uint8_t csq_val = (uint8_t)atoi(csq_buf);
-                if(csq_val >= CSQ_WEAK_THRESHOLD && csq_val != 99)
-                {
-                    printf_debug("[SM] CSQ=%d recovered (was weak), keep 4G online\r\n", csq_val);
-                    fourG_weak_signal = 0;
-                    EC801E_SetPSM(1);
-                    return;
-                }
+                printf_debug("[SM] CSQ=%d recovered (was weak), keep 4G online\r\n", csq_val);
+                fourG_weak_signal = 0;
+                EC801E_SetPSM(1);
+                return;
             }
             // 否则: 断电
             printf_debug("[SM] Still weak signal, power off\r\n");
         }
 //        report_4g_power_state(0);
+        fourG_drain_before_power_off();   /* 断电前必读: 防排队指令随断电丢失 */
         EC801E_PowerOff();
     }
 }
@@ -421,29 +923,20 @@ static void fourG_restore(int was_online, int success)
 // 返回: 1=信号OK(调用方应SetPSM), 0=信号弱(内部已断电)
 static int fourG_signal_check_and_decide(void)
 {
+    uint8_t csq_val = 0;
+
     if(strcmp(g_window.pattern, "long") != 0)
         return 1;  // 非long模式不适用该逻辑
 
-    char csq_buf[8] = {0};
-    if(EC801E_QueryCSQ(csq_buf, sizeof(csq_buf)) != EC_OK)
+    /* 单次 CSQ 查询: 不好即判弱信号断电 */
+    if(fourG_csq_probe_bad(&csq_val))
     {
-        // 查询失败按弱信号处理
-        printf_debug("[SM] CSQ query failed, power off 4G\r\n");
+        if(csq_val == 0xFF) printf_debug("[SM] CSQ query failed, 4G power off\r\n");
+        else                printf_debug("[SM] CSQ=%d < %d, 4G power off (weak signal)\r\n",
+                                         csq_val, CSQ_WEAK_THRESHOLD);
         fourG_weak_signal = 1;
 //        report_4g_power_state(0);
-        EC801E_PowerOff();
-        return 0;
-    }
-
-    uint8_t csq_val = (uint8_t)atoi(csq_buf);
-    if(csq_val < CSQ_WEAK_THRESHOLD || csq_val == 99)
-
-    {
-
-        printf_debug("[SM] CSQ=%d < %d, 4G power off (weak signal)\r\n", csq_val, CSQ_WEAK_THRESHOLD);
-
-        fourG_weak_signal = 1;
-//        report_4g_power_state(0);
+        fourG_drain_before_power_off();   /* 断电前必读: do_upload/do_downlink 收尾也会走到这里 */
         EC801E_PowerOff();
         return 0;
     }
@@ -494,7 +987,7 @@ const char* alarm_try_close_valve_all(const char *policy_str, ThresholdResult_t 
     /* 仅按异常关阀策略判定; 电压类报警(VPROTECT/VOLT_HIGH/VOLT_LOW)只上报不动阀 */
     if (abnormal_should_close_valve(policy, result) && !g_valve_alarm_closed)
     {
-        g_valve_pre_alarm_order = g_valve_last_order;
+        g_valve_pre_alarm_order = g_valve_pos_state;   /* 记录"关阀前的物理状态"(非用户指令) */
 
         printf_debug("[SM] Auto-close valve (policy=%s, result=%d, pre=%d)\r\n",
                      policy_str, result, g_valve_pre_alarm_order);
@@ -502,6 +995,9 @@ const char* alarm_try_close_valve_all(const char *policy_str, ThresholdResult_t 
         soft_i2c_sensors_init();
         motor_init(MOTOR_ENABLED);
 
+        /* update_last_order=0: 异常关阀是"设备自动安全动作", 不改变用户的最后指令
+         * (平台看到的 valve-last-order 仍保持用户最后一次下发值);
+         * 阀门物理位置由 valve 模块内部记录到 g_valve_pos_state。 */
         const char *vr = valve_execute("close", 0);
 
         g_valve_alarm_closed     = 1;
@@ -584,6 +1080,7 @@ const char* ch4_alarm_try_close_valve(void)
     printf_debug("[SM] CH4 auto-close valve (abnormal3=1)\r\n");
     soft_i2c_sensors_init();
     motor_init(MOTOR_ENABLED);
+    /* update_last_order=0: 激光甲烷报警关阀同样是自动安全动作, 不改用户最后指令 */
     const char *vr = valve_execute("close", 0);
     config_save_ext();   // 关阀动作结束后再持久化标志: 中途掉电则重启后重新关阀, 避免半开状态被当作已关
     return vr;
@@ -618,7 +1115,7 @@ static void user_mqtt_try_publish(void)
 }
 
 // ==================== 状态上报汇总模块 ====================
-// 上报实测值+状态 (temp/pressure/temp_status/pressure_status [+第二路])
+// 上报实测值+状态 (temp/pressure/temp-status/pressure-status [+第二路])
 // last_p1/last_p2: 上次压力值(用于突变判断)
 static void publish_all_status(float last_p1, float last_p2)
 {
@@ -627,7 +1124,7 @@ static void publish_all_status(float last_p1, float last_p2)
 
 // ==================== 定时阀: 执行+上报(最高优先级) ====================
 // action: "open" 或 "close"
-// 执行阀门动作, 通过4G上报 valve_control + valve_last_order, 恢复PSM
+// 执行阀门动作, 通过4G上报 valve-control + valve-last-order, 恢复PSM
 static void vtiming_execute_and_report(const char *action);   /* forward */
 /* timing valve immediate check: run during upload/blocking as fallback;
  * executes when within +-30s window and not yet done today */
@@ -691,7 +1188,7 @@ static uint32_t vtiming_next_wait(const char *t, const RtcDateTime_t *now)
 
 /* timing valve immediate check: run during upload/blocking as fallback;
  * executes when date matches (wildcard) and within tolerance */
-static void vtiming_check_now(void)
+void vtiming_check_now(void)
 {
     RtcDateTime_t dt;
 
@@ -757,7 +1254,7 @@ static void realtime_enter_sleep(void)
 {
     uint8_t lpuart_enabled = 0;
 
-    sensor_pwr_off();   /* 常供电板型空实现 (PC3 归 ADC 基准) */
+    sensor_pwr_off();   /* 传感器 IIC 断电 (PC3=LOW), 采集时由 PT304D 上电 */
     rtc_alarm_wakeup_init();
     rtc_set_next_alarm_sec(g_real_frequency);
     g_timing_alarm_set = 0;   /* realtime alarm, timing handled per-cycle */
@@ -767,7 +1264,7 @@ static void realtime_enter_sleep(void)
        strcmp(g_window.pattern, "long") == 0 &&
        (config_is_active_window() || g_window.end_result == 1))
     {
-        power_4g_set(1);   /* 深睡期间由 MCU 保持 V4G_EN(PC0) HIGH */
+        power_4g_set(1);   /* 深睡期间由 MCU 保持 V4G_EN(PB13) 高阻, 外部上拉维持供电 */
         com_lpuart_init();
         lpuart_wakeup_init();
         ri_exti_init();
@@ -775,10 +1272,12 @@ static void realtime_enter_sleep(void)
     }
 
     button_exti_init();
+#if BLE_ENABLED
     if(g_bt_on) ble_exti_init();
+#endif
     lpuart_dma_rx_disable();
     {
-        PmSleepCfg_t sc = { lpuart_enabled, g_lcd_active, g_bt_on };
+        PmSleepCfg_t sc = { lpuart_enabled, g_lcd_active, 0 };   /* bt_on 恒 0: 本产品无蓝牙 */
         enter_deepsleep_mode(&sc);
     }
 }
@@ -801,6 +1300,10 @@ static void do_realtime_check(void)
     // 软件看门狗: 实时采集路径由 do_sleep 循环直接调用(非主循环入口), 需自行使能
     // SysTick 由 system_wakeup_reinit 重新启动; 休眠时 enter_deepsleep_mode 会关闭
     swdt_enable(SWDT_TIMEOUT_MS);
+
+    /* 状态灯: 实时循环(1~10s/次)不经过主循环, 在此处理三灯提示到期并刷新状态 */
+    led_notice_expired_check();
+    led_status_refresh();
 
     // === 采集 (双通道, 不采ADC; PD4/IIC 由 CollectAll 内部处理) ===
     PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
@@ -887,7 +1390,7 @@ static void do_realtime_check(void)
                 int ec_ok = fourG_ensure_ready(&was_online);
                 if(ec_ok)
                 {
-                    motor_limit_init();   /* 深休眠后 PA11/PA12 为 Analog, 读限位前恢复输入 */
+                    motor_pos_init();     /* 深休眠后到位检测引脚为 Analog, 读取/驱动前恢复 */
                     EC801E_PublishValveStatus(valve_get_status(), g_valve_last_order);
                     report_publish_ly06(0, g_sensor.last_normal_voltage);
                     publish_all_status(g_sensor.last_pressure_realtime, g_sensor.last_pressure_realtime2);
@@ -1028,9 +1531,13 @@ static void do_sleep(void)
 {
     int fourG_keep_on = 0;
 
+#if (CALIB_MODE_ENABLED && LCD_ENABLED)
+    if(!calib_is_active())
+        calib_lcd_exit_to_normal();     /* 已锁定: 取消未安装期LCD短亮状态 */
+#endif
 
     motor_sleep_disable();   /* M_SLP(PA5) 拉低: 电机禁用 */
-    sensor_pwr_off();   /* 常供电板型空实现 (PC3 归 ADC 基准) */
+    sensor_pwr_off();   /* 传感器 IIC 断电 (PC3=LOW); 注意: 深睡眠期间 PC3 由 gpio_enter_low_power 保持低电平 */
 
     gpio_bit_reset(GPIOA, GPIO_PIN_2);
     gpio_bit_reset(GPIOA, GPIO_PIN_3);
@@ -1046,8 +1553,40 @@ static void do_sleep(void)
     gpio_bit_reset(GPIOA, GPIO_PIN_7);
 #endif
 
-    // 4G电源控制: 根据window pattern决定PC0(V4G_EN)状态
+    // 4G电源控制: 根据window pattern决定V4G_EN(PB13)状态
     // 低电压省电模式: 强制4G断电
+
+    /* 大睡收口: RI 只在"平台新下发"时脉冲, 读历史缓存不会再脉冲 → 留下的指令不会自愈。
+     * 常态 ri_wakeup_flag=0 → 一次 AT 都不发, 不影响功耗。 */
+    if(ri_wakeup_flag)
+    {
+        ri_wakeup_flag = 0;      /* 先消费: 后面 ri_exti_init()/enter_deepsleep_mode() 都会清标志 */
+        if(power_4g_is_on())
+        {
+            uint8_t drained;
+
+            printf_debug("[SM] SLEEP: RI pending, drain before sleep\r\n");
+            ensure_full_init();
+            com_lpuart_init();
+            trea_delay_ms(100);
+            gpio_init();
+
+            drained = drain_pending_downlink();
+            if(ri_wakeup_flag)
+            {
+                ri_wakeup_flag = 0;
+                drained += drain_pending_downlink();
+            }
+            printf_debug("[SM] SLEEP: drained %d msg(s)\r\n", drained);
+
+            EC801E_SetPSM(1);    /* 补读把 DTR 拉低了: 必须恢复 QSCLK, 否则模块整夜不睡 */
+        }
+        else
+        {
+            printf_debug("[SM] SLEEP: RI pending but 4G off, skip\r\n");
+        }
+    }
+
     if(voltage_low_power)
     {
         power_4g_set(0);
@@ -1058,7 +1597,7 @@ static void do_sleep(void)
         if(!fourG_user_off && !fourG_init_failed && !fourG_weak_signal && (config_is_active_window() || g_window.end_result == 1))
         {
             fourG_keep_on = 1;
-            power_4g_set(1);   /* 显式保持 V4G_EN(PC0) HIGH: 深睡期间由 MCU 维持模块供电 */
+            power_4g_set(1);   /* 显式保持 V4G_EN(PB13) 高阻: 深睡期间外部上拉维持模块供电 */
             power_4g_dtr_set(1);   /* DTR HIGH: 允许模块进入轻休眠 (深睡时 PA0 保持输出) */
         }
         else
@@ -1073,7 +1612,7 @@ static void do_sleep(void)
 #if LCD_LOCK_ENABLED
     // === LCD 超时关闭: LCD处于显示时, 先短睡, 60秒超时后再关闭 ===
     // 实时模式(1-10s频率): do_realtime_check + lcd_check_timeout() 会处理, 此处跳过
-    if(g_lcd_active && !g_real_enabled)
+    if(g_lcd_active && !real_mode_active() && !CALIB_LCD_BLOCKED())
     {
         uint32_t now_sec = hhmmss_to_seconds(rtc_get_hhmmss());
         uint32_t on_sec  = hhmmss_to_seconds(g_lcd_on_hhmmss);
@@ -1090,14 +1629,16 @@ static void do_sleep(void)
             rtc_set_next_alarm_sec((uint8_t)remain);
             g_timing_alarm_set = 0;   /* LCD timeout sleep: normal alarm */
             button_exti_init();
+#if BLE_ENABLED
             if(g_bt_on) ble_exti_init();
+#endif
             if(fourG_keep_on) { com_lpuart_init(); lpuart_wakeup_init(); ri_exti_init(); }
             lpuart_dma_rx_disable();
 
             printf_debug("[SM] LCD timeout sleep %ds\r\n", (int)remain);
             trea_delay_ms(20);
             {
-                PmSleepCfg_t sc = { (uint8_t)fourG_keep_on, g_lcd_active, g_bt_on };
+                PmSleepCfg_t sc = { (uint8_t)fourG_keep_on, g_lcd_active, 0 };
                 enter_deepsleep_mode(&sc);
             }
 
@@ -1123,7 +1664,7 @@ static void do_sleep(void)
         uint8_t use_valve_alarm = 0;
         uint32_t valve_wait_sec = 0xFFFFFFFF;
 
-        if((g_valve_timing.on_switch || g_valve_timing.off_switch) && !g_real_enabled)
+        if((g_valve_timing.on_switch || g_valve_timing.off_switch) && !real_mode_active())
         {
             RtcDateTime_t dt;
             rtc_get_datetime(&dt);
@@ -1140,7 +1681,7 @@ static void do_sleep(void)
             }
 
             // 阀门事件更早: 可等待到目标时间, 直接设定秒级闹钟
-            uint32_t collect_sec = (uint32_t)g_interval.collect_interval_min * 60;
+            uint32_t collect_sec = (uint32_t)sched_collect_min() * 60;
             if(valve_wait_sec < collect_sec && valve_wait_sec < 0xFFFFFFFF)
             {
                 // 计算目标绝对时间(可能跨天), 换算为HHMMSS
@@ -1157,46 +1698,58 @@ static void do_sleep(void)
 
         if(!use_valve_alarm)
         {
-            /* 周期上报后延: 非实时模式下, 若本周期后延上报目标比采集点更近,
-             * 用秒级绝对闹钟精确唤醒 (复用定时阀门模式) */
-            if(!g_real_enabled && !voltage_low_power &&
-               strcmp(g_window.pattern, "dot") != 0 && g_report_delay_min > 0.0f)
-            {
-                uint32_t interval_sec = (uint32_t)g_interval.upload_interval_min * 60u;
-                if(interval_sec > 0)
-                {
-                    RtcDateTime_t dt;
-                    uint32_t cur_sec, delay_sec, target, wait_sec, collect_sec;
-                    uint32_t t_abs, target_hhmmss;
-                    rtc_get_datetime(&dt);
-                    cur_sec = ((uint32_t)dt.hour * 60 + dt.minute) * 60 + dt.second;
-                    delay_sec = (uint32_t)(g_report_delay_min * 60.0f);
-                    target = ((cur_sec / interval_sec) * interval_sec +
-                              (delay_sec % interval_sec)) % 86400u;
-                    if(target <= cur_sec)
-                        target = (target + interval_sec) % 86400u;   /* 下一个未来目标 */
-                    wait_sec = (target >= cur_sec) ? (target - cur_sec)
-                                                   : (86400u - cur_sec + target);
-                    collect_sec = (uint32_t)g_interval.collect_interval_min * 60u;
-                    if(wait_sec < collect_sec)
-                    {
-                        t_abs = (cur_sec + wait_sec) % 86400u;
-                        target_hhmmss = (t_abs / 3600) * 10000
-                                      + ((t_abs / 60) % 60) * 100 + (t_abs % 60);
-                        rtc_set_alarm_at_hhmmss(target_hhmmss);
-                        g_timing_alarm_set = 0;
-                        use_valve_alarm = 1;
-                        printf_debug("[SM] RTC alarm: delayed upload at %02u:%02u:%02u (in %us)\r\n",
-                                     t_abs / 3600, (t_abs / 60) % 60, t_abs % 60, wait_sec);
-                    }
-                }
-            }
-
-            if(g_real_enabled)
+            /* 注: 后延点唤醒由 sched_set_next_collect_alarm() 统一并入(见该函数内
+             * s_pending_due_abs_min 提前量), 这里不再单独设秒级闹钟 */
+            if(real_mode_active())
                 rtc_set_next_alarm_sec(g_real_frequency);
             else
-                rtc_set_next_alarm(g_interval.collect_interval_min);
+                sched_set_next_collect_alarm();   /* 绝对轴: 跨天周期锚定到期时刻(最多提前1天判定) */
             g_timing_alarm_set = 0;   /* normal collect alarm */
+        }
+
+#if (CALIB_MODE_ENABLED && LCD_ENABLED)
+        /* 未安装期LCD截止事件: 若比阀门/后延闹钟更近, 用秒级闹钟覆盖 */
+        if(calib_is_active() && s_cal_lcd_wait)
+        {
+            int32_t left = calib_lcd_left();
+            if(left <= 0)
+                calib_lcd_next_step();          /* 已过期: 立即切页/息屏 */
+            if(s_cal_lcd_wait)
+            {
+                left = calib_lcd_left();
+                if(!use_valve_alarm ||
+                   (valve_wait_sec != 0xFFFFFFFFu && (uint32_t)left < valve_wait_sec))
+                {
+                    calib_lcd_alarm_set();
+                    g_timing_alarm_set = 0;
+                    use_valve_alarm = 1;        /* 防止被后续collect闹钟覆盖 */
+                }
+            }
+        }
+#endif
+
+        /* 注: 状态灯为长亮, 已无"短亮截止"闹钟事件 */
+
+        /* 三灯"按键有效"提示截止事件: 若比阀门/后延/采集闹钟更近, 用秒级闹钟覆盖 */
+        {
+            uint32_t led_notice_alarm = 0;
+
+            if(led_notice_alarm_hhmmss(&led_notice_alarm))
+            {
+                int32_t led_notice_left = led_notice_left_sec();
+
+                if(led_notice_left <= 0)
+                {
+                    led_notice_end();           /* 已过期: 立即熄灭 */
+                }
+                else if(!use_valve_alarm ||
+                        (valve_wait_sec != 0xFFFFFFFFu && (uint32_t)led_notice_left < valve_wait_sec))
+                {
+                    rtc_set_alarm_at_hhmmss(led_notice_alarm);
+                    g_timing_alarm_set = 0;
+                    use_valve_alarm = 1;        /* 防止被后续 collect 闹钟覆盖 */
+                }
+            }
         }
     }
 
@@ -1208,7 +1761,7 @@ static void do_sleep(void)
         ri_exti_init();
     }
 
-    // PA12按键唤醒: 始终使能(可手动唤醒4G)
+    // PA4(Btn1)按键唤醒: 始终使能(可手动唤醒4G)
     button_exti_init();
 
     // BLE连接事件未触发(与按键同时到达), 回到WAKEUP处理
@@ -1219,6 +1772,7 @@ static void do_sleep(void)
     }
 
     // BLE超时: 超过60s未连接超时, 未超时则使用PD2 EXTI等待
+#if BLE_ENABLED
     if(g_bt_on)
     {
         uint32_t now_sec = hhmmss_to_seconds(rtc_get_hhmmss());
@@ -1236,27 +1790,74 @@ static void do_sleep(void)
             ble_exti_init();
         }
     }
+#endif /* BLE_ENABLED */
 
     // 关闭接收DMA(休眠期间DMA时钟被关闭, 唤醒后重新配置)
     lpuart_dma_rx_disable();
 
-    if(g_real_enabled)
-        printf_debug("[SM] SLEEP %ds-RT (buf=%d 4G=%s BLE=%d)\r\n",
+    if(real_mode_active())
+        printf_debug("[SM] SLEEP %ds-RT (buf=%d 4G=%s)\r\n",
                      g_real_frequency, ee_hist_count(),
-                     fourG_keep_on ? "ON" : "OFF", g_bt_on);
+                     fourG_keep_on ? "ON" : "OFF");
     else
-        printf_debug("[SM] SLEEP %dmin (buf=%d 4G=%s BLE=%d)\r\n",
-                     g_interval.collect_interval_min, ee_hist_count(),
-                     fourG_keep_on ? "ON" : "OFF", g_bt_on);
+        printf_debug("[SM] SLEEP %dmin (buf=%d 4G=%s)\r\n",
+                     sched_collect_min(), ee_hist_count(),
+                     fourG_keep_on ? "ON" : "OFF");
     trea_delay_ms(20);
 
     {
-        PmSleepCfg_t sc = { (uint8_t)fourG_keep_on, g_lcd_active, g_bt_on };
+        PmSleepCfg_t sc = { (uint8_t)fourG_keep_on, g_lcd_active, 0 };
         enter_deepsleep_mode(&sc);
     }
 
+    /* 注: 状态灯为长亮, 深睡期间由引脚电平维持, 无需"熄灭闹钟"事件 */
+
+    /* 三灯"按键有效"提示到期唤醒: 熄灭后继续睡, 不进入采集流程 */
+    if(led_notice_active() && rtc_alarm_flag &&
+       !counter0 && !ri_wakeup_flag && !button_wakeup_flag && !ble_connect_wakeup_flag)
+    {
+        if(led_notice_left_sec() <= 0)
+        {
+            system_wakeup_reinit();
+            led_notice_end();               /* 熄灭三灯, 回到"按状态长亮" */
+            rtc_alarm_flag = 0;             /* 消费该唤醒, 不计为一次采集 */
+            app_state = STATE_SLEEP;        /* 回睡: do_sleep 重新计算真实闹钟 */
+            return;
+        }
+    }
+
+#if (CALIB_MODE_ENABLED && LCD_ENABLED)
+    /* 未安装期LCD定时事件(非阻塞): 到期唤醒切页/息屏, 不采样 */
+    while(calib_is_active() && s_cal_lcd_wait &&
+          rtc_alarm_flag && !counter0 && !ri_wakeup_flag && !button_wakeup_flag && !ble_connect_wakeup_flag)
+    {
+        if(calib_lcd_left() > 0)
+            break;                              /* 非LCD事件(阀门/后延等): 交回正常流程 */
+
+        system_wakeup_reinit();
+        trea_uart_init();
+        calib_lcd_next_step();
+        rtc_alarm_flag = 0;                     /* 消费LCD定时唤醒 */
+
+        if(!calib_is_active() || !s_cal_lcd_wait)
+            break;                              /* 息屏完成 */
+
+        calib_lcd_alarm_set();
+        {
+            PmSleepCfg_t sc2 = { (uint8_t)fourG_keep_on, g_lcd_active, g_bt_on };
+            enter_deepsleep_mode(&sc2);
+        }
+    }
+    if(calib_is_active() && !s_cal_lcd_wait &&
+       !rtc_alarm_flag && !counter0 && !ri_wakeup_flag && !button_wakeup_flag && !ble_connect_wakeup_flag)
+    {
+        app_state = STATE_SLEEP;                /* 息屏完成: 直接回睡, 避免误入采集 */
+        return;
+    }
+#endif
+
     // 实时采集循环: RTC秒级唤醒 → 判断是否到采集分钟 → 否则最小实时采集→睡
-    while(g_real_enabled && rtc_alarm_flag && !counter0 && !ri_wakeup_flag && !button_wakeup_flag && !ble_connect_wakeup_flag)
+    while(real_mode_active() && rtc_alarm_flag && !counter0 && !ri_wakeup_flag && !button_wakeup_flag && !ble_connect_wakeup_flag)
     {
         // 最小时钟恢复 → 查RTC中断是否到达网格采集时刻
         system_wakeup_reinit();
@@ -1264,37 +1865,23 @@ static void do_sleep(void)
 
         {
             uint32_t now_hhmmss = rtc_get_hhmmss();
-            uint16_t cur_min = (uint16_t)(now_hhmmss / 10000) * 60
-                             + (uint16_t)((now_hhmmss / 100) % 100);
             uint8_t cur_sec = (uint8_t)(now_hhmmss % 100);
+            uint32_t abs_min = sched_abs_min();
 
-            // 网格采集时刻到 (分钟+5s容差, 且当前分钟未执行过采集 → 退出循环, 转入STATE_WAKEUP
-            if(g_interval.collect_interval_min > 0 &&
-               (cur_min % g_interval.collect_interval_min) == 0 &&
+            // 网格采集时刻到 (绝对分钟对齐 + 5s 容差, 且当前分钟未执行过采集 → 转 STATE_WAKEUP)
+            if(sched_collect_min() > 0 &&
+               (abs_min % (uint32_t)sched_collect_min()) == 0 &&
                cur_sec < 6 &&
-               cur_min != last_grid_collect_min)
+               abs_min != last_grid_collect_abs_min)
                 break;
 
-            // 周期上报后延: 实时模式下本周期后延目标已过且未上报 → 退出循环转上报
-            // (上传判断只在采集分钟执行, 此处补实时路径, 保证后延点准时触发)
-            if(g_report_delay_min > 0.0f)
+            // 待上报(进入新的上报周期且到期时刻已到) → 退出实时循环转上报(不采集)
+            if(upload_due_now())
             {
-                uint32_t interval_sec = (uint32_t)g_interval.upload_interval_min * 60u;
-                if(interval_sec > 0)
-                {
-                    uint32_t delay_sec = (uint32_t)(g_report_delay_min * 60.0f);
-                    uint32_t cur_total_sec = (now_hhmmss / 10000) * 3600u
-                                           + ((now_hhmmss / 100) % 100) * 60u
-                                           + (now_hhmmss % 100);
-                    uint32_t target = ((cur_total_sec / interval_sec) * interval_sec +
-                                       (delay_sec % interval_sec)) % 86400u;
-                    /* 仅当前周期目标已过且未上报才转上报 (首周期严格等到延后点) */
-                    if(target <= cur_total_sec && target != s_last_upload_target)
-                    {
-                        printf_debug("[SM] RT delayed upload due, break to upload\r\n");
-                        break;
-                    }
-                }
+                printf_debug("[SM] RT upload due, break to upload\r\n");
+                ensure_full_init();          /* 最小唤醒时升级(上报需 EEPROM/4G) */
+                app_state = STATE_UPLOAD;
+                return;
             }
 
             // ---- 实时模式下的定时阀门检查 ----
@@ -1356,6 +1943,19 @@ static void do_sleep(void)
     app_state = STATE_WAKEUP;
 }
 
+#if BLE_ENABLED
+/* ==================== 蓝牙电源开关 ====================
+ * 切换 BLE 电源 (g_bt_on 由 power_ble_set 内部同步); 有 LCD 时同步蓝牙图标。 */
+static void ble_power_toggle(void)
+{
+    power_ble_set(g_bt_on ? 0 : 1);
+#if LCD_ENABLED
+    if(g_lcd_active) slcd_seg_icon_display(SLCD_ICON_LY, g_bt_on ? SET : RESET);
+#endif
+}
+#endif /* BLE_ENABLED */
+
+#if 0   /* ===== 旧按键功能: 双击手动上报, 已停用 (按键现仅用于零点校准手势) ===== */
 // ==================== 按键短按流程处理模块 ====================
 // 按键短按 PA12小于1秒释放时触发：打印配置、采集实时数据并上报，同时等待 4G 平台下发返回状态
 static void do_button_short_press(void)
@@ -1402,7 +2002,7 @@ static void do_button_short_press(void)
         {
             char v_order[4];
             snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
-            EC801E_PublishResponse("valve_last_order", v_order);
+            EC801E_PublishResponse("valve-last-order", v_order);
         }
         trea_delay_ms(700);
 
@@ -1436,28 +2036,116 @@ static void do_button_short_press(void)
     fourG_restore(was_online, ec_ok);
 }
 
-// ==================== 周期上报后延: 延迟上报目标命中判断 ====================
-// 返回 1=当前时刻已过本周期延迟上报目标且该目标未上报过, 并消费锁存(防重复触发)
-// 仅在 g_report_delay_min > 0 时由 do_wakeup 调用 (delay=0 保持原网格采集流程)
-static uint8_t delay_upload_target_hit(uint32_t now_hhmmss)
+#endif /* 旧按键功能停用 (do_button_short_press) */
+
+/* ==================== 按键手势: 零点重校 ====================
+ * 长按满 ZERO_CAL_HOLD_MS(默认8s)不松手 → 三灯闪烁 + 蜂鸣 1 声 进入待确认;
+ * 从"满 8 秒"起算 ZERO_CAL_CONFIRM_MS(默认3s)窗口内需 ZERO_CAL_CONFIRM_PRESSES(默认2)次
+ * 完整短按 (8 秒那次按住的松手不计次) → 执行零点重校。
+ * 成功: 蜂鸣 2 声 + 按状态长亮;  失败/超时: 蜂鸣 3 声 + 三灯全亮 5 秒后恢复状态长亮。
+ * 说明: 交互全程阻塞(约 8~12s), 内部持续喂狗; 结束后由调用方回 STATE_SLEEP。
+ * 返回: 1 = 已进入手势流程(按住满 8 秒); 0 = 未满 8 秒即松手(由调用方按"短按"处理) */
+static uint8_t zero_cal_gesture(void)
 {
-    uint32_t interval_sec = (uint32_t)g_interval.upload_interval_min * 60u;
-    if(interval_sec == 0)
-        return 0;
+    uint32_t t0;
+    uint32_t window_start;
+    uint32_t last_blink;
+    uint8_t  blink_on = 0;
+    uint8_t  released = 0;
+    uint8_t  presses  = 0;
+    uint8_t  confirmed = 0;
 
-    uint32_t delay_sec = (uint32_t)(g_report_delay_min * 60.0f);
-    uint32_t cur_total_sec = (now_hhmmss / 10000) * 3600u
-                           + ((now_hhmmss / 100) % 100) * 60u
-                           + (now_hhmmss % 100);
-    uint32_t target = ((cur_total_sec / interval_sec) * interval_sec +
-                       (delay_sec % interval_sec)) % 86400u;
-
-    if(target <= cur_total_sec && target != s_last_upload_target)
+    /* ---- 阶段1: 等待按住满 ZERO_CAL_HOLD_MS (中途松手 = 无动作) ---- */
+    t0 = trea_millis();
+    while((trea_millis() - t0) < ZERO_CAL_HOLD_MS)
     {
-        s_last_upload_target = target;  /* 消费锁存, 防下次唤醒重复上传 */
+        trea_delay_ms(20);
+        swdt_feed();
+        if(!button_is_pressed())
+        {
+            printf_debug("[ZERO] released before %ums -> treat as short press\r\n", ZERO_CAL_HOLD_MS);
+            return 0;
+        }
+    }
+
+    /* ---- 阶段2: 待确认 (三灯闪烁 + 蜂鸣 1 声) ---- */
+    printf_debug("[ZERO] hold %ums OK -> blink; need %u short press(es) within %ums\r\n",
+                 ZERO_CAL_HOLD_MS, (unsigned)ZERO_CAL_CONFIRM_PRESSES, ZERO_CAL_CONFIRM_MS);
+    buzzer_init();
+    buzzer_beep(1, 200);
+
+    window_start = trea_millis();
+    last_blink   = window_start;
+    blink_on     = 1;
+    led_all_on();
+
+    while((trea_millis() - window_start) < ZERO_CAL_CONFIRM_MS)
+    {
+        trea_delay_ms(20);
+        swdt_feed();
+
+        /* 200ms 周期闪烁提示 */
+        if((trea_millis() - last_blink) >= 200u)
+        {
+            last_blink = trea_millis();
+            blink_on = blink_on ? 0u : 1u;
+            if(blink_on) led_all_on(); else led_all_off();
+        }
+
+        /* 8 秒那次按住的松手: 不计入确认次数 */
+        if(!released)
+        {
+            if(!button_is_pressed())
+                released = 1;
+            continue;
+        }
+
+        /* 统计短按: 按下 >50ms 去抖, 等释放后计数 */
+        if(button_is_pressed())
+        {
+            trea_delay_ms(50);
+            if(button_is_pressed())
+            {
+                presses++;
+                printf_debug("[ZERO] confirm press %u/%u\r\n",
+                             presses, (unsigned)ZERO_CAL_CONFIRM_PRESSES);
+                while(button_is_pressed())
+                {
+                    trea_delay_ms(20);
+                    swdt_feed();
+                }
+                if(presses >= ZERO_CAL_CONFIRM_PRESSES)
+                {
+                    confirmed = 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    led_all_off();
+
+    if(!confirmed)
+    {
+        printf_debug("[ZERO] confirm timeout, cancelled (baseline unchanged)\r\n");
+        led_status_refresh();
         return 1;
     }
-    return 0;
+
+    /* ---- 阶段3: 执行校准 ---- */
+    if(zero_cal_run())
+    {
+        buzzer_beep(2, 200);
+        printf_debug("[ZERO] gesture calibration SUCCESS\r\n");
+    }
+    else
+    {
+        buzzer_beep(3, 200);
+        led_fail_hold();      /* 三灯全亮 5 秒后恢复状态长亮 */
+        printf_debug("[ZERO] gesture calibration FAILED (baseline unchanged)\r\n");
+    }
+    led_status_refresh();
+    return 1;
 }
 
 // ==================== 唤醒恢复 ====================
@@ -1514,7 +2202,7 @@ static void do_wakeup(void)
         // 禁用按键EXTI(唤醒后立即禁用防止抖动重复触发)
         button_exti_disable();
         
-        // PC0(V4G_EN 4G电源)恢复: gpio_init默认PC0=LOW
+        // V4G_EN(PB13) 恢复: gpio_init 已按软件状态重新施加(默认断电)
         // 低电压省电模式: 不恢复4G
         // 用户手动关闭: 不恢复4G(等待用户再次打开)
         // 弱信号模式: 不恢复4G(下次上报时再尝试)
@@ -1523,7 +2211,7 @@ static void do_wakeup(void)
            strcmp(g_window.pattern, "long") == 0 &&
            (config_is_active_window() || g_window.end_result == 1))
             power_4g_set(1);
-        // 其他情况(VLP/user_off/weak_signal/short/dot/long+er=0+非窗口): PC0保持LOW
+        // 其他情况(VLP/user_off/weak_signal/short/dot/long+er=0+非窗口): V4G_EN 保持拉低
         
         rtc_show_time();
         printf_debug("\r\n");
@@ -1532,6 +2220,38 @@ static void do_wakeup(void)
     // === 按键唤醒: 检测按键 + 启动4G电源 ===
     if(button_wakeup_flag)
     {
+        /* ==================== 按键 ====================
+         * 短按(未满 ZERO_CAL_HOLD_MS 即松手): 三灯全亮 LED_NOTICE_MS 秒,
+         *   作为"按键已收到"的统一反馈(与阀门当前状态无关), 到期回到"按状态长亮"。
+         * 长按满 ZERO_CAL_HOLD_MS(8s): 三灯闪烁 + 蜂鸣 1 声, 从"满 8 秒"起算 3 秒窗口内
+         *   连续 2 次短按 (8 秒那次的松手不计次) → 重校零点。
+         * 旧按键功能(双击上报/三击蓝牙/四击开4G/长按开4G)整体停用, 见下方 #if 0。 */
+        button_wakeup_flag = 0;
+        printf_debug("[SM] WAKEUP: BUTTON\r\n");
+        if(!zero_cal_gesture())
+        {
+            led_notice_show();          /* 短按: 三灯同步提示"按键有效" */
+            printf_debug("[BTN] short press -> 3 LEDs on %ums\r\n", (unsigned)LED_NOTICE_MS);
+        }
+        led_status_refresh();
+
+        /* 按键分支是提前 return 的(不走 do_wakeup 末尾的统一布防), 而按键交互期间
+         * (8s 手势/零点重校)可能收到平台下行脉冲 → 必须在这里补一次 RI 布防。
+         * 注: ri_exti_init() 会清 ri_wakeup_flag, 若本轮已有挂起的下行脉冲需保留标志,
+         *     交给 do_sleep 的"大睡收口补读"消费。 */
+        if(power_4g_is_on())
+        {
+            uint8_t ri_pending = ri_wakeup_flag;
+
+            ri_exti_init();
+            if(ri_pending)
+                ri_wakeup_flag = 1;     /* 恢复挂起标志(布防时被清), 由 do_sleep 补读 */
+        }
+
+        app_state = STATE_SLEEP;
+        return;
+
+#if 0   /* ===== 旧按键功能整体停用 ===== */
         printf_debug("[SM] WAKEUP: BUTTON\r\n");
 
         // 按键唤醒恢复LCD显示 (唤醒后关闭需重新初始化)
@@ -1539,6 +2259,16 @@ static void do_wakeup(void)
         lcd_activate();
         if(g_lcd_active)
             lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
+#if (CALIB_MODE_ENABLED && LCD_ENABLED)
+        if(calib_is_active())
+            calib_lcd_activity();       /* 未安装期: 按键点亮并重置5s计时 */
+#endif
+
+        /* 三路状态灯: 按键唤醒短亮 LED_FLASH_SEC 秒
+         * 非阻塞: 立即点亮后照常回睡, 由 RTC 秒级闹钟唤醒熄灭 (见 do_sleep)。
+         * ADC 在按键快速唤醒路径未初始化, 这里补一次, 供"换电池"灯判电压。 */
+        adc_bat_init();
+        led_flash_start();
 
         button_wakeup_flag = 0;
 
@@ -1621,19 +2351,27 @@ static void do_wakeup(void)
                 case 1:
                     // 1次短按: LCD页切换 + 按键确认
                     buzzer_beep(1, 200);
+#if (CALIB_MODE_ENABLED && LCD_ENABLED)
+                    calib_lcd_activity();   /* 未安装期: 重置5s无操作计时 */
+#endif
+#if LCD_ENABLED
                     if(g_lcd_active) lcd_ui_next_page();
-                        printf_debug("[SM] BUTTON: LCD page -> %d\r\n", g_lcd_page);
+                    printf_debug("[SM] BUTTON: LCD page -> %d\r\n", g_lcd_page);
+#else
+                    printf_debug("[SM] BUTTON: single press (LED flash)\r\n");
+#endif
                     break;
 
                 case 2:
                     // 2次短按: 手动上报 (完整初始化)
                     ensure_full_init();
+                    led_status_refresh();   /* sys_init→output_gpio_init 会熄灭 LED, 恢复短亮状态 */
                     do_button_short_press();
                     break;
 
                 case 3:
                     // 3次短按: 蓝牙开关切换 (控制: 开/关, 不进入BLE_OTA)
-                    if(g_lcd_active) lcd_ui_toggle_bluetooth();
+                    ble_power_toggle();
                     buzzer_beep(1, 200);
                     printf_debug("[SM] BUTTON: Bluetooth %s\r\n", g_bt_on ? "ON" : "OFF");
                     if(g_bt_on)
@@ -1655,10 +2393,11 @@ static void do_wakeup(void)
                     fourG_user_off = 0;
                     fourG_weak_signal = 0;  // 清除弱信号标志
                     /* 4x short press: really power on 4G and init the module.
-                     * Old code only cleared flags; V4G_EN(PC0) stayed LOW so
+                     * Old code only cleared flags; V4G_EN stayed LOW so
                      * do_sleep treated 4G as online while it was powered off.
                      * InitAndConnect 内含 V4G_EN+PWRKEY 完整开机时序. */
                     ensure_full_init();
+                    led_status_refresh();   /* sys_init→output_gpio_init 会熄灭 LED, 恢复短亮状态 */
                     com_lpuart_init();
                     trea_delay_ms(100);
                     if(EC801E_InitAndConnect() == EC_OK)
@@ -1685,6 +2424,7 @@ static void do_wakeup(void)
 
         // === 长按4s确认 → 4G电源开启(强制打开) ===
         ensure_full_init();
+        led_status_refresh();   /* sys_init→output_gpio_init 会熄灭 LED, 恢复短亮状态 */
         printf_debug("[SM] BUTTON: 4s confirmed, powering on 4G\r\n");
         fourG_user_off = 0;  // 清除用户关闭标志
         fourG_weak_signal = 0;  // 手动打开同时清除弱信号标志
@@ -1738,12 +2478,14 @@ static void do_wakeup(void)
             printf_debug("[SM] BUTTON: %s mode, 4G powered off\r\n", g_window.pattern);
         }
 
-        app_state = STATE_SLEEP;
+       app_state = STATE_SLEEP;
         return;
+#endif /* 旧按键功能停用 */
     }
 
     // debug串口命令由主循环统一处理
 
+#if BLE_ENABLED
     // === BLE连接唤醒: PD2 EXTI下降沿 (手机连接BLE模块) ===
     if(ble_connect_wakeup_flag)
     {
@@ -1767,6 +2509,7 @@ static void do_wakeup(void)
             printf_debug("[SM] WAKEUP: BLE EXTI but not connected (glitch?)\r\n");
         }
     }
+#endif /* BLE_ENABLED */
 
     if(counter0 || ri_wakeup_flag)
     {
@@ -1776,11 +2519,30 @@ static void do_wakeup(void)
     else if(rtc_alarm_flag)
     {
         printf_debug("[SM] WAKEUP: RTC\r\n");
-        /* 周期上报后延: 延迟上报目标命中 → 直接上传, 跳过采集(避免产生网格外历史记录) */
-        if(g_report_delay_min > 0.0f && delay_upload_target_hit(rtc_get_hhmmss()))
+        /* 阀定时闹钟 / 校零 LCD 等待 / 实时模式: 保持原行为(交由 do_collect 处理) */
+        if(g_timing_alarm_set == 0
+#if (CALIB_MODE_ENABLED && LCD_ENABLED)
+                && !s_cal_lcd_wait
+#endif
+                && !real_mode_active())
         {
-            printf_debug("[SM] WAKEUP: delayed upload target, direct upload\r\n");
-            app_state = STATE_UPLOAD;
+            /* 采集到期点优先: 后延到期点与采集点重合时先采集(否则该采集点会被整拍跳过, 历史缺一格);
+             * 未到采集点但"待上报+后延已到"(后延点唤醒) → 直接上报, 不采集
+             * (否则会多出一条网格外历史记录); 两者都不是 → 回睡 */
+            if(sched_collect_due_now())
+                app_state = STATE_COLLECT;
+            else if(upload_due_now())
+            {
+                printf_debug("[SM] WAKEUP: upload pending due, direct upload\r\n");
+                ensure_full_init();      /* 最小唤醒时升级(上报需 EEPROM/4G) */
+                app_state = STATE_UPLOAD;
+            }
+            else
+            {
+                /* 跨天周期(>1天): 到期日之前每天只醒一次做判定, 非到期点直接回睡 */
+                printf_debug("[SM] WAKEUP: not collect due, back to sleep\r\n");
+                app_state = STATE_SLEEP;
+            }
         }
         else
             app_state = STATE_COLLECT;
@@ -1790,6 +2552,12 @@ static void do_wakeup(void)
         printf_debug("[SM] WAKEUP: unknown\r\n");
         app_state = STATE_COLLECT;
     }
+
+    /* RI EXTI 是一次性闭锁: 唤醒后必须重新布防, 否则本周期长流程(上报/阀动作/OTA/按键等待)
+     * 期间到达的下行脉冲没人接收。布防后脉冲锁存到 ri_wakeup_flag, 由 do_sleep 大睡收口补读。
+     * 注: ri_exti_init() 会清 ri_wakeup_flag, 故必须放在上面唤醒源判断之后。 */
+    if(power_4g_is_on())
+        ri_exti_init();
 }
 
 // ==================== 确认完整初始化 ====================
@@ -1808,7 +2576,10 @@ static void ensure_full_init(void)
 // 上报周期/后延配置变更后调用: 重置延迟上报锁存, 避免换周期后漏一次或重一次
 void upload_schedule_reset(void)
 {
-    s_last_upload_target = 0xFFFFFFFF;
+    s_upload_pending      = 0;
+    s_pending_due_abs_min = 0;
+    s_last_upload_idx     = 0xFFFFFFFFu;    /* 换周期后重新起算: 严格等一个完整周期 */
+    config_save_upload_idx(0xFFFFFFFFu);
 }
 
 // 根据当前模式和时间判断是否需要批量上报历史数据, 设置 app_state
@@ -1872,32 +2643,23 @@ static void check_upload_schedule(void)
     }
     else
     {
-        // long/short: 按上报间隔+后延判断是否到达上报时刻 (后延支持小数分钟)
+        // long/short: 整点网格 + 标志位式调度
+        //   进入新的上报周期 → 置"待上报"标志; 置位后一路上报直到成功(缓冲清空)
+        //   不依赖时间窗口/目标点 → 长流程推迟、被抢占、RTC 校时跳变都不会永久漏报
         uint32_t now_hhmmss = rtc_get_hhmmss();
-        uint32_t cur_total_sec = (now_hhmmss / 10000) * 3600u
-                               + ((now_hhmmss / 100) % 100) * 60u
-                               + (now_hhmmss % 100);
-        uint32_t interval_sec = (uint32_t)g_interval.upload_interval_min * 60u;
-        uint32_t delay_sec = (uint32_t)(g_report_delay_min * 60.0f);
 
-        if(interval_sec > 0)
+        upload_pending_update();            /* 本次是否该置"待上报" */
+
+        if(upload_due_now())
         {
-            /* 本周期目标 = 网格点 + 后延; 仅当目标已过且未上报才触发
-             * (启用/重启后首周期严格等到延后点, 不做上一周期补报) */
-            uint32_t target = ((cur_total_sec / interval_sec) * interval_sec +
-                               (delay_sec % interval_sec)) % 86400u;
-
-            if(target <= cur_total_sec && target != s_last_upload_target)
-            {
-                s_last_upload_target = target;
-                printf_debug("[SM] UPLOAD trigger: %02u:%02u:%02u (interval=%us delay=%us)\r\n",
-                             cur_total_sec / 3600, (cur_total_sec / 60) % 60,
-                             cur_total_sec % 60, interval_sec, delay_sec);
-                ensure_full_init();
-                app_state = STATE_UPLOAD;
-            }
-            else
-                app_state = STATE_SLEEP;
+            printf_debug("[SM] UPLOAD trigger: %02u:%02u:%02u (um=%umin every_n=%u)\r\n",
+                         (unsigned)(now_hhmmss / 10000),
+                         (unsigned)((now_hhmmss / 100) % 100),
+                         (unsigned)(now_hhmmss % 100),
+                         (unsigned)g_interval.upload_interval_min,
+                         (unsigned)g_interval.upload_every_n);
+            ensure_full_init();
+            app_state = STATE_UPLOAD;
         }
         else
             app_state = STATE_SLEEP;
@@ -1951,14 +2713,26 @@ static void do_collect(void)
         }
     }
 
-    // 记录本次网格采集的分钟序号, 防止与秒级频率实时唤醒循环在同一分钟重复巡检
-    {
-        uint32_t now_hhmmss = rtc_get_hhmmss();
-        last_grid_collect_min = (uint16_t)(now_hhmmss / 10000) * 60
-                              + (uint16_t)((now_hhmmss / 100) % 100);
-    }
+    /* 记录本次网格采集的绝对分钟: 防止与实时唤醒循环在同一分钟重复巡检, 跨天也不会误判 */
+    last_grid_collect_abs_min = sched_abs_min();
 
     PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
+#if CALIB_MODE_ENABLED
+    {
+        /* 未安装自动校零: 喂样本; 零点成熟时同拍修正当前读数 */
+        uint8_t was_calib = calib_is_active();
+        float p_raw = g_sensor.raw.pressure;
+        float corr = calib_feed_sample(p_raw);
+        if(corr != 0.0f)
+            g_sensor.raw.pressure -= corr;
+        if(was_calib)
+        {
+            calib_log_sample(p_raw, g_sensor.raw.pressure);
+            if(!calib_is_active())
+                install_event_report();         /* 自动锁定: 一次性安装事件上报 */
+        }
+    }
+#endif
     g_sensor.voltage = g_sensor.last_normal_voltage;
 
     printf_debug("[SM] COLLECT (buf=%d) V=%.2f S2:P=%.2f T=%.2f err=%d S1:P=%.2f T=%.2f err=%d (ADC=%d)\r\n",
@@ -1968,12 +2742,22 @@ static void do_collect(void)
                  g_need_adc_sampling);
 
     // 实时模式关闭时, 采集周期结束后 LCD 刷新 (实时模式常亮时由 do_realtime_check 刷新)
+#if (CALIB_MODE_ENABLED && LCD_ENABLED)
+    if(calib_is_active())
+    {
+        calib_lcd_auto_begin();         /* 未安装期: 压力页短亮 + 定时息屏 */
+    }
+    else
+    {
+        calib_lcd_exit_to_normal();     /* 锁定后: 取消短亮, 恢复正常LCD策略 */
+    }
+#endif
 #if LCD_LOCK_ENABLED
-    if(g_lcd_active && !g_real_enabled)
+    if(g_lcd_active && !real_mode_active() && !CALIB_LCD_BLOCKED())
         lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
 #else
     /* LCD常亮模式: 每个采集周期自动翻一页 */
-    if(g_lcd_active && !g_real_enabled)
+    if(g_lcd_active && !real_mode_active() && !CALIB_LCD_BLOCKED())
     { lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage); lcd_ui_next_page(); }
 #endif
 
@@ -2096,7 +2880,7 @@ static void do_collect(void)
         if(g_valve_alarm_closed && !g_ch4_alarm_closed)
         {
             g_alarm_recover_reported = 1;
-            motor_limit_init();   /* 深休眠后 PA11/PA12 为 Analog, 读限位前恢复输入 */
+            motor_pos_init();     /* 深休眠后到位检测引脚为 Analog, 读取/驱动前恢复 */
             vr = valve_get_status();   /* 上报真实阀门状态(保持关闭) */
             printf_debug("[SM] ALARM recovered, valve stays closed (report only)\r\n");
         }
@@ -2130,9 +2914,20 @@ static void do_collect(void)
     record.flags = 0;
     memset(record.reserved, 0, sizeof(record.reserved));
 
-    ee_hist_push(record.pressure, record.temperature,
-                 record.pressure2, record.temperature2,
-                 record.voltage, record.flags);
+#if CALIB_MODE_ENABLED
+    if(calib_is_active())
+    {
+        /* 未安装校零期: 不写历史, 只保留最新一条供周期上报 */
+        s_calib_latest = record;
+        s_calib_latest_valid = 1;
+    }
+    else
+#endif
+    {
+        ee_hist_push(record.pressure, record.temperature,
+                     record.pressure2, record.temperature2,
+                     record.voltage, record.flags);
+    }
     g_sensor.last_pressure_collect = g_sensor.raw.pressure;
     g_sensor.last_pressure_collect2 = g_sensor.raw2.pressure;
     wakeup_count++;
@@ -2240,9 +3035,19 @@ static void do_alarm(void)
     }
 
     // 存入EEPROM历史记录
-    ee_hist_push(record.pressure, record.temperature,
-                 record.pressure2, record.temperature2,
-                 record.voltage, record.flags);
+#if CALIB_MODE_ENABLED
+    if(calib_is_active())
+    {
+        s_calib_latest = record;
+        s_calib_latest_valid = 1;
+    }
+    else
+#endif
+    {
+        ee_hist_push(record.pressure, record.temperature,
+                     record.pressure2, record.temperature2,
+                     record.voltage, record.flags);
+    }
     g_sensor.last_pressure_collect = g_sensor.raw.pressure;
     g_sensor.last_pressure_collect2 = g_sensor.raw2.pressure;
     wakeup_count++;
@@ -2323,6 +3128,11 @@ static void do_upload(void)
 
     // 4G连接成功后才更新LCD信号强度
     lcd_update_csq();
+#if CALIB_MODE_ENABLED
+    report_publish_field("product-status", calib_is_active() ? "0" : "1");  /* 每次周期上传带状态 */
+#else
+    report_publish_field("product-status", "1");
+#endif
 
     // === 用户端MQTT: 预连接 (历史记录同步上报, 约1分钟耗时) ===
     uint8_t user_mqtt_on = 0;
@@ -2344,6 +3154,23 @@ static void do_upload(void)
     }
 
     // === 批量上传 (双通道: 平台id=0 + 用户端id=1, 从EEPROM读取) ===
+#if CALIB_MODE_ENABLED
+    if(calib_is_active())
+    {
+        /* 未安装校零期: 只上报最新值, 不读历史批量 */
+        if(s_calib_latest_valid)
+        {
+            if(EC801E_PublishSingleRecord(&s_calib_latest) == EC_OK)
+            {
+                /* 未安装期不弹历史, 需在此提交防重锁: 保证一个上报周期只发一次最新值 */
+                printf_debug("[CALIB] upload latest OK, commit period lock\r\n");
+                upload_commit();
+            }
+            trea_delay_ms(300);
+        }
+    }
+    else
+#endif
     while(ee_hist_count() > 0)
     {
         vtiming_check_now();   /* timing valve preempts upload */
@@ -2418,6 +3245,14 @@ static void do_upload(void)
 
     // 上次上传过程结束点位清零重新开始统计计数
     wakeup_count = 0;
+    /* 周期上报成功(历史缓冲清空)才提交: 清"待上报"标志 + 记录本周期序号(持久化);
+     * 失败/部分失败则保持标志, 下次唤醒自动重试 */
+#if CALIB_MODE_ENABLED
+    if(!calib_is_active() && ee_hist_count() == 0)
+#else
+    if(ee_hist_count() == 0)
+#endif
+        upload_commit();
     printf_debug("[SM] UPLOAD finished, remaining records in buffer: %d\r\n", ee_hist_count());
 
     // === RTC校准: 通过4G网络时间同步本地时钟 ===
@@ -2505,6 +3340,14 @@ static void do_downlink(void)
         return;
     }
 
+    /* 静态测漏任务: 保持 4G 在线进入测漏状态, 不做弱信号断电判断
+     * (任务全程需要 MQTT 收阀门指令/发数据包, 断电会导致整批数据丢失) */
+    if(leak_task_pending())
+    {
+        app_state = STATE_SLEEP;    /* 由主循环转入 STATE_LEAK */
+        return;
+    }
+
     // 如果信号OK则保持在线 (弱信号断电时已内部处理)
     trea_delay_ms(500);
     if(fourG_signal_check_and_decide())
@@ -2517,6 +3360,7 @@ static void do_downlink(void)
 // ==================== BLE OTA 状态处理 ====================
 static void do_ble_ota(void)
 {
+#if BLE_ENABLED
     /* 第一阶段: 等待手机连接BLE (PD2=LOW) */
     if(g_ble_ota.state == BLE_OTA_WAIT_CONNECT)
     {
@@ -2589,11 +3433,15 @@ static void do_ble_ota(void)
         ble_uart_deinit();
         if(g_bt_on)
         {
-            lcd_ui_toggle_bluetooth();
+            ble_power_toggle();
         }
         app_state = STATE_SLEEP;
     }
     /* 注: OTA_COMPLETE不会走到这里, handle_end()已调用NVIC_SystemReset() */
+#else
+    /* BLE 功能停用 (BLE_ENABLED=0): 本状态不会被进入 */
+    app_state = STATE_SLEEP;
+#endif /* BLE_ENABLED */
 }
 
 // ==================== Debug串口命令处理(需要硬件上下文) ====================
@@ -2609,15 +3457,21 @@ static void debug_check_cmd(void)
         // ---- commands requiring main.c hardware context ----
         if(strcmp(line_buf, "status") == 0)
         {
-            const char *state_names[] = {"INIT","SLEEP","WAKEUP","COLLECT","UPLOAD","DOWNLINK","ALARM","BLE_OTA"};
+            const char *state_names[] = {"INIT","SLEEP","WAKEUP","COLLECT","UPLOAD","DOWNLINK","ALARM","BLE_OTA","CH4","LEAK"};
             printf_debug("  state=%s wakeup=%d buf=%d\r\n",
-                         (app_state <= STATE_BLE_OTA) ? state_names[app_state] : "?",
+                         (app_state <= STATE_LEAK) ? state_names[app_state] : "?",
                          wakeup_count, ee_hist_count());
             printf_debug("  P=%.2f T=%.2f V=%.2f last_Pc=%.2f last_Pr=%.2f\r\n",
                          g_sensor.raw.pressure, g_sensor.raw.temperature, g_sensor.voltage, g_sensor.last_pressure_collect, g_sensor.last_pressure_realtime);
             printf_debug("  valve=%d abnormal=%s\r\n", g_valve_last_order, g_abnormal_close);
             printf_debug("  4G: user_off=%d init_fail=%d weak_sig=%d\r\n", fourG_user_off, fourG_init_failed, fourG_weak_signal);
+#if BLE_ENABLED
             printf_debug("  BLE: on=%d\r\n", g_bt_on);
+#else
+            printf_debug("  BLE: disabled (BLE_ENABLED=0)\r\n");
+#endif
+            printf_debug("  ZERO: baseline=%ldPa valid=%d\r\n",
+                         (long)zero_cal_get(), zero_cal_is_valid());
             printf_debug("  PT304D err=%d stat=0x%02X\r\n", g_sensor.raw.err, g_sensor.raw.stat_raw);
             continue;
         }
@@ -2675,6 +3529,107 @@ static void debug_check_cmd(void)
             trea_delay_ms(50);
             NVIC_SystemReset();
         }
+        /* ---- 电机电流/堵转标定 (阶段2/3) ---- */
+        if(strcmp(line_buf, "zero_cal") == 0)
+        {
+            uint8_t ok = zero_cal_run();
+            printf_debug("  zero_cal -> %s, baseline=%ldPa\r\n",
+                         ok ? "OK (saved)" : "FAILED (baseline unchanged)",
+                         (long)zero_cal_get());
+            led_status_refresh();
+            continue;
+        }
+        if(strcmp(line_buf, "zero_show") == 0)
+        {
+            printf_debug("  baseline=%ldPa valid=%d (default %dPa)\r\n",
+                         (long)zero_cal_get(), zero_cal_is_valid(), ZERO_CAL_DEFAULT_PA);
+            continue;
+        }
+        if(strcmp(line_buf, "motor_cs") == 0)
+        {
+#if MOTOR_ENABLED
+            uint16_t raw = motor_current_raw();
+            uint32_t mv  = adc_svc_raw_to_mv(raw);
+            uint32_t ma  = (MOTOR_CS_R_SHUNT > 0.0f) ? (uint32_t)((float)mv / MOTOR_CS_R_SHUNT)
+                                                     : 0xFFFFFFFFu;
+            printf_debug("  motor_cs: raw=%u mV=%lu mA=%lu th=%u R=%.2f ohm\r\n",
+                         raw, (unsigned long)mv, (unsigned long)ma,
+                         g_motor_cs_th, (double)MOTOR_CS_R_SHUNT);
+            printf_debug("  valve: pos_valid=%d pos_state=%d last_order(%s)=%d status=%s\r\n",
+                         g_valve_pos_valid, g_valve_pos_state,
+                         "user cmd", g_valve_last_order, valve_get_status());
+#else
+            printf_debug("  motor not present (MOTOR_ENABLED=0)\r\n");
+#endif
+            continue;
+        }
+        if(strncmp(line_buf, "motor_cs_th:", 12) == 0)
+        {
+#if MOTOR_ENABLED
+            uint32_t v = (uint32_t)atoi(line_buf + 12);
+            if(v > 4095u) v = 4095u;             /* 12 位 ADC 上限 */
+            g_motor_cs_th = (uint16_t)v;
+            config_save_motor_cs_th();
+            printf_debug("  motor_cs_th = %u raw (%lumA) saved\r\n",
+                         g_motor_cs_th, (unsigned long)MOTOR_CS_RAW_TO_MA(g_motor_cs_th));
+#else
+            printf_debug("  motor not present\r\n");
+#endif
+            continue;
+        }
+        if(strncmp(line_buf, "motor_cs_ma:", 12) == 0)
+        {
+#if MOTOR_ENABLED
+            uint32_t ma = (uint32_t)atoi(line_buf + 12);
+            g_motor_cs_th = MOTOR_CS_MA_TO_RAW(ma);      /* mA → raw */
+            config_save_motor_cs_th();
+            printf_debug("  motor_cs_th = %u raw (%lumA) saved\r\n",
+                         g_motor_cs_th, (unsigned long)MOTOR_CS_RAW_TO_MA(g_motor_cs_th));
+#else
+            printf_debug("  motor not present\r\n");
+#endif
+            continue;
+        }
+        if(strncmp(line_buf, "valve_cal:", 10) == 0)
+        {
+#if MOTOR_ENABLED
+            const char *dir = line_buf + 10;
+            uint8_t open_dir = (strcmp(dir, "open") == 0) ? 1u : 0u;
+            uint32_t t0 = trea_millis();
+
+            printf_debug("  calibrating %s: 250ms/sample, max %ums (motor will drive!)\r\n",
+                         open_dir ? "OPEN" : "CLOSE", MOTOR_CS_CAL_MAX_MS);
+            motor_init(MOTOR_ENABLED);
+            if(open_dir) motor_drive_open(); else motor_drive_close();
+
+            while((trea_millis() - t0) < MOTOR_CS_CAL_MAX_MS)
+            {
+                trea_delay_ms(250);
+                swdt_feed();
+                {
+                    uint16_t raw = motor_current_raw();
+                    uint32_t mv  = adc_svc_raw_to_mv(raw);
+                    uint32_t ma  = (MOTOR_CS_R_SHUNT > 0.0f) ? (uint32_t)((float)mv / MOTOR_CS_R_SHUNT)
+                                                             : 0xFFFFFFFFu;
+                    printf_debug("  t=%4ums raw=%4u mV=%4lu mA=%5lu\r\n",
+                                 (unsigned)(trea_millis() - t0), raw,
+                                 (unsigned long)mv, (unsigned long)ma);
+                }
+            }
+            motor_stop();
+            printf_debug("  calibration drive finished (motor stopped)\r\n");
+#else
+            printf_debug("  motor not present\r\n");
+#endif
+            continue;
+        }
+        if(strcmp(line_buf, "valve_home") == 0)
+        {
+            uint8_t ok = valve_home();
+            printf_debug("  valve_home -> %s\r\n", ok ? "OK (closed, position valid)" : "FAILED");
+            continue;
+        }
+
         if(strncmp(line_buf, "valve:", 6) == 0)
         {
             const char *action = line_buf + 6;  // "open" or "close"
@@ -2682,7 +3637,7 @@ static void debug_check_cmd(void)
             if(g_valve_alarm_closed)
             {
                 g_valve_alarm_closed = 0;
-                g_valve_pre_alarm_order = g_valve_last_order;
+                g_valve_pre_alarm_order = g_valve_pos_state;   /* 物理状态 */
                 config_save_ext();
                 printf_debug("  cleared alarm_closed flag (user override)\r\n");
             }
@@ -2707,7 +3662,7 @@ static void debug_check_cmd(void)
                 EC801E_DisconnectMQTT();
                 trea_delay_ms(500);
                 EC801E_ConnectMQTT();
-                EC801E_SubscribeTopic();
+                EC801E_SubscribeAll();   /* 重连后重订阅全部主题(含OTA/测漏) */
             }
             else
                 printf_debug("  Invalid format, use: first_ip:IP.port\r\n");
@@ -2736,6 +3691,7 @@ static void debug_check_cmd(void)
             printf_debug("  4G power off\r\n");
 //            report_4g_power_state(0);
 //            trea_delay_ms(200);
+            fourG_drain_before_power_off();   /* 人工断电前必读: 前面可能还有排队指令 */
             EC801E_PowerOff();
             fourG_user_off = 1;
             continue;
@@ -2767,7 +3723,7 @@ static void debug_check_cmd(void)
             trea_delay_ms(500);
             if(EC801E_ConnectMQTT() == EC_OK)
             {
-                EC801E_SubscribeTopic();
+                EC801E_SubscribeAll();   /* 重连后重订阅全部主题(含OTA/测漏) */
                 printf_debug("  MQTT reconnected OK\r\n");
             }
             else
@@ -2871,6 +3827,7 @@ static void check_4g_connection_supervision(void)
 }
 #endif /* 30分钟巡检屏蔽 */
 
+
 // ==================== 主函数 ====================
 int main(void)
 {
@@ -2878,6 +3835,21 @@ int main(void)
 
     // ==================== STATE_INIT ====================
     sys_init();
+
+    // ==================== 开机提示: 三灯全亮 1 秒 (每次上电) ====================
+    /* 本产品无蜂鸣器, "已上电"只能用 LED 表达, 且必须每次上电都给一次可见反馈。
+     * 位置: 放在 sys_init() 之后 —— 三路 LED 引脚此刻刚由 output_led_init() 配好;
+     *       又必须在 4G 联网之前 —— 冷启动联网耗时 10s+, 放后面提示会被淹没。
+     * 用阻塞 1 秒而不用 led_notice_show(): 提示只有 1s, 若交给"到期闹钟"机制,
+     *       最早的到期检查要等到联网流程结束, 三灯会亮十几秒才熄。 */
+    led_all_on();
+    for(uint8_t i = 0; i < (LED_BOOT_NOTICE_MS / 100u); i++)
+    {
+        trea_delay_ms(100);
+        swdt_feed();
+    }
+    led_all_off();
+
 	// ==================== 首次采集上报 ====================
 #if APP_DEFAULT_SENSOR_COUNT == 2
     PT304D_Init(PT304D_SENSOR_1);   /* S1(IIC2/PC0/PC1) 仅双传感器旧板存在 */
@@ -2890,6 +3862,10 @@ int main(void)
 	printf_debug("\r\n[OTA] yes%s \r\n", APP_FIRMWARE_VERSION);
 	
     config_load_all();
+    /* 上报周期防重锁: 从 EEPROM 读回上次成功上报的周期序号(跨重启保持, 防重复上报) */
+    s_last_upload_idx     = config_load_upload_idx();
+    s_upload_pending      = 0;
+    s_pending_due_abs_min = 0;
     config_enter_setup_mode(0);
     config_print_current();
 
@@ -2899,15 +3875,71 @@ int main(void)
 	
 	
     ee_hist_init();
-	
-	// SLCD初始化(必须在rtc_init_all之后, LXTAL已启动)
-    if(g_lcd_enabled) { slcd_seg_configuration(); lcd_ui_init(); g_lcd_active = 1; g_lcd_on_hhmmss = rtc_get_hhmmss(); }
+    /* 重启补报: 开机时刻若已进入新的上报周期(且该周期还没上报过), 立即置"待上报",
+     * 防止"上报被打断(掉电/复位/OTA)后数据被推迟一整个上报周期" */
+    upload_pending_update();
+    /* 静态测漏暂存区: 上电一律清零 (本功能不做断点续传) */
+    leak_store_init();
+    /* 存储布局版本检查: 老固件升级上来时主动迁移(格式化受影响的区), 避免概率性误判 */
+    eeprom_layout_check_and_migrate();
+
+#if CALIB_MODE_ENABLED
+    /* ============ 未安装自动校零: 提前置状态(显示/首次采集/上报都要用) ============ */
+    calib_load_state();
+    if(!calib_is_installed())
+    {
+        calib_set_active(1);
+        printf_debug("[CALIB] uninstalled: auto-calibration active (sample=%umin)\r\n",
+                     CALIB_SAMPLE_MIN);
+    }
+    calib_apply_zero_offsets();         /* 未安装: 有冻结零点先应用, 否则0偏移 */
+#endif
+
+    /* ==================== 零点(大气基准) ====================
+     * 读 EEPROM 双槽并应用到传感器 (只读不改);
+     * EEPROM 无有效基准时 (首次上电/更换传感器): 先用默认值保证测量可用, 随即尝试一次
+     * 自动采集(5 次 x 500ms + 大气窗口校验), 失败则继续用默认值、不阻断运行。
+     * 之后任何断电重启都只读取基准, 不会自动重新校零。 */
+    zero_cal_load_apply();
+    if(!zero_cal_is_valid())
+    {
+        printf_debug("[ZERO] first power-on: try auto calibration\r\n");
+        if(!zero_cal_run())
+            printf_debug("[ZERO] auto calibration failed, keep default %dPa\r\n",
+                         ZERO_CAL_DEFAULT_PA);
+    }
+    led_status_refresh();               /* 状态灯长亮: 开机即显示当前状态 */
+
+    // LCD硬件初始化 (无 LCD 产品为空操作; 有 LCD 时必须在 rtc_init_all 之后, LXTAL 已启动)
+    lcd_hw_init();
 	
 	// 首次采集+存入缓冲区+上报
     PT304D_CollectAll((g_sensor_count >= 2) ? &g_sensor.raw2 : NULL, &g_sensor.raw);
+#if CALIB_MODE_ENABLED
+    {
+        uint8_t was_calib = calib_is_active();
+        float p_raw = g_sensor.raw.pressure;
+        float corr = calib_feed_sample(p_raw);   /* 校零: 零点成熟同拍修正 */
+        if(corr != 0.0f)
+            g_sensor.raw.pressure -= corr;
+        if(was_calib)
+        {
+            calib_log_sample(p_raw, g_sensor.raw.pressure);
+            if(!calib_is_active())
+                install_event_report();         /* 自动锁定(首次采集): 一次性上报 */
+        }
+    }
+#endif
 	// 首次采集后刷新LCD显示
     sensor_sample_voltage(1, g_sensor.last_normal_voltage);
+#if (CALIB_MODE_ENABLED && LCD_ENABLED)
+    if(calib_is_active())
+        calib_lcd_auto_begin();         /* 未安装期首次采集: 短亮压力页 */
+    else if(g_lcd_active)
+        lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
+#else
     if(g_lcd_active) lcd_ui_refresh(&g_sensor.raw, &g_sensor.raw2, g_sensor.voltage);
+#endif
 
     
 	
@@ -2935,13 +3967,18 @@ int main(void)
     printf_debug("  Keepalive: %d s\r\n", config_get_keepalive());
     printf_debug("========================================\r\n");
 
-    // 4G连接前检查debug串口是否有待处理命令
+    // 检查debug串口是否有待处理命令
     if(debug_rx_line_ready())
             debug_check_cmd();
 
-	// 4G上电 + 注册 + MQTT连接 + keepalive + 时间同步 + QSCLK
+	// === 公共首次联网: 配置下发 + RTC网络时间同步 (非业务上报) ===
     uint8_t init_4g_ok = (EC801E_InitAndConnect() == EC_OK);
-
+    if(init_4g_ok)
+    {
+        ri_exti_init();   /* 首次联网成功: 布防 RI, 保证本周期到达的下行脉冲可锁存 */
+        EC801E_SyncTime();
+    }
+	
     if(init_4g_ok)
     {
 
@@ -2983,9 +4020,19 @@ int main(void)
     rtc_get_time_str(init_record.timestamp, sizeof(init_record.timestamp));
     init_record.flags = 0;
     memset(init_record.reserved, 0, sizeof(init_record.reserved));
-    ee_hist_push(init_record.pressure, init_record.temperature,
-                 init_record.pressure2, init_record.temperature2,
-                 init_record.voltage, init_record.flags);
+#if CALIB_MODE_ENABLED
+    if(calib_is_active())
+    {
+        s_calib_latest = init_record;
+        s_calib_latest_valid = 1;
+    }
+    else
+#endif
+    {
+        ee_hist_push(init_record.pressure, init_record.temperature,
+                     init_record.pressure2, init_record.temperature2,
+                     init_record.voltage, init_record.flags);
+    }
     g_sensor.last_pressure_collect  = g_sensor.raw.pressure;
     g_sensor.last_pressure_realtime = g_sensor.raw.pressure;
     g_sensor.last_pressure_collect2  = g_sensor.raw2.pressure;
@@ -3008,7 +4055,7 @@ int main(void)
     EC801E_PublishSensorData(&g_sensor.raw, g_sensor.voltage);
     trea_delay_ms(500);
 
-    // 第1: restart=1 + valve_last_order
+    // 第1: restart=1 + valve-last-order
     {
         char v_order[4];
         snprintf(v_order, sizeof(v_order), "%d", g_valve_last_order);
@@ -3060,7 +4107,7 @@ int main(void)
 
     // 第3: 传感器状态(在线+离线)字段
     {
-//        report_publish_sensor_status();   // rtu_have/status 各 2 (传感器状态字段上报)
+//        report_publish_sensor_status();   // rtu-have/status 各 2 (传感器状态字段上报)
 		report_publish_upload_summary();
         g_sensor.prev_online  = (g_sensor.raw.err  == PT304D_OK) ? 1 : 0;
         g_sensor.prev_online2 = (g_sensor.raw2.err == PT304D_OK) ? 1 : 0;
@@ -3076,8 +4123,14 @@ int main(void)
         EC801E_UserMqtt_Disconnect();
     }
 
-	// 连接成功提示音
-    buzzer_beep(2, 200);
+	// 4G 首次联网成功提示: 三灯同步闪一下 (亮 200ms → 灭 200ms)
+	// 本产品无蜂鸣器, 联网结果只能用 LED 表达; 闪一下后立即恢复"按状态长亮",
+	// 避免灯停在"全灭"直到主循环下一次刷新 (中间还隔着信号判定等耗时动作)。
+	led_all_on();
+	trea_delay_ms(200);
+	led_all_off();
+	trea_delay_ms(200);
+	led_status_refresh();
 init_skip_report:
     if(init_4g_ok)
     {
@@ -3098,6 +4151,9 @@ init_skip_report:
         config_save_ext();
         printf_debug("[SM] VLP cleared on boot (spup_en=%d V=%.2f)\r\n", g_spupower.enabled, g_sensor.voltage);
     }
+	// 检查debug串口是否有待处理命令
+    if(debug_rx_line_ready())
+            debug_check_cmd();
 
     // 初始化完成, 进入睡眠
     app_state = STATE_SLEEP;
@@ -3113,6 +4169,10 @@ init_skip_report:
         // 注意: 进入 enter_deepsleep_mode() 内部会 swdt_disable() 关闭, 休眠期间不计时
         swdt_enable(SWDT_TIMEOUT_MS);
 
+        /* 三路状态灯: 处理三灯"按键有效"提示到期, 并按当前状态刷新(阀态/故障/电压可能已变化) */
+        led_notice_expired_check();
+        led_status_refresh();
+
         vtiming_check_now();   /* timing valve highest priority */
 #if LASER_CH4_ENABLED
         laser_schedule_check();  /* 激光甲烷定时采集: 置 g_ch4_request */
@@ -3122,6 +4182,10 @@ init_skip_report:
             app_state = STATE_CH4;
         }
 #endif
+        /* 静态测漏任务: 下行已接收并校验通过 → 进入专用状态(采集期间不休眠) */
+        if(leak_task_pending() && app_state == STATE_SLEEP)
+            app_state = STATE_LEAK;
+
         /* 30分钟巡检 (见 check_4g_connection_supervision #if 0) */
 		check_4g_connection_supervision();
         switch(app_state)
@@ -3133,6 +4197,7 @@ init_skip_report:
             case STATE_DOWNLINK: do_downlink(); break;
             case STATE_ALARM:    do_alarm();    break;
             case STATE_BLE_OTA:  do_ble_ota();  break;
+            case STATE_LEAK:     leak_task_run(); break;
             case STATE_CH4:
 #if LASER_CH4_ENABLED
                 do_ch4();

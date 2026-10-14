@@ -1,9 +1,12 @@
 #ifndef LCD_UI_H
 #define LCD_UI_H
 
+#include "app_config.h"
+
+#if LCD_ENABLED
+
 #include <stdint.h>
 #include "PT_304_35.h"
-#include "app_config.h"
 
 // ==================== LCD 页面定义 ====================
 typedef enum {
@@ -27,7 +30,6 @@ typedef enum {
 
 // ==================== 外部状态变量 ====================
 extern uint8_t g_lcd_page;         // 当前LCD页面索引
-extern uint8_t g_bt_on;            // 蓝牙状态 (0=关, 1=开)
 extern uint8_t g_last_csq;         // 最近一次CSQ信号值 (0~31, 99=未知)
 
 // ==================== LCD UI 接口 ====================
@@ -38,8 +40,14 @@ void lcd_ui_init(void);
 // 刷新当前页面数据 (采集后调用)
 void lcd_ui_refresh(PT304D_Data *inlet, PT304D_Data *outlet, float voltage);
 
+// 校零轮显专用: 仅更新缓存/当前页, 不触发"20s空闲回默认页"
+void lcd_ui_update_data(PT304D_Data *inlet, PT304D_Data *outlet, float voltage);
+
 // 切换到下一页
 void lcd_ui_next_page(void);
+
+// 切换到指定页 (未安装校零期固定压力页用)
+void lcd_ui_set_page(uint8_t page);
 
 // 更新信号强度图标 (4G在线查询CSQ后调用)
 void lcd_ui_update_signal(uint8_t csq);
@@ -52,5 +60,22 @@ void lcd_ui_toggle_bluetooth(void);
 
 // 更新电池图标 (根据电压)
 void lcd_ui_update_battery(float voltage);
+
+#else /* LCD_ENABLED == 0: 无 LCD 产品, 全部接口为空操作 (static inline, 零代码/零 Flash 开销) */
+
+#include <stdint.h>
+#include "PT_304_35.h"
+
+static inline void lcd_ui_init(void)                                            { }
+static inline void lcd_ui_refresh(PT304D_Data *a, PT304D_Data *b, float v)      { (void)a; (void)b; (void)v; }
+static inline void lcd_ui_update_data(PT304D_Data *a, PT304D_Data *b, float v)  { (void)a; (void)b; (void)v; }
+static inline void lcd_ui_next_page(void)                                       { }
+static inline void lcd_ui_set_page(uint8_t page)                                { (void)page; }
+static inline void lcd_ui_update_signal(uint8_t csq)                            { (void)csq; }
+static inline void lcd_ui_update_valve(uint8_t valve_on)                        { (void)valve_on; }
+static inline void lcd_ui_toggle_bluetooth(void)                                { }
+static inline void lcd_ui_update_battery(float voltage)                         { (void)voltage; }
+
+#endif /* LCD_ENABLED */
 
 #endif /* LCD_UI_H */

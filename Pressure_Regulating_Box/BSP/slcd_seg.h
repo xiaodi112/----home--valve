@@ -36,6 +36,7 @@ OF SUCH DAMAGE.
 #define LCD_SEG_H
 
 #include "gd32l23x.h"
+#include "app_config.h"
 
 typedef enum {
     INTEGER = 0,
@@ -66,6 +67,8 @@ typedef enum {
     SLCD_ICON_T4,				//LEL单位
     SLCD_ICON_S13				//KPa单位
 } slcd_icon_enum;
+
+#if LCD_ENABLED
 
 /* configure SLCD peripheral */
 void slcd_seg_configuration(void);
@@ -107,5 +110,14 @@ void slcd_seg_batch_end(void);
 void slcd_seg_flush(void);
 /* 仅清除数字段码+小数点+页面图标, 保留电池/信号/阀门/蓝牙等常驻图标 */
 void slcd_seg_clear_digits(void);
+
+#else /* LCD_ENABLED == 0: 无 LCD 产品, 对外接口为空操作 (零 Flash 开销) */
+
+/* 其它模块(主要是 main.c)会调用的三个接口: 无 LCD 时空操作 */
+static inline void slcd_seg_configuration(void)                                 { }
+static inline void slcd_shutdown(void)                                          { }
+static inline void slcd_seg_icon_display(slcd_icon_enum icon, FlagStatus state)  { (void)icon; (void)state; }
+
+#endif /* LCD_ENABLED */
 
 #endif /* LCD_SEG_H */

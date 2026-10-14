@@ -32,6 +32,9 @@ void config_save_tthreshold2(void);
 void config_save_user_mqtt(void);
 void config_save_valve_timing(void);
 void config_save_abn23(void);
+/* 单字段写入 (堵转方案): 阈值 / 位置可信标志 */
+void config_save_motor_cs_th(void);
+void config_save_valve_pos_valid(void);
 uint16_t config_get_keepalive(void);
 void derive_topic_from_client_id(void);
 

@@ -52,10 +52,11 @@ uint8_t soft_i2c_read_byte(const SoftI2C_t *bus, uint8_t ack);   /* 读1字节, 
 uint8_t soft_i2c_check(const SoftI2C_t *bus, uint8_t addr);      /* 探测设备(7bit地址): 0=存在 */
 
 /* ---- 传感器总线管理 ----
- * I2C 常供电板型: sensor_pwr_on/off 为空实现 (兼容旧调用点)。
- * PC3 已改作电压采集基准, 由 adc_bat 模块管理, 严禁在此驱动 PC3。 */
+ * 传感器 IIC 电源由 PC3 开关控制 (HIGH=供电, 见 BSP/power.h)。
+ * 采集前 sensor_pwr_on() 上电并等待稳定, 采集结束 sensor_pwr_off() 断电。 */
+#define SENSOR_PWR_SETTLE_MS   50      /* 传感器上电到可通信的稳定时间(ms) */
 void soft_i2c_sensors_init(void);   /* 初始化 IIC1+IIC2 总线 GPIO (开漏释放) */
-void sensor_pwr_on(void);           /* 空实现: 常供电板型 */
-void sensor_pwr_off(void);          /* 空实现: 常供电板型 */
+void sensor_pwr_on(void);           /* 传感器 IIC 上电 (PC3=HIGH) + 稳定延时 */
+void sensor_pwr_off(void);          /* 传感器 IIC 断电 (PC3=LOW) */
 
 #endif /* SOFT_I2C_H */

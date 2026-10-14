@@ -35,6 +35,8 @@ OF SUCH DAMAGE.
 #include "slcd_seg.h"
 #include "gd32l23x.h"
 
+/* 无 LCD 产品 (LCD_ENABLED=0): 整个 SLCD 驱动不参与编译, 不占用 Flash */
+#if LCD_ENABLED
 
 /*!
     \brief      configure SLCD low-speed clock source
@@ -968,5 +970,7 @@ void slcd_seg_clear_all(void)
     s_shadow[3] = 0;
     slcd_auto_flush();
 }
+
+#endif /* LCD_ENABLED */
 
 

@@ -3,7 +3,8 @@
  * @brief 阈值检查模块 — 依据 g_pthreshold/g_tthreshold/g_spupower 三组配置
  *
  * 数据存储由 eeprom_config 管理, 本模块只负责检查逻辑.
- * shock 滞回带仅作用于压力静态阈值 (ppmax/pmax/ppmin/pmin), 不作用于 mutation.
+ * 压力静态阈值(ppmax/pmax/ppmin/pmin)采用 ±shock 双边迟滞: 进入用 T+s, 退出用 T-s,
+ * 带内保持上一次档位; mutation(压力突变)不参与迟滞.
  */
 
 #include "threshold.h"
@@ -18,11 +19,86 @@
  * shock 滞回带是修正量, 不参与"0=关闭" */
 #define THR_ACTIVE(v)  ((v) != 0.0f)
 
+/* ==================== 压力静态阈值双边迟滞 (±shock) ====================
+ * 规则(以高侧为例, T=阈值, s=shock):
+ *   进入报警: p > T + s      退出报警: p < T - s
+ *   带内(T-s ~ T+s): 保持上一次档位(不来回翻转) —— 这才是真正的迟滞
+ * 低侧对称: 进入 p < T - s, 退出 p > T + s
+ * 档位: 0=正常, 1=普通档(pmax/pmin), 2=极限档(ppmax/ppmin)
+ * 状态为纯 RAM(上电清零); 阈值/shock/switch 变化时按配置快照自动复位,
+ * 避免"改了阈值状态还锁在报警"。判定与上报共用同一状态, 保证两侧一致。 */
+typedef struct {
+    float   ppmax, pmax, ppmin, pmin, shock;
+    uint8_t enabled;
+} PressHystCfg_t;
+
+static uint8_t        s_hi_level[2] = {0, 0};   /* [0]=进气端 [1]=出气端; 0=正常 1=高 2=超高 */
+static uint8_t        s_lo_level[2] = {0, 0};   /* 0=正常 1=低 2=超低 */
+static PressHystCfg_t s_hyst_cfg[2];
+
+/* 配置变化(或首次使用)时复位迟滞状态 */
+static void press_hyst_sync_cfg(uint8_t ch)
+{
+    const PressureThresholdConfig_t *cfg  = ch ? &g_pthreshold2 : &g_pthreshold;
+    PressHystCfg_t                  *snap = &s_hyst_cfg[ch];
+
+    if(snap->ppmax != cfg->ppmax || snap->pmax != cfg->pmax ||
+       snap->ppmin != cfg->ppmin || snap->pmin != cfg->pmin ||
+       snap->shock != cfg->shock || snap->enabled != cfg->enabled)
+    {
+        snap->ppmax = cfg->ppmax; snap->pmax = cfg->pmax;
+        snap->ppmin = cfg->ppmin; snap->pmin = cfg->pmin;
+        snap->shock = cfg->shock; snap->enabled = cfg->enabled;
+        s_hi_level[ch] = 0;
+        s_lo_level[ch] = 0;
+    }
+}
+
+/* 更新某一通道的压力档位(双边迟滞), 判定与上报共用这一份状态 */
+static void press_hyst_update(uint8_t ch, float p)
+{
+    const PressureThresholdConfig_t *cfg = ch ? &g_pthreshold2 : &g_pthreshold;
+    float   s;
+    uint8_t hi, lo;
+
+    press_hyst_sync_cfg(ch);           /* 配置变更时状态已被复位 */
+
+    s  = cfg->shock;
+    hi = s_hi_level[ch];
+    lo = s_lo_level[ch];
+
+    if(!cfg->enabled)
+    {
+        s_hi_level[ch] = 0;
+        s_lo_level[ch] = 0;
+        return;
+    }
+
+    /* 高侧: 进入 > T+s; 已在该档则 > T-s 保持 */
+    if(THR_ACTIVE(cfg->ppmax) && (p > cfg->ppmax + s || (hi == 2 && p > cfg->ppmax - s)))
+        hi = 2;
+    else if(THR_ACTIVE(cfg->pmax) && (p > cfg->pmax + s || (hi >= 1 && p > cfg->pmax - s)))
+        hi = 1;
+    else
+        hi = 0;
+
+    /* 低侧: 进入 < T-s; 已在该档则 < T+s 保持 */
+    if(THR_ACTIVE(cfg->ppmin) && (p < cfg->ppmin - s || (lo == 2 && p < cfg->ppmin + s)))
+        lo = 2;
+    else if(THR_ACTIVE(cfg->pmin) && (p < cfg->pmin - s || (lo >= 1 && p < cfg->pmin + s)))
+        lo = 1;
+    else
+        lo = 0;
+
+    s_hi_level[ch] = hi;
+    s_lo_level[ch] = lo;
+}
+
 // ==================== 阈值检查 ====================
 // 优先级:
 //   1. spupower.protect (VPROTECT, 仅报警; VLP模式由 main.c 门控)
-//   2. vpthreshold ppmax/ppmin + shock (压力极限)
-//   3. vpthreshold pmax/pmin + shock   (压力上下限)
+//   2. vpthreshold ppmax/ppmin  (压力极限, 双边迟滞 ±shock)
+//   3. vpthreshold pmax/pmin    (压力上下限, 双边迟滞 ±shock)
 //   4. Tthreshold vhigh/vlow            (温度极限)
 //   5. Tthreshold high/low              (温度上下限)
 //   6. spupower high/low                (电压上下限)
@@ -36,20 +112,14 @@ ThresholdResult_t threshold_check(float pressure, float temperature, float volta
        THR_ACTIVE(g_spupower.protect) && voltage < g_spupower.protect - 0.1f)
         return THRESHOLD_VPROTECT;
 
-    // ---- 2/3. 压力检查 (含 shock 滞回带) ----
+    // ---- 2/3. 压力检查 (双边迟滞: 进入 ±shock, 退出 ∓shock, 带内保持档位) ----
+    press_hyst_update(0, pressure);
     if(g_pthreshold.enabled)
     {
-        float shock = g_pthreshold.shock;
-        // 压力极限 (ppmin/ppmax)
-        if(THR_ACTIVE(g_pthreshold.ppmax) && pressure > g_pthreshold.ppmax + shock)
-            return THRESHOLD_VERY_HIGH;
-        if(THR_ACTIVE(g_pthreshold.ppmin) && pressure < g_pthreshold.ppmin - shock)
-            return THRESHOLD_VERY_LOW;
-        // 普通上下限
-        if(THR_ACTIVE(g_pthreshold.pmax) && pressure > g_pthreshold.pmax + shock)
-            return THRESHOLD_OVER_LIMIT;
-        if(THR_ACTIVE(g_pthreshold.pmin) && pressure < g_pthreshold.pmin - shock)
-            return THRESHOLD_UNDER_LIMIT;
+        if(s_hi_level[0] == 2) return THRESHOLD_VERY_HIGH;
+        if(s_lo_level[0] == 2) return THRESHOLD_VERY_LOW;
+        if(s_hi_level[0] == 1) return THRESHOLD_OVER_LIMIT;
+        if(s_lo_level[0] == 1) return THRESHOLD_UNDER_LIMIT;
     }
 
     // ---- 4/5. 温度检查 ----
@@ -124,22 +194,18 @@ int threshold_voltage_alarm(float voltage)
 }
 
 // ==================== 压力状态查询 ====================
-// switch=0 → PRESSURE_NORMAL; shock 滞回应用于所有静态边界
+// switch=0 → PRESSURE_NORMAL; 静态边界使用双边迟滞(±shock, 带内保持档位)
 PressureStatus_t threshold_get_pressure_status(float pressure, float last_pressure)
 {
+    press_hyst_update(0, pressure);
+
     if(!g_pthreshold.enabled)
         return PRESSURE_NORMAL;
 
-    float shock = g_pthreshold.shock;
-
-    if(THR_ACTIVE(g_pthreshold.ppmax) && pressure > g_pthreshold.ppmax + shock)
-        return PRESSURE_VERYHIGH;
-    if(THR_ACTIVE(g_pthreshold.ppmin) && pressure < g_pthreshold.ppmin - shock)
-        return PRESSURE_VERYLOW;
-    if(THR_ACTIVE(g_pthreshold.pmax) && pressure > g_pthreshold.pmax + shock)
-        return PRESSURE_HIGH;
-    if(THR_ACTIVE(g_pthreshold.pmin) && pressure < g_pthreshold.pmin - shock)
-        return PRESSURE_LOW;
+    if(s_hi_level[0] == 2) return PRESSURE_VERYHIGH;
+    if(s_lo_level[0] == 2) return PRESSURE_VERYLOW;
+    if(s_hi_level[0] == 1) return PRESSURE_HIGH;
+    if(s_lo_level[0] == 1) return PRESSURE_LOW;
 
     if(last_pressure >= 0)
     {
@@ -155,12 +221,12 @@ const char* threshold_pressure_status_str(PressureStatus_t status)
 {
     switch(status)
     {
-        case PRESSURE_LOW:       return "pressure_low";
-        case PRESSURE_HIGH:      return "pressure_high";
-        case PRESSURE_VERYLOW:   return "pressure_verylow";
-        case PRESSURE_VERYHIGH:  return "pressure_veryhigh";
-        case PRESSURE_MUTATION:  return "pressure_mutation";
-        default:                 return "pressure_normal";
+        case PRESSURE_LOW:       return "pressure-low";
+        case PRESSURE_HIGH:      return "pressure-high";
+        case PRESSURE_VERYLOW:   return "pressure-verylow";
+        case PRESSURE_VERYHIGH:  return "pressure-veryhigh";
+        case PRESSURE_MUTATION:  return "pressure-mutation";
+        default:                 return "pressure-normal";
     }
 }
 
@@ -186,11 +252,11 @@ const char* threshold_temp_status_str(TempStatus_t status)
 {
     switch(status)
     {
-        case TEMP_HIGH:       return "temp_high";
-        case TEMP_LOW:        return "temp_low";
-        case TEMP_VERY_HIGH:  return "temp_very_high";
-        case TEMP_VERY_LOW:   return "temp_very_low";
-        default:              return "temp_normal";
+        case TEMP_HIGH:       return "temp-high";
+        case TEMP_LOW:        return "temp-low";
+        case TEMP_VERY_HIGH:  return "temp-very-high";
+        case TEMP_VERY_LOW:   return "temp-very-low";
+        default:              return "temp-normal";
     }
 }
 
@@ -198,18 +264,14 @@ const char* threshold_temp_status_str(TempStatus_t status)
 // 基于 g_pthreshold2/g_tthreshold2, 不含电压检查 (电压为全局共享)
 ThresholdResult_t threshold_check2(float pressure, float temperature, float last_pressure, uint8_t skip_mutation)
 {
-    // ---- 压力检查 (含 shock 滞回带) ----
+    // ---- 压力检查 (双边迟滞: 进入 ±shock, 退出 ∓shock, 带内保持档位) ----
+    press_hyst_update(1, pressure);
     if(g_pthreshold2.enabled)
     {
-        float shock = g_pthreshold2.shock;
-        if(THR_ACTIVE(g_pthreshold2.ppmax) && pressure > g_pthreshold2.ppmax + shock)
-            return THRESHOLD_VERY_HIGH;
-        if(THR_ACTIVE(g_pthreshold2.ppmin) && pressure < g_pthreshold2.ppmin - shock)
-            return THRESHOLD_VERY_LOW;
-        if(THR_ACTIVE(g_pthreshold2.pmax) && pressure > g_pthreshold2.pmax + shock)
-            return THRESHOLD_OVER_LIMIT;
-        if(THR_ACTIVE(g_pthreshold2.pmin) && pressure < g_pthreshold2.pmin - shock)
-            return THRESHOLD_UNDER_LIMIT;
+        if(s_hi_level[1] == 2) return THRESHOLD_VERY_HIGH;
+        if(s_lo_level[1] == 2) return THRESHOLD_VERY_LOW;
+        if(s_hi_level[1] == 1) return THRESHOLD_OVER_LIMIT;
+        if(s_lo_level[1] == 1) return THRESHOLD_UNDER_LIMIT;
     }
 
     // ---- 温度检查 ----
@@ -241,19 +303,15 @@ ThresholdResult_t threshold_check2(float pressure, float temperature, float last
 // 基于 g_pthreshold2 配置, 逻辑同 threshold_get_pressure_status
 PressureStatus_t threshold_get_pressure_status2(float pressure, float last_pressure)
 {
+    press_hyst_update(1, pressure);
+
     if(!g_pthreshold2.enabled)
         return PRESSURE_NORMAL;
 
-    float shock = g_pthreshold2.shock;
-
-    if(THR_ACTIVE(g_pthreshold2.ppmax) && pressure > g_pthreshold2.ppmax + shock)
-        return PRESSURE_VERYHIGH;
-    if(THR_ACTIVE(g_pthreshold2.ppmin) && pressure < g_pthreshold2.ppmin - shock)
-        return PRESSURE_VERYLOW;
-    if(THR_ACTIVE(g_pthreshold2.pmax) && pressure > g_pthreshold2.pmax + shock)
-        return PRESSURE_HIGH;
-    if(THR_ACTIVE(g_pthreshold2.pmin) && pressure < g_pthreshold2.pmin - shock)
-        return PRESSURE_LOW;
+    if(s_hi_level[1] == 2) return PRESSURE_VERYHIGH;
+    if(s_lo_level[1] == 2) return PRESSURE_VERYLOW;
+    if(s_hi_level[1] == 1) return PRESSURE_HIGH;
+    if(s_lo_level[1] == 1) return PRESSURE_LOW;
 
     if(last_pressure >= 0)
     {

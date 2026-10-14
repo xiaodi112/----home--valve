@@ -74,6 +74,8 @@
  *    0x288: vlp_flag (1B)
  *    0x289: ch4_alarm_closed (1B, 激光甲烷报警关阀标志, 重启后保持, 平台 valve_open 清除)
  *    0x28A-0x28D: report_delay_min (float, 周期上报后延分钟, 0~60, 支持小数如1.5)
+ *    0x232-0x233: motor_cs_th (uint16, 堵转判定电流阈值 ADC 原始值; 0=未标定)
+ *    0x234: valve_pos_valid (1B, 阀门位置可信标志: 动作前置0, 到位后置1)
  *
  *  区块 7: 阀门到位延时 valve_delay (Magic 0xC3)
  *    0x290: Magic
@@ -141,6 +143,9 @@
 #define EE_ADDR_MQTT_PORT2        0x280
 #define EE_ADDR_REAL_ENABLED      0x282
 #define EE_ADDR_REAL_FREQUENCY    0x283
+#define EE_ADDR_MOTOR_CS_TH       0x232   /* 2B uint16: 堵转电流阈值(ADC原始值, 0=未标定) */
+#define EE_ADDR_VALVE_POS_VALID   0x234   /* 1B: 阀门位置可信标志(脏标志法, 回零后置1) */
+#define EE_ADDR_VALVE_POS_STATE   0x235   /* 1B: 阀门物理位置(0=关到底, 1=开到底; 配合 POS_VALID) */
 #define EE_ADDR_VALVE_ALARM_CLOSED 0x284
 #define EE_ADDR_VALVE_PRE_ALARM_ORDER 0x285
 #define EE_ADDR_CH4_ALARM_CLOSED  0x289
@@ -244,6 +249,24 @@
 #define EE_ADDR_ABNORMAL3_CLOSE   0x4E1
 #define EE_MAGIC_ABN23            0xCB
 
+// 区块 15: 存储布局版本 (Magic 0xCC)
+//   0x4F0: Magic (0xCC)
+//   0x4F1: layout_ver (1B) 当前 = EE_LAYOUT_VER_CURRENT
+// 作用: 记录当前 EEPROM 分区布局版本。上电时若读到非当前版本(老固件升级上来),
+//       主动格式化受影响的区(历史区/测漏区)后写回版本号, 使迁移行为确定,
+//       不依赖"新地址恰好命中旧 magic"的概率。
+#define EE_ADDR_LAYOUT_MAGIC      0x4F0
+#define EE_ADDR_LAYOUT_VER        0x4F1
+
+/* 区块 16: 上报周期防重锁 (Magic 0xCD, 跨重启保持)
+ *   0x500: Magic
+ *   0x501-0x504: last_upload_idx (uint32) = 绝对分钟 / 上报周期分钟 (整点网格序号)
+ * 记录"最后一次成功上报的上报周期序号", 保证"一个上报周期只上报一次"(跨重启保持);
+ * 旧设备无此 magic → 读回 0xFFFFFFFF(未上报), 兼容。
+ * 注: 本工程 0x4F0/0x4F1 已被区块 15(存储布局版本, magic 0xCC) 占用, 故从 0x500 起。 */
+#define EE_ADDR_UPL_MAGIC         0x500   /* 1B  magic */
+#define EE_ADDR_UPL_DONE_IDX      0x501   /* 4B  uint32 上报周期序号 */
+
 // ==================== Magic ====================值 ====================
 #define EE_MAGIC_INTERVAL         0xA5
 #define EE_MAGIC_MQTT             0x5A
@@ -257,6 +280,13 @@
 #define EE_MAGIC_UMQTT            0xC6
 #define EE_MAGIC_VTIMING          0xC8
 #define EE_MAGIC_CH4              0xC9
+#define EE_MAGIC_LAYOUT           0xCC
+#define EE_MAGIC_UPL              0xCD
+
+/* 当前存储布局版本: 1=旧布局(测漏0x1000/600条 + 历史0x5B00/3367条)
+ *                      2=新布局(测漏0x1000/2047条 + 历史0x11000/1919条)
+ * 布局再次调整时该值 +1 即可, 设备自动迁移 */
+#define EE_LAYOUT_VER_CURRENT     2
 
 
 // 定时开关阀 (ValveTiming, YYMMDDHHMM)
@@ -282,12 +312,12 @@
 // 阀门到位延时 (valve_delay)
 #define DEF_VD_SWITCH        0
 #define DEF_VD_TIME_MS       0
-// 安全上限: 阀门到位保持 PWM 驱动的最长时间(ms)
+// 安全上限: 阀门到位保持 PWM 驱动的最长时间5000(ms)
 // 防止误配置超长延时, 保护电机与阀门
-#define VDLY_DELAY_MS_MAX    5000
+#define VDLY_DELAY_MS_MAX    0
 
-/* 阀门限位到位等待超时 (ms): 默认40s, 可配置 1~120s (看门狗180s, 留余量) */
-#define DEF_VALVE_TIMEOUT_MS   40000
+/* 阀门限位到位等待超时 (ms): 可配置 1~120s (看门狗180s, 留余量) */
+#define DEF_VALVE_TIMEOUT_MS   6000
 #define VALVE_TIMEOUT_MS_MIN   1000
 #define VALVE_TIMEOUT_MS_MAX   120000
 
@@ -297,23 +327,33 @@
 #define DEF_SP_LOW           0.0f
 #define DEF_SP_PROTECT       0.0f
 
-// 压力阈值 (vpthreshold) 为 第一路(进气端)
-#define DEF_VP_SWITCH        0
+// 压力阈值 (vpthreshold) 为 第一路(进气端,单路传感器依旧使用此
+#if APP_DEFAULT_SENSOR_COUNT == 1
+#define DEF_VP_SWITCH        1
 #define DEF_VP_PPMAX         0.0f
 #define DEF_VP_PMAX          0.0f
 #define DEF_VP_PPMIN         0.0f
 #define DEF_VP_PMIN          0.0f
 #define DEF_VP_MUTATION      0.0f
-#define DEF_VP_SHOCK         0.0f
+#define DEF_VP_SHOCK         100.0f
+#elif APP_DEFAULT_SENSOR_COUNT == 2
+#define DEF_VP_SWITCH        1
+#define DEF_VP_PPMAX         0.0f
+#define DEF_VP_PMAX          0.0f
+#define DEF_VP_PPMIN         0.0f
+#define DEF_VP_PMIN          0.0f
+#define DEF_VP_MUTATION      0.0f
+#define DEF_VP_SHOCK         3000.0f
+#endif
 
 // 压力阈值 (vpthreshold2) 为 第二路(出气端)
-#define DEF_VP2_SWITCH       0
+#define DEF_VP2_SWITCH       1
 #define DEF_VP2_PPMAX        0.0f
 #define DEF_VP2_PMAX         0.0f
 #define DEF_VP2_PPMIN        0.0f
 #define DEF_VP2_PMIN         0.0f
 #define DEF_VP2_MUTATION     0.0f
-#define DEF_VP2_SHOCK        0.0f
+#define DEF_VP2_SHOCK        100.0f
 
 /* CH4 enabled 字段仅作 EEPROM 存储兼容/打印, 不再参与任何逻辑;
  * 激光传感器功能由编译宏 LASER_CH4_ENABLED (app_config.h) 决定 */
@@ -439,6 +479,11 @@ extern uint8_t                    g_lcd_enabled;          // LCD显示开关 (0=
 extern uint8_t                    g_sensor_count;         // 传感器数量 (1=单路, 2=双路, EEPROM持久化)
 extern uint16_t                   g_keepalive_sec;        // MQTT心跳(秒)
 extern uint32_t                   g_valve_timeout_ms;     // 阀门限位到位等待超时(ms), 默认40000
+extern uint16_t                   g_motor_cs_th;          // 堵转判定电流阈值(ADC原始值; 0=未标定, 判定关闭)
+extern uint8_t                    g_valve_pos_valid;      // 阀门位置可信标志(1=可信; 0=中途掉电/未回零)
+/* 阀门物理位置(0=关到底, 1=开到底): 与"用户最后指令" g_valve_last_order 解耦,
+ * 平台指令/定时阀/异常关阀/回零 等所有确认到位的动作都会更新它 */
+extern uint8_t                    g_valve_pos_state;
 extern TempThresholdConfig_t      g_tthreshold;           // 第一路温度阈值
 extern TempThresholdConfig_t      g_tthreshold2;          // 第二路温度阈值
 extern ValveDelayConfig_t         g_vdelay;               // 阀门到位延时
@@ -465,6 +510,10 @@ void derive_topic_from_client_id(void);
 
 // 保存扩展配置到EEPROM (window/cycle/abnormal/valve_last_order)
 void config_save_ext(void);
+
+/* 上报周期防重锁 (持久化, 区块16): 上报成功后提交"上报周期序号"; 读回无效时返回 0xFFFFFFFF */
+void     config_save_upload_idx(uint32_t idx);
+uint32_t config_load_upload_idx(void);
 
 // 保存压力阈值配置 (含 keepalive)
 void config_save_vpthreshold(void);
@@ -498,6 +547,11 @@ void config_save_laser(void);
 // 保存出气端/激光异常关阀配置 (abnormal2_close + abnormal3_close)
 void config_save_abn23(void);
 
+/* 单字段写入 (堵转方案): 电流阈值 / 阀门位置可信标志
+ * 注: 动作频繁, 用单字段写避免整块 EXT 重写, 延长 EEPROM 寿命 */
+void config_save_motor_cs_th(void);
+void config_save_valve_pos_valid(void);
+
 // 获取心跳值(含默认值)
 uint16_t config_get_keepalive(void);
 
@@ -507,6 +561,11 @@ const char* cycle_type_to_str(CycleType_t type);
 
 // 将周期配置转换为秒数
 uint32_t cycle_to_seconds(const CycleConfig_t *cfg);
+
+/* 周期上限/越界钳制 (保证 minutes 域不溢出, 支持跨天周期)
+ * 注: 与 config_policy.h 同源声明; downlink.c 经由本头文件取用 */
+uint32_t cycle_max_once(CycleType_t type);
+uint8_t  cycle_clamp(CycleConfig_t *cfg);
 
 // 异常关阀策略 <-> 枚举
 AbnormalClose_t abnormal_from_str(const char *str);
@@ -523,6 +582,13 @@ void config_print_current(void);
 
 // 根据周期配置重算间隔
 void config_recalc_interval(void);
+
+/* ==================== 存储布局版本 / 迁移 ====================
+ * 上电调用(config_load_all + ee_hist_init + leak_store_init 之后, 任何历史/测漏读写之前):
+ *   读到当前布局版本 → 直接返回 0
+ *   否则(老固件升级/首次烧写设备) → 格式化历史区与测漏区, 写入当前版本, 返回 1
+ * 保障: 布局变更后不会把旧分区的残留数据当成有效历史/测漏数据。 */
+uint8_t eeprom_layout_check_and_migrate(void);
 
 // 统一配置解析函数(可处理部分命令)
 // 返回: 1=有效命令, 0=无效, -1=reset(恢复默认并重启)

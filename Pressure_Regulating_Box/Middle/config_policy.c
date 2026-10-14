@@ -5,6 +5,7 @@
  */
 #include "config_policy.h"
 #include "eeprom_config.h"
+#include "calib_mode.h"
 #include "tim.h"
 #include <string.h>
 #include <stdlib.h>
@@ -111,6 +112,97 @@ uint32_t cycle_to_seconds(const CycleConfig_t *cfg)
     }
 }
 
+/* 单位对应的 once 上限: 保证 once*单位 <= 65535 分钟 (g_interval.*_min 为 uint16),
+ * 同时避免 cycle_to_seconds 的 uint32 乘法回绕 (week 原上限约 7101)。 */
+uint32_t cycle_max_once(CycleType_t type)
+{
+    switch(type)
+    {
+        case CYCLE_SEC:    return 65535u;   /* 65535 s  = 18.2 h   */
+        case CYCLE_MINUTE: return 65535u;   /* 65535 min= 45.5 天  */
+        case CYCLE_HOUR:   return 1092u;    /* 1092 h   = 65520 min */
+        case CYCLE_DAY:    return 45u;      /* 45 天    = 64800 min */
+        case CYCLE_WEEK:   return 6u;       /* 6 周     = 60480 min */
+        default:           return 65535u;
+    }
+}
+
+/* 周期越界钳制; 返回 1=发生过修正(调用方可打印日志) */
+uint8_t cycle_clamp(CycleConfig_t *cfg)
+{
+    uint32_t max_once;
+
+    if(cfg == NULL) return 0;
+    max_once = cycle_max_once(cfg->type);
+
+    if(cfg->once == 0u)
+    {
+        cfg->once = 1u;
+        return 1u;
+    }
+    if((uint32_t)cfg->once > max_once)
+    {
+        cfg->once = (uint16_t)max_once;
+        return 1u;
+    }
+    return 0u;
+}
+
+/* ==================== 绝对时间轴 (跨天周期调度) ====================
+ * 以 1999-12-27(周一) 为第 0 天, 使:
+ *   1 day  → 每天 00:00 (与旧"按当天取模"行为一致)
+ *   N day  → 每 N 天 00:00
+ *   1 week → 每周一 00:00
+ * RTC 年份仅 00~99 (2000~2099), 闰年按 %4 判定 (2100 不在可表示范围内) */
+#define SCHED_EPOCH_DOW_OFFSET   5u    /* 2000-01-01 为周六, +5 天对齐到周一 */
+
+static const uint16_t s_sched_mdays[12] =
+    {0u, 31u, 59u, 90u, 120u, 151u, 181u, 212u, 243u, 273u, 304u, 334u};
+
+/* 自 1999-12-27(周一) 起的天数 */
+uint32_t sched_day_index(uint8_t year, uint8_t month, uint8_t day)
+{
+    uint32_t days = 0;
+    uint8_t y;
+
+    if(month < 1u)  month = 1u;
+    if(month > 12u) month = 12u;
+    if(day < 1u)    day = 1u;
+    if(day > 31u)   day = 31u;
+    if(year > 99u)  year = 99u;     /* RTC 仅表示 00~99; 野值会让累加越界致 abs_sec 溢出 */
+
+    for(y = 0; y < year; y++)
+        days += ((y % 4u) == 0u) ? 366u : 365u;        /* 2000 ~ (2000+year-1) */
+    days += s_sched_mdays[month - 1u];
+    if(month > 2u && ((year % 4u) == 0u))
+        days += 1u;                                     /* 当年闰年的 2/29 */
+    days += (uint32_t)(day - 1u);
+
+    return days + SCHED_EPOCH_DOW_OFFSET;
+}
+
+uint32_t sched_abs_min_of(uint8_t year, uint8_t month, uint8_t day,
+                          uint8_t hour, uint8_t minute)
+{
+    return sched_day_index(year, month, day) * 1440u
+         + (uint32_t)hour * 60u + (uint32_t)minute;
+}
+
+uint32_t sched_abs_min(void)
+{
+    RtcDateTime_t dt;
+    rtc_get_datetime(&dt);
+    return sched_abs_min_of(dt.year, dt.month, dt.day, dt.hour, dt.minute);
+}
+
+uint32_t sched_abs_sec(void)
+{
+    RtcDateTime_t dt;
+    rtc_get_datetime(&dt);
+    return sched_day_index(dt.year, dt.month, dt.day) * 86400u
+         + ((uint32_t)dt.hour * 60u + (uint32_t)dt.minute) * 60u + (uint32_t)dt.second;
+}
+
 // ==================== 异常关阀工具函数 ====================
 AbnormalClose_t abnormal_from_str(const char *str)
 {
@@ -215,7 +307,8 @@ if(strcmp(g_window.pattern, "dot") == 0)
         uint8_t cur_min = (uint8_t)((now_hhmmss / 100) % 100);
 
         uint8_t is_last_col = (window_dottime_hit(g_window.dottime_mask, cur_hour) && cur_min == 0);
-        uint8_t is_first_col = (window_dottime_hit(g_window.dottime_mask, cur_hour) && cur_min == g_interval.collect_interval_min);
+        uint16_t eff_col = (calib_is_active() ? CALIB_SAMPLE_MIN : g_interval.collect_interval_min);
+        uint8_t is_first_col = (window_dottime_hit(g_window.dottime_mask, cur_hour) && cur_min == eff_col);
 
         if (is_last_col || is_first_col)
             return 1;
@@ -231,7 +324,7 @@ if(strcmp(g_window.pattern, "long") == 0 || strcmp(g_window.pattern, "short") ==
                                + (uint16_t)((now_hhmmss / 100) % 100);
 
         uint16_t upload_interval = g_interval.upload_interval_min;
-        uint16_t collect_interval = g_interval.collect_interval_min;
+        uint16_t collect_interval = (calib_is_active() ? CALIB_SAMPLE_MIN : g_interval.collect_interval_min);
 
         if (upload_interval == 0 || collect_interval == 0)
             return 1;

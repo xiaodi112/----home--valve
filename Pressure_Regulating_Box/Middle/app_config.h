@@ -6,8 +6,8 @@
  *   EEPROM_DRV_M24M01  : M24M01 (128KB, default)
  *   EEPROM_DRV_AT24C64 : AT24C64 (8KB)
  */
-//#define EEPROM_DRV_M24M01
-#define EEPROM_DRV_AT24C64
+#define EEPROM_DRV_M24M01
+//#define EEPROM_DRV_AT24C64
 
 #if defined(EEPROM_DRV_M24M01) && defined(EEPROM_DRV_AT24C64)
   #error "EEPROM: pick exactly one chip (M24M01 / AT24C64)"
@@ -60,8 +60,8 @@
 #define APP_DEFAULT_WINDOW_PATTERN    "long"    /* long=长连接 short=短连接 dot=定点 */
 #define APP_DEFAULT_WINDOW_END_RESULT 1         /* 0=窗口结束4G断电 1=保持在线 (long模式) */
 #define APP_DEFAULT_WINDOW_DOTTIME    0         /* dot模式整点小时(0-23) */
-#define APP_DEFAULT_WINDOW_START      "080000" /* short模式: 活动窗口开始 HHMMSS */
-#define APP_DEFAULT_WINDOW_STOP       "180000" /* short模式: 活动窗口结束 HHMMSS */
+#define APP_DEFAULT_WINDOW_START      "000000" /* short模式: 活动窗口开始 HHMMSS */
+#define APP_DEFAULT_WINDOW_STOP       "000000" /* short模式: 活动窗口结束 HHMMSS */
 
 /* ---------- 采集/上报周期默认值 (与 APP_DEFAULT_COLLECT/UPLOAD_HOURS 等价, 单位粒度更细) ---------- */
 #define APP_DEFAULT_COLLECT_ONCE      20        /* 采集周期数值 */
@@ -81,7 +81,14 @@
 	BUTTON_ENABLED=0 + LCD_LOCK_ENABLED=0 — 无按键 + LCD 长亮轮显
 	BUTTON_ENABLED=0 + LCD_LOCK_ENABLED=1 — 无按键 + LCD 受控（不合理组合）
 */
-/* ---------- LCD显示模式编译开关 ---------- */
+/* ---------- LCD 显示总开关 (产品选配, 编译期) ----------
+ * 1 = 带段码 LCD 产品: 编译 BSP/slcd_seg.c + App/lcd_ui.c 并启用全部显示逻辑
+ * 0 = 无 LCD 产品: SLCD 驱动/UI/超时/校零短亮 整块不参与编译, 相关调用变空操作
+ * 注: 无 LCD 板上 PA10/PB0/PB11/PB12/PB13/PB14 已改作 LED3/电机电流/ADC基准/空闲/4G,
+ *     与 SLCD 引脚复用冲突, 因此本板必须为 0。 */
+#define LCD_ENABLED                   0
+
+/* ---------- LCD显示模式编译开关 (仅 LCD_ENABLED=1 时有效) ---------- */
 #define LCD_LOCK_ENABLED              0         /* 1=LCD按键锁定(60s超时关屏/20s回默认页); 0=LCD常亮+采集周期自动翻页 */
 
 #define LCD_SINGLE_SENSOR             1         /* 1=6页界面显示（6,一个传感器); 0=8页界面显示(8,2个传感器) */
@@ -94,39 +101,72 @@
 
 /* ---------- 电机(阀门执行器)硬件选配 (编译开关) ----------
  * 1=硬件带电机: 编译电机驱动/阀门动作(删除运行时门控, 直接生效)
- * 0=无电机: 电机代码整块剔除, 节省 RAM/Flash, 阀门指令返回 valve_err
+ * 0=无电机: 电机代码整块剔除, 节省 RAM/Flash, 阀门指令返回 valve-err
  */
-#define MOTOR_ENABLED                 0
+#define MOTOR_ENABLED                 1
+
+/* ---------- 蓝牙(含 BLE OTA)功能开关 ----------
+ * 1 = 带蓝牙: 编译 BLE OTA 状态机 / UART4 / BLE 电源控制
+ * 0 = 本产品不使用蓝牙: 上述全部停用; PB3/PB4(UART4)、PC12(SW_BT)、PD2(连接检测)
+ *     在深睡时转为模拟以省电 (引脚可另行复用) */
+#define BLE_ENABLED                   0
+
+/* ---------- 零点(大气基准)标定参数 ----------
+ * 新传感器为绝压式, 空载读数≈当地大气压; 以"大气压"为零点基准,
+ * 后续测量值 = 传感器读数 - 基准 (表压)。
+ * 安全约束: 上电只在 EEPROM 无有效基准时自动采集一次; 其余情况只读不改;
+ *           用户可用按键手势显式重校 (见 ZERO_CAL_HOLD_MS / CONFIRM_*) */
+#define ZERO_CAL_SENSOR_IDX           1        /* 传感器索引: 1 = PT304D_SENSOR_2 (中压/进气端, 0x76) */
+#define ZERO_CAL_SAMPLE_CNT           5        /* 采样次数 */
+#define ZERO_CAL_SAMPLE_MS            500      /* 采样间隔(ms) */
+#define ZERO_CAL_WINDOW_MIN_PA        60000    /* 大气窗口下限(Pa) */
+#define ZERO_CAL_WINDOW_MAX_PA        120000   /* 大气窗口上限(Pa) */
+#define ZERO_CAL_DEFAULT_PA           98555    /* 默认基准(Pa): EEPROM 无有效基准时使用 */
+#define ZERO_CAL_HOLD_MS              8000     /* 校准手势: 长按判定(ms) */
+#define ZERO_CAL_CONFIRM_MS           3000     /* 校准手势: 确认窗口(ms), 从满 8 秒起算 */
+#define ZERO_CAL_CONFIRM_PRESSES      2        /* 校准手势: 确认所需短按次数 */
+#define LED_FAIL_HOLD_MS              5000     /* 校准失败: 三灯全亮提示时长(ms) */
+#define LED_NOTICE_MS                 5000     /* 按键有效: 三灯全亮提示时长(ms) */
+#define LED_BOOT_NOTICE_MS            1000     /* 开机提示: 三灯全亮时长(ms) */
+
+/* ---------- 未安装校零前置模式 (编译期软件开关) ----------
+ * 1=启用: 无已安装标志时开机先进入校零前置模式
+ *        (仅5分钟采样校零+安装判定 与 每天10:00一次占位实时上报)
+ * 0=禁用: 恢复旧行为(不校零, 直接进入正常状态机) */
+#define CALIB_MODE_ENABLED            0
+
+/* ---------- 产品复用配置默认值 ----------
+ * 注意: 必须定义在下面 IIC2 引脚映射之前 —— IIC2 是否存在由
+ *       APP_DEFAULT_SENSOR_COUNT 决定, 而 #if 只会看到此前已定义的宏。 */
+#define APP_DEFAULT_LCD_ENABLED       0         /* 0=无LCD产品(本板), 1=有LCD产品 */
+#define APP_DEFAULT_SENSOR_COUNT      1         /* 1=单路传感器(进气端), 2=双路传感器(本板双路) */
 
 /* ---------- 三组独立 I2C 总线引脚映射 ---------- */
-#define IIC0_SCL_PORT  GPIOB    /* IIC0: EEPROM    SCL */
+#define IIC0_SCL_PORT  GPIOB    /* IIC0: EEPROM      SCL */
 #define IIC0_SCL_PIN   GPIO_PIN_6
 #define IIC0_SDA_PORT  GPIOB    /* IIC0: EEPROM    SDA */
 #define IIC0_SDA_PIN   GPIO_PIN_7
-#define IIC1_SCL_PORT  GPIOD    /* IIC1: 中压传感器 SCL S2*/
+#define IIC1_SCL_PORT  GPIOD    /* IIC1: 进气端(中压)传感器 SCL (S2) */
 #define IIC1_SCL_PIN   GPIO_PIN_4
-#define IIC1_SDA_PORT  GPIOD    /* IIC1: 中压传感器 SDA S2*/
+#define IIC1_SDA_PORT  GPIOD    /* IIC1: 进气端(中压)传感器 SDA (S2) */
 #define IIC1_SDA_PIN   GPIO_PIN_5
 
 #if APP_DEFAULT_SENSOR_COUNT == 2
-#define IIC2_SCL_PORT  GPIOC    /* IIC2: 低压传感器 SCL S1*/
+#define IIC2_SCL_PORT  GPIOC    /* IIC2: 出气端(低压)传感器 SCL (S1) */
 #define IIC2_SCL_PIN   GPIO_PIN_0
-#define IIC2_SDA_PORT  GPIOC    /* IIC2: 低压传感器 SDA S1*/
+#define IIC2_SDA_PORT  GPIOC    /* IIC2: 出气端(低压)传感器 SDA (S1) */
 #define IIC2_SDA_PIN   GPIO_PIN_1
 #endif /*  */
 
 /* ---------- 软件 I2C 总线速率 (半周期延时计数, 越小越快) ---------- */
 #define SOFT_I2C_HALF_PERIOD       150
 
-/* 注: 本板 I2C 常供电, 无传感器电源开关; PC3 为电压采集基准, 归 BSP/adc_bat.c 管理 */
+/* 注: 传感器 IIC 电源由 PC3 开关控制 (BSP/power.c: PWR_SENSOR_PORT/PIN);
+ *     电压采集基准/使能脚已挪到 PB11 (BSP/adc_bat.c) */
 /* 电机引脚 (MOTOR_SLEEP_PORT/PIN, MOTOR_DRV_MODE) 已移至 BSP/motor.h */
 
 #define APP_DEFAULT_REAL_ENABLED      1         /* 0=禁用, 1=启用秒级采集 */
 #define APP_DEFAULT_REAL_FREQUENCY    5         /* 秒数 (1-10) */
-
-/* ---------- 产品复用配置默认值 ---------- */
-#define APP_DEFAULT_LCD_ENABLED       1         /* 0=无LCD产品, 1=有LCD产品 */
-#define APP_DEFAULT_SENSOR_COUNT      1         /* 1=单路传感器(进气端), 2=双路传感器 */
 
 /* ---------- 阈值默认值 ---------- */
 /* 注: 阈值结构已拆分为 4 组独立配置, 默认值定义在 eeprom_config.h:

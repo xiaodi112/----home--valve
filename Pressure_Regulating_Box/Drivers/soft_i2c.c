@@ -1,6 +1,8 @@
 #include "soft_i2c.h"
 #include "power.h"
 #include "delay.h"
+#include "power.h"
+#include "delay.h"
 
 /* ==================== 三组总线实例 ==================== */
 /* half_period 统一取 SOFT_I2C_HALF_PERIOD (app_config.h), 默认 150 与原驱动一致;
@@ -158,8 +160,16 @@ void soft_i2c_sensors_init(void)
 	#endif /* 双传感器 */
 }
 
-/* ==================== 传感器电源控制 (常供电板型) ==================== */
-/* 传感器/EEPROM 常供电. PC3 已改作电压采集基准 (归 adc_bat 管理, 采样时输出低),
- * 保留空接口仅为兼容旧调用点, 严禁在此拉高 PC3 */
-void sensor_pwr_on(void)  { }
-void sensor_pwr_off(void) { }
+/* ==================== 传感器电源控制 (PC3, 高电平供电) ====================
+ * 采集流程: sensor_pwr_on() → 等待上电稳定 → I2C 采集 → sensor_pwr_off()
+ * 引脚映射收口在 BSP/power.c (PWR_SENSOR_PORT/PIN), 本驱动不出现裸引脚。 */
+void sensor_pwr_on(void)
+{
+    power_sensor_set(1);
+    trea_delay_ms(SENSOR_PWR_SETTLE_MS);   /* 传感器与 I2C 上拉网络上电稳定时间 */
+}
+
+void sensor_pwr_off(void)
+{
+    power_sensor_set(0);
+}

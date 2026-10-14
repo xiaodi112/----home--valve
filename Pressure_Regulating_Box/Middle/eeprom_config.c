@@ -7,6 +7,8 @@
 #include "config_store.h"
 #include "config_policy.h"
 #include "app_config.h"
+#include "calib_mode.h"
+#include "zero_cal.h"
 #include "valve_timing.h"
 #include "wakeup.h"
 #include "usart.h"
@@ -15,6 +17,8 @@
 #include "tim.h"
 #include "PT_304_35.h"
 #include "main.h"
+#include "eeprom_history.h"
+#include "leak_store.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -271,6 +275,9 @@ EE_WRITE_BYTE(EE_ADDR_INTERVAL_MAGIC, 0xFF);
         EE_WRITE_BYTE(EE_ADDR_CH4_MAGIC,      0xFF);
         EE_WRITE_BYTE(EE_ADDR_LASER_MAGIC,    0xFF);
         EE_WRITE_BYTE(EE_ADDR_ABN2_MAGIC,     0xFF);
+        EE_WRITE_BYTE(EE_ADDR_UPL_MAGIC,      0xFF);   /* 上报防重锁: 恢复出厂后重新起算 */
+        calib_erase_state();    /* reset 同时清除已安装锁定/零点, 恢复未安装校零状态 */
+        zero_cal_erase();       /* reset 同时清除新传感器的大气基准(零点), 重启后重新采集 */
         NVIC_SystemReset();
         return -1;  // 不会到达
         }
@@ -380,6 +387,7 @@ if(strstr(cmd, "id:report_cycle"))
             config_save_interval();
             config_save_ext();
             config_recalc_interval();
+            upload_schedule_reset();   /* 周期变更: 重置网格防重锁, 严格等到下一目标 */
         }
         printf_debug("[CFG] report_cycle: %d*%s (%.2fh)\r\n",
                      g_report_cycle.once, cycle_type_to_str(g_report_cycle.type),
@@ -591,6 +599,40 @@ uint8_t mqtt_valid = 0;
     }
 }
 
+
+// ==================== 存储布局版本 / 迁移 ====================
+/* 上电检查 EEPROM 分区布局版本:
+ *   读到当前版本 → 返回 0 (正常启动, 不动数据)
+ *   读到其它值   → 判定为旧布局(或首次烧写设备), 主动格式化历史区与测漏区后写入当前版本,
+ *                  返回 1。这样"历史区/测漏区搬家"不会把旧分区的残留当成有效数据。
+ * 调用时机: config_load_all() + ee_hist_init() + leak_store_init() 之后,
+ *           任何历史/测漏读写之前 (main() 内)。 */
+uint8_t eeprom_layout_check_and_migrate(void)
+{
+    uint8_t magic = 0xFF;
+    uint8_t ver = 0xFF;
+
+    EE_READ(EE_ADDR_LAYOUT_MAGIC, &magic, 1);
+    EE_READ(EE_ADDR_LAYOUT_VER, &ver, 1);
+
+    if(magic == EE_MAGIC_LAYOUT && ver == EE_LAYOUT_VER_CURRENT)
+    {
+        printf_debug("[CFG] storage layout ver=%d OK\r\n", (int)ver);
+        return 0;
+    }
+
+    printf_debug("[CFG] storage layout changed (magic=0x%02X ver=%d -> %d), migrate...\r\n",
+                 (unsigned)magic, (int)ver, EE_LAYOUT_VER_CURRENT);
+
+    ee_hist_clear();        /* 历史区: 写管理头(count=0), 旧记录作废 */
+    leak_store_clear();     /* 测漏区: 逻辑清零 */
+
+    EE_WRITE_BYTE(EE_ADDR_LAYOUT_MAGIC, EE_MAGIC_LAYOUT);
+    EE_WRITE_BYTE(EE_ADDR_LAYOUT_VER, (uint8_t)EE_LAYOUT_VER_CURRENT);
+
+    printf_debug("[CFG] storage layout migrated to ver=%d\r\n", EE_LAYOUT_VER_CURRENT);
+    return 1;
+}
 
 // ==================== 打印当前配置 ====================
 void config_print_current(void)

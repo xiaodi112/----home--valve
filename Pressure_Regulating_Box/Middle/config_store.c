@@ -8,6 +8,7 @@
 #include "config_policy.h"
 #include "app_config.h"
 #include "valve_timing.h"
+#include "motor.h"        /* MOTOR_CS_TH_DEFAULT / 电流阈值换算 */
 #include "usart.h"
 #include "delay.h"
 #include "threshold.h"
@@ -60,6 +61,10 @@ uint8_t g_lcd_enabled = APP_DEFAULT_LCD_ENABLED;
 uint8_t g_sensor_count = APP_DEFAULT_SENSOR_COUNT;
 uint16_t g_keepalive_sec = APP_MQTT_KEEPALIVE;
 uint32_t g_valve_timeout_ms = DEF_VALVE_TIMEOUT_MS;   /* 阀门限位到位等待超时(ms) */
+uint16_t g_motor_cs_th = 0;            /* 堵转判定电流阈值(ADC原始值); 启动时由 config_load_all 决定:
+                                        * EEPROM 有效值(1~4095) → 用它; 其它情况 → MOTOR_CS_TH_DEFAULT */
+uint8_t  g_valve_pos_valid = 0;        /* 阀门位置可信标志: 动作前置0, 到位后置1 (脏标志法) */
+uint8_t  g_valve_pos_state = 0;        /* 阀门物理位置(0=关到底,1=开到底); 与"用户最后指令"解耦 */
 
 TempThresholdConfig_t g_tthreshold = {
     DEF_TT_SWITCH, DEF_TT_HIGH, DEF_TT_LOW, DEF_TT_VHIGH, DEF_TT_VLOW
@@ -133,9 +138,49 @@ void config_recalc_interval(void)
     if(g_interval.collect_interval_min > g_interval.upload_interval_min)
         g_interval.upload_interval_min = g_interval.collect_interval_min;
 
+    /* 跨天周期: 上报周期必须是采集周期的整数倍, 否则"上报点必然也是采集点"不成立,
+     * 且上报判定只在采集点执行 → 目标不落在采集点会被 120s 宽限判为"消费为 done"而漏报 */
+    {
+        uint16_t cm = g_interval.collect_interval_min;
+        uint16_t um = g_interval.upload_interval_min;
+        if(cm > 0u && um > 0u && (um % cm) != 0u)
+        {
+            uint32_t n = (uint32_t)(um / cm) + 1u;
+            uint32_t v = n * (uint32_t)cm;
+            if(v > 65535u)
+                v = ((uint32_t)65535u / (uint32_t)cm) * (uint32_t)cm;
+            g_interval.upload_interval_min   = (uint16_t)v;
+            g_interval.upload_interval_hours = (float)v / 60.0f;
+            printf_debug("[CFG] upload not multiple of collect: -> %umin\r\n", (unsigned)v);
+        }
+    }
+
     g_interval.upload_every_n = (uint16_t)(g_interval.upload_interval_min / g_interval.collect_interval_min);
     if(g_interval.upload_every_n == 0)
         g_interval.upload_every_n = 1;
+}
+
+/* ==================== 上报周期防重锁 (持久化) ==================== */
+/* 记录最后一次成功上报的"上报周期序号", 保证"一个上报周期只上报一次"(跨重启保持);
+ * 与运行期标志位 s_upload_pending / s_last_upload_idx 配合使用 */
+void config_save_upload_idx(uint32_t idx)
+{
+    EE_WRITE_BYTE(EE_ADDR_UPL_MAGIC, EE_MAGIC_UPL);
+    EE_WRITE(EE_ADDR_UPL_DONE_IDX, (const uint8_t *)&idx, 4);
+}
+
+uint32_t config_load_upload_idx(void)
+{
+    uint8_t  magic = 0;
+    uint32_t idx   = 0xFFFFFFFFu;
+
+    EE_READ(EE_ADDR_UPL_MAGIC, &magic, 1);
+    if(magic == EE_MAGIC_UPL)
+    {
+        EE_READ(EE_ADDR_UPL_DONE_IDX, (uint8_t *)&idx, 4);
+        if(idx == 0u) idx = 0xFFFFFFFFu;   /* 无效值按"未上报"处理 */
+    }
+    return idx;
 }
 
 /* ==================== 区块1: 采集/上报间隔 ==================== */
@@ -382,7 +427,21 @@ void config_save_ext(void)
     ee_write_float(EE_ADDR_REPORT_DELAY, g_report_delay_min);
     EE_WRITE_BYTE(EE_ADDR_LCD_ENABLED, g_lcd_enabled);
     EE_WRITE_BYTE(EE_ADDR_VLP_FLAG, voltage_low_power);
+    EE_WRITE(EE_ADDR_MOTOR_CS_TH, (const uint8_t *)&g_motor_cs_th, 2);
+    EE_WRITE_BYTE(EE_ADDR_VALVE_POS_VALID, g_valve_pos_valid);
+    EE_WRITE_BYTE(EE_ADDR_VALVE_POS_STATE, g_valve_pos_state);
     printf_debug("[CFG] EXT saved\r\n");
+}
+
+/* ---------- 单字段写入: 避免整块 EXT 重写(延长 EEPROM 寿命/缩短写入时间) ---------- */
+void config_save_motor_cs_th(void)
+{
+    EE_WRITE(EE_ADDR_MOTOR_CS_TH, (const uint8_t *)&g_motor_cs_th, 2);
+}
+
+void config_save_valve_pos_valid(void)
+{
+    EE_WRITE_BYTE(EE_ADDR_VALVE_POS_VALID, g_valve_pos_valid);
 }
 
 /* ==================== 心跳 ==================== */
@@ -707,6 +766,13 @@ void config_load_all(void)
         EE_READ(EE_ADDR_COLLECT_TYPE, (uint8_t *)&g_collect_cycle.type, 1);
         EE_READ(EE_ADDR_REPORT_ONCE,  (uint8_t *)&g_report_cycle.once,  2);
         EE_READ(EE_ADDR_REPORT_TYPE,  (uint8_t *)&g_report_cycle.type,  1);
+        /* 周期越界钳制 (防 EEPROM 脏数据/旧版写入导致分钟域溢出) */
+        if(cycle_clamp(&g_collect_cycle))
+            printf_debug("[CFG] collect cycle clamped to %u*%s\r\n",
+                         g_collect_cycle.once, cycle_type_to_str(g_collect_cycle.type));
+        if(cycle_clamp(&g_report_cycle))
+            printf_debug("[CFG] report cycle clamped to %u*%s\r\n",
+                         g_report_cycle.once, cycle_type_to_str(g_report_cycle.type));
         ee_read_string(EE_ADDR_ABNORMAL_CLOSE, g_abnormal_close, 16);
         EE_READ(EE_ADDR_VALVE_LAST_ORDER, &g_valve_last_order, 1);
         EE_READ(EE_ADDR_REAL_ENABLED, &g_real_enabled, 1);
@@ -714,6 +780,31 @@ void config_load_all(void)
         EE_READ(EE_ADDR_VALVE_ALARM_CLOSED, &g_valve_alarm_closed, 1);
         EE_READ(EE_ADDR_VALVE_PRE_ALARM_ORDER, &g_valve_pre_alarm_order, 1);
         EE_READ(EE_ADDR_CH4_ALARM_CLOSED, &g_ch4_alarm_closed, 1);
+
+        /* 堵转电流阈值 + 阀门位置可信标志 (新板堵转方案) */
+        {
+            uint16_t cs_th = 0xFFFF;
+            EE_READ(EE_ADDR_MOTOR_CS_TH, (uint8_t *)&cs_th, 2);
+            /* 有效范围 1~4095 用 EEPROM; 0(未标定)/0xFFFF(从未写过)/越界 → 用编译期出厂默认。
+             * 注: 需要"关闭堵转判定"时, 把 MOTOR_CS_TH_MA_DEFAULT 设为 0 重新编译即可。 */
+            if(cs_th >= 1u && cs_th <= 4095u)
+                g_motor_cs_th = cs_th;
+            else
+                g_motor_cs_th = MOTOR_CS_TH_DEFAULT;
+            EE_READ(EE_ADDR_VALVE_POS_VALID, &g_valve_pos_valid, 1);
+            if(g_valve_pos_valid >= 2) g_valve_pos_valid = 0;
+            EE_READ(EE_ADDR_VALVE_POS_STATE, &g_valve_pos_state, 1);
+            if(g_valve_pos_state >= 2)
+            {
+                /* 未写过(0xFF)/非法值: 视为"位置未知", 不冒充"阀关",
+                 * 由下一次阀门动作先回零重建位置 (安全侧处理) */
+                g_valve_pos_state = 0;
+                g_valve_pos_valid = 0;
+            }
+            printf_debug("[CFG] motor: cs_th=%u(%lumA) pos_valid=%d\r\n",
+                         g_motor_cs_th, (unsigned long)MOTOR_CS_RAW_TO_MA(g_motor_cs_th),
+                         g_valve_pos_valid);
+        }
         g_report_delay_min = ee_read_float(EE_ADDR_REPORT_DELAY);
         /* 合法性: NaN/越界(0~60)回退 0 */
         if(!(g_report_delay_min >= 0.0f && g_report_delay_min <= 60.0f))
@@ -766,6 +857,10 @@ void config_load_all(void)
         g_real_frequency = APP_DEFAULT_REAL_FREQUENCY;
         g_lcd_enabled = APP_DEFAULT_LCD_ENABLED;
         g_sensor_count = APP_DEFAULT_SENSOR_COUNT;
+        /* 堵转方案: EEPROM 无有效 EXT 块时也套用编译期出厂阈值, 否则首启会"未标定"无法动作 */
+        g_motor_cs_th = MOTOR_CS_TH_DEFAULT;
+        g_valve_pos_valid = 0;
+        g_valve_pos_state = 0;
         g_valve_alarm_closed = 0;
         g_valve_pre_alarm_order = 0;
         g_ch4_alarm_closed = 0;

@@ -8,6 +8,7 @@
 #include "report.h"
 #include "ec800e.h"
 #include "eeprom_config.h"
+#include "calib_mode.h"
 #include "valve_timing.h"
 #include "app_config.h"
 #include "threshold.h"
@@ -22,6 +23,7 @@
 #include "tim.h"
 #include "json_builder.h"
 #include "gd32l23x.h"
+#include "leak_task.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -94,71 +96,72 @@ typedef struct {
 } CmdMap;
 
 static const CmdMap s_cmd_map[] = {
-    {"valve_open",        "valve",           "open",  NULL},
-    {"valve_close",       "valve",           "close", NULL},
-    {"get_pressure",      "get_pressure",    "1",     NULL},
-    {"get_pressure1",     "get_pressure",    "1",     NULL},
-    {"get_sim",           "get_sim",         "1",     NULL},
-    {"get_ip",            "get_ip",          "1",     NULL},
-    {"sensor_status",     "sensor_status",   "1",     NULL},
+    {"valve-open",        "valve",           "open",  NULL},
+    {"valve-close",       "valve",           "close", NULL},
+    {"get-pressure",      "get_pressure",    "1",     NULL},
+    {"get-pressure1",     "get_pressure",    "1",     NULL},
+    {"get-sim",           "get_sim",         "1",     NULL},
+    {"get-ip",            "get_ip",          "1",     NULL},
+    {"sensor-status",     "sensor_status",   "1",     NULL},
     {"restart",           "restart",         "1",     NULL},
-    {"restart_off",       "restart_off",     "1",     NULL},
-    {"4Gpower_off",       "4Gpower_off",     "1",     NULL},
-    {"temp_get1",         "temp_status",     "1",     NULL},
-    {"temp_get2",         "temp_status2",    "1",     NULL},
-    {"LY06_get",          "LY06_get",        "1",     NULL},
-    {"gas_get",           "gas_get",         "1",     NULL},
-    {"laser_get",         "laser_get",       "",      NULL},
-    {"laser_set",         "laser_set",       NULL,    "laser_switch"},
-    {"msh_get",           "msh_get",         "",      NULL},
-    {"msh_set",           "msh_set",         NULL,    "msh_threshold"},
-    {"get_pressure2",     "get_pressure2",   "1",     NULL},
-    {"threshold_get1",    "threshold",       "",      NULL},
-    {"collectcycle_get",  "collect_cycle",   "",      NULL},
-    {"report_get",        "report_cycle",    "",      NULL},
-    {"window_get",        "window_pattern",  "",      NULL},
-    {"abnormal_get",      "abnormal_close",  "",      NULL},
-    {"abnormal2_get",     "abnormal2_close", "",      NULL},
-    {"abnormal3_get",     "abnormal3_close", "",      NULL},
-    {"first_ip_get",      "get_ip",          "1",     NULL},
-    {"scend_ip_get",      "get_scend_ip",    "1",     NULL},
-    {"valve_last_get",    "valve_last_order","1",     NULL},
-    {"real_get",          "real_get",        "",      NULL},
-    {"user_ip_get",       "user_ip_get",     "1",     NULL},
-    {"MQTT_get",          "user_mqtt_get",   "1",     NULL},
+    {"restart-off",       "restart_off",     "1",     NULL},
+    {"4Gpower-off",       "4Gpower_off",     "1",     NULL},
+    {"temp-get1",         "temp_status",     "1",     NULL},
+    {"temp-get2",         "temp_status2",    "1",     NULL},
+    {"LY06-get",          "LY06_get",        "1",     NULL},
+    {"gas-get",           "gas_get",         "1",     NULL},
+    {"laser-get",         "laser_get",       "",      NULL},
+    {"laser-set",         "laser_set",       NULL,    "laser_switch"},
+    {"msh-get",           "msh_get",         "",      NULL},
+    {"msh-set",           "msh_set",         NULL,    "msh_threshold"},
+    {"get-pressure2",     "get_pressure2",   "1",     NULL},
+    {"threshold-get1",    "threshold",       "",      NULL},
+    {"collectcycle-get",  "collect_cycle",   "",      NULL},
+    {"report-get",        "report_cycle",    "",      NULL},
+    {"window-get",        "window_pattern",  "",      NULL},
+    {"abnormal-get",      "abnormal_close",  "",      NULL},
+    {"abnormal2-get",     "abnormal2_close", "",      NULL},
+    {"abnormal3-get",     "abnormal3_close", "",      NULL},
+    {"first-ip-get",      "get_ip",          "1",     NULL},
+    {"scend-ip-get",      "get_scend_ip",    "1",     NULL},
+    {"valve-last-get",    "valve_last_order","1",     NULL},
+    {"real-get",          "real_get",        "",      NULL},
+    {"user-ip-get",       "user_ip_get",     "1",     NULL},
+    {"MQTT-get",          "user_mqtt_get",   "1",     NULL},
     // 带参数提取的命令
-    {"collectspeed_set",  "collect_cycle",   NULL,    "collect_once"},
-    {"report_set",        "report_cycle",    NULL,    "report_once"},
-    {"window_set",        "window_pattern",  NULL,    "window_pattern"},
-    {"abnormal_set",      "abnormal_close",  NULL,    "abnormal_close"},
-    {"abnormal2_set",     "abnormal2_close", NULL,    "abnormal2_close"},
-    {"abnormal3_set",     "abnormal3_close", NULL,    "abnormal3_close"},
-    {"first_ip_set",      "first_ip_set",    NULL,    "first_ip"},
-    {"scend_ip_set",      "scend_ip_set",    NULL,    "scend_ip"},
-    {"real_set",          "real_set",        NULL,    "real_enabled"},
-    {"user_ip_set",       "user_ip_set",     NULL,    "user_ip"},
-    {"MQTT_set",          "user_mqtt_set",   "1",     NULL},
+    {"collectspeed-set",  "collect_cycle",   NULL,    "collect_once"},
+    {"report-set",        "report_cycle",    NULL,    "report_once"},
+    {"window-set",        "window_pattern",  NULL,    "window_pattern"},
+    {"abnormal-set",      "abnormal_close",  NULL,    "abnormal_close"},
+    {"abnormal2-set",     "abnormal2_close", NULL,    "abnormal2_close"},
+    {"abnormal3-set",     "abnormal3_close", NULL,    "abnormal3_close"},
+    {"first-ip-set",      "first_ip_set",    NULL,    "first-ip"},
+    {"scend-ip-set",      "scend_ip_set",    NULL,    "scend-ip"},
+    {"real-set",          "real_set",        NULL,    "real_enabled"},
+    {"install-status-set","install_status_set",NULL,  "install_status"},
+    {"user-ip-set",       "user_ip_set",     NULL,    "user-ip"},
+    {"MQTT-set",          "user_mqtt_set",   "1",     NULL},
     // 阈值 set/get
-    {"vpthreshold_set1",  "vpthreshold",     "1",     NULL},
-    {"vpthreshold_get1",  "vpthreshold",     "",      NULL},
-    {"Tthreshold_set",    "Tthreshold",      "1",     NULL},
-    {"Tthreshold_get",    "Tthreshold",      "",      NULL},
-    {"spupower_set",      "spupower",        "1",     NULL},
-    {"spupower_get",      "spupower",        "",      NULL},
-    {"delay_set",         "delay",           "1",     NULL},
-    {"delay_get",         "delay",           "",      NULL},
-    {"vpthreshold_set2",  "vpthreshold2",    "1",     NULL},
-    {"vpthreshold_get2",  "vpthreshold2",    "",      NULL},
-    {"Tthreshold_set2",   "Tthreshold2",     "1",     NULL},
-    {"Tthreshold_get2",   "Tthreshold2",     "",      NULL},
-    {"lcd_switch",        "lcd_switch",      NULL,    "lcd_switch"},
+    {"vpthreshold-set1",  "vpthreshold",     "1",     NULL},
+    {"vpthreshold-get1",  "vpthreshold",     "",      NULL},
+    {"Tthreshold-set",    "Tthreshold",      "1",     NULL},
+    {"Tthreshold-get",    "Tthreshold",      "",      NULL},
+    {"spupower-set",      "spupower",        "1",     NULL},
+    {"spupower-get",      "spupower",        "",      NULL},
+    {"delay-set",         "delay",           "1",     NULL},
+    {"delay-get",         "delay",           "",      NULL},
+    {"vpthreshold-set2",  "vpthreshold2",    "1",     NULL},
+    {"vpthreshold-get2",  "vpthreshold2",    "",      NULL},
+    {"Tthreshold-set2",   "Tthreshold2",     "1",     NULL},
+    {"Tthreshold-get2",   "Tthreshold2",     "",      NULL},
+    {"lcd-switch",        "lcd_switch",      NULL,    "lcd_switch"},
     // 阀门及定时开关
-    {"valve_get",         "valve_status",    "1",     NULL},
-    {"closeoropen_get",   "closeoropen",     "",      NULL},
-    {"closeoropen_set",   "closeoropen",     "1",     NULL},
+    {"valve-get",         "valve_status",    "1",     NULL},
+    {"closeoropen-get",   "closeoropen",     "",      NULL},
+    {"closeoropen-set",   "closeoropen",     "1",     NULL},
     // 表号
-    {"table_get",         "table",           "",      NULL},
-    {"table_set",         "table",           NULL,    "table"},
+    {"table-get",         "table",           "",      NULL},
+    {"table-set",         "table",           NULL,    "table"},
 };
 #define CMD_MAP_COUNT (sizeof(s_cmd_map) / sizeof(s_cmd_map[0]))
 
@@ -380,7 +383,7 @@ static void h_valve(const char *id_val, const char *cmd_val, const char *raw_buf
         if(g_valve_alarm_closed)
         {
             g_valve_alarm_closed = 0;
-            g_valve_pre_alarm_order = g_valve_last_order;
+            g_valve_pre_alarm_order = g_valve_pos_state;   /* 关阀前的物理状态 */
             config_save_ext();
             printf_debug("[SM] Valve user override: cleared alarm_closed flag\r\n");
         }
@@ -428,7 +431,7 @@ static void h_sensor_read(const char *id_val, const char *cmd_val, const char *r
             EC801E_PublishSensorData(&g_sensor.raw, g_sensor.voltage);
             rtc_get_time_str(ts_buf, sizeof(ts_buf));
             jb_begin(&jb, json_buf, sizeof(json_buf));
-            jb_add_str(&jb, "pressure_status", ps_str, ts_buf);
+            jb_add_str(&jb, "pressure-status", ps_str, ts_buf);
             publish_json_only();
             trea_delay_ms(300);
             report_publish_feedback(30);   /* 压力状态获取成功 */
@@ -468,10 +471,15 @@ if(cmd_val[0] != '\0')
             g_collect_cycle.once = (uint16_t)atoi(cmd_val);
             extract_field_dual(raw_buf, "type", "collect_type", type_buf, sizeof(type_buf));
             if(type_buf[0]) g_collect_cycle.type = cycle_type_from_str(type_buf);
+            /* 越界钳制: 防止 (uint16)atoi 静默截断后写入不可执行的大周期 */
+            if(cycle_clamp(&g_collect_cycle))
+                printf_debug("[SM] collect cycle out of range, clamped to %u*%s\r\n",
+                             g_collect_cycle.once, cycle_type_to_str(g_collect_cycle.type));
             g_interval.collect_interval_hours = (float)cycle_to_seconds(&g_collect_cycle) / 3600.0f;
             config_save_interval();
             config_save_ext();
             config_recalc_interval();
+            upload_schedule_reset();   /* 周期变更: 重置网格防重锁, 严格等到下一目标 */
             printf_debug("[SM] collect_cycle -> %d*%s\r\n",
                          g_collect_cycle.once, cycle_type_to_str(g_collect_cycle.type));
         }
@@ -493,10 +501,15 @@ if(cmd_val[0] != '\0')
             g_report_cycle.once = (uint16_t)atoi(cmd_val);
             extract_field_dual(raw_buf, "type", "report_type", type_buf, sizeof(type_buf));
             if(type_buf[0]) g_report_cycle.type = cycle_type_from_str(type_buf);
+            /* 越界钳制: 防止 (uint16)atoi 静默截断后写入不可执行的大周期 */
+            if(cycle_clamp(&g_report_cycle))
+                printf_debug("[SM] report cycle out of range, clamped to %u*%s\r\n",
+                             g_report_cycle.once, cycle_type_to_str(g_report_cycle.type));
             g_interval.upload_interval_hours = (float)cycle_to_seconds(&g_report_cycle) / 3600.0f;
             config_save_interval();
             config_save_ext();
             config_recalc_interval();
+            upload_schedule_reset();   /* 周期变更: 重置网格防重锁, 严格等到下一目标 */
             printf_debug("[SM] report_cycle -> %d*%s\r\n",
                          g_report_cycle.once, cycle_type_to_str(g_report_cycle.type));
         }
@@ -750,12 +763,51 @@ static void h_abnormal3_close(const char *id_val, const char *cmd_val, const cha
         report_publish_feedback(cmd_val[0] != '\0' ? 29 : 28);
 }
 
+/* 平台强制状态转换: install_status_set=1 → 置已安装(幂等)
+ * 值在 commandParms 的 id/value 对中, 直接从原始报文解析 */
+static void h_install_status_set(const char *id_val, const char *cmd_val, const char *raw_buf)
+{
+#if CALIB_MODE_ENABLED
+    const char *p;
+    char val_buf[8] = {0};
+    uint16_t i = 0;
+
+    (void)id_val;
+    (void)cmd_val;
+    p = strstr(raw_buf, "install_status");
+    if(p) p = strstr(p, "\"value\":\"");
+    if(p)
+    {
+        p += 9;
+        while(*p && *p != '"' && i < sizeof(val_buf) - 1)
+            val_buf[i++] = *p++;
+    }
+    printf_debug("[SM] install_status_set value='%s'\r\n", val_buf);
+
+    if(strcmp(val_buf, "1") == 0)
+    {
+        if(calib_force_install())
+        {
+            install_event_report();                 /* 一次性: 传感器记录 + product-status=1 */
+            report_publish_feedback(37);            /* 状态强制转换成功 */
+            printf_debug("[SM] install_status forced OK (37)\r\n");
+        }
+    }
+    else
+    {
+        printf_debug("[SM] install_status value ignored (only 1 supported)\r\n");
+    }
+#else
+    printf_debug("[SM] install_status_set ignored (CALIB_MODE_ENABLED=0)\r\n");
+#endif
+}
+
 static void h_valve_last_order(const char *id_val, const char *cmd_val, const char *raw_buf)
 {
 char v[4];
         snprintf(v, sizeof(v), "%d", g_valve_last_order);
         if(EC801E_EnsureConnected() == EC_OK)
-            EC801E_PublishResponse("valve_last_order", v);
+            EC801E_PublishResponse("valve-last-order", v);
 }
 
 static void h_keepalive(const char *id_val, const char *cmd_val, const char *raw_buf)
@@ -801,12 +853,12 @@ char iccid[32] = {0}, csq[8] = {0}, imei_buf[24] = {0};
 
 static void h_get_ip(const char *id_val, const char *cmd_val, const char *raw_buf)
 {
-report_publish_ip_field("first_ip", g_mqtt.server, g_mqtt.port, 1);
+report_publish_ip_field("first-ip", g_mqtt.server, g_mqtt.port, 1);
 }
 
 static void h_get_scend_ip(const char *id_val, const char *cmd_val, const char *raw_buf)
 {
-report_publish_ip_field("scend_ip", g_mqtt.server2, g_mqtt.port2, 1);
+report_publish_ip_field("scend-ip", g_mqtt.server2, g_mqtt.port2, 1);
 }
 
 static void h_first_ip_set(const char *id_val, const char *cmd_val, const char *raw_buf)
@@ -823,10 +875,10 @@ char ip_buf[MQTT_FIELD_MAX];
             EC801E_DisconnectMQTT();
             trea_delay_ms(500);
             EC801E_ConnectMQTT();
-            EC801E_SubscribeTopic();
+            EC801E_SubscribeAll();      /* 改IP重连后重订阅全部主题(含OTA/测漏) */
             if(EC801E_EnsureConnected() == EC_OK)
             {
-                EC801E_PublishResponse("first_ip_set", cmd_val);
+                EC801E_PublishResponse("first-ip-set", cmd_val);
                 trea_delay_ms(300);
                 report_publish_feedback(2);
             }
@@ -851,7 +903,7 @@ char ip_buf[MQTT_FIELD_MAX];
             printf_debug("[SM] Secondary IP set: %s:%d\r\n", g_mqtt.server2, g_mqtt.port2);
             if(EC801E_EnsureConnected() == EC_OK)
             {
-                EC801E_PublishResponse("scend_ip_set", cmd_val);
+                EC801E_PublishResponse("scend-ip-set", cmd_val);
                 trea_delay_ms(300);
                 report_publish_feedback(2);
             }
@@ -886,7 +938,7 @@ collect_all_sensors();
         {
             rtc_get_time_str(ts_buf, sizeof(ts_buf));
             jb_begin(&jb, json_buf, sizeof(json_buf));
-            jb_add_str(&jb, "temp_status", ts_str, ts_buf);
+            jb_add_str(&jb, "temp-status", ts_str, ts_buf);
             jb_add_float(&jb, "temp", g_sensor.raw.temperature, ts_buf);
             publish_json_only();
             trea_delay_ms(300);
@@ -1008,7 +1060,7 @@ collect_all_sensors();
         {
             rtc_get_time_str(ts_buf, sizeof(ts_buf));
             jb_begin(&jb, json_buf, sizeof(json_buf));
-            jb_add_str(&jb, "temp2_status", ts2_str, ts_buf);
+            jb_add_str(&jb, "temp2-status", ts2_str, ts_buf);
             jb_add_float(&jb, "temp2", g_sensor.raw2.temperature, ts_buf);
             publish_json_only();
             trea_delay_ms(300);
@@ -1026,7 +1078,7 @@ collect_all_sensors();
         {
             rtc_get_time_str(ts_buf, sizeof(ts_buf));
             jb_begin(&jb, json_buf, sizeof(json_buf));
-            jb_add_str(&jb, "pressure2_status", ps2_str, ts_buf);
+            jb_add_str(&jb, "pressure2-status", ps2_str, ts_buf);
             jb_add_float(&jb, "pressure2", g_sensor.raw2.pressure, ts_buf);
             jb_add_float(&jb, "temp2", g_sensor.raw2.temperature, ts_buf);
             publish_json_only();
@@ -1037,7 +1089,7 @@ collect_all_sensors();
 
 static void h_user_ip_get(const char *id_val, const char *cmd_val, const char *raw_buf)
 {
-report_publish_ip_field("user_ip", g_user_mqtt.server, g_user_mqtt.port, 1);
+report_publish_ip_field("user-ip", g_user_mqtt.server, g_user_mqtt.port, 1);
 }
 
 static void h_user_ip_set(const char *id_val, const char *cmd_val, const char *raw_buf)
@@ -1056,7 +1108,7 @@ char ip_buf[MQTT_FIELD_MAX];
             printf_debug("[SM] User IP set: %s:%d\r\n", g_user_mqtt.server, g_user_mqtt.port);
             if(EC801E_EnsureConnected() == EC_OK)
             {
-                EC801E_PublishResponse("user_ip_set", cmd_val);
+                EC801E_PublishResponse("user-ip-set", cmd_val);
                 trea_delay_ms(300);
                 report_publish_feedback(2);
             }
@@ -1112,7 +1164,7 @@ const char *vs = valve_get_status();
         printf_debug("[SM] valve_get: %s\r\n", vs);
         if(EC801E_EnsureConnected() == EC_OK)
         {
-            EC801E_PublishResponse("valve_control", vs);
+            EC801E_PublishResponse("valve-control", vs);
             trea_delay_ms(300);
             report_publish_feedback(25);
         }
@@ -1271,6 +1323,7 @@ static const CmdHandler_t s_cmd_handlers[] = {
 //    { "4Gpower_off", h_4gpower_off },
     { "real_set", h_real_set },
     { "real_get", h_real_set },
+    { "install_status_set", h_install_status_set },
     { "lcd_switch", h_lcd_switch },
     { "vpthreshold2", h_vpthreshold2 },
     { "Tthreshold2", h_tthreshold2 },
@@ -1290,11 +1343,57 @@ static const CmdHandler_t s_cmd_handlers[] = {
     { "table", h_table },
 };
 #define CMD_HANDLER_COUNT (sizeof(s_cmd_handlers) / sizeof(s_cmd_handlers[0]))
+	
+/* ==================== 取数指令门禁 ====================
+ * 下列指令必须依赖"sensor 有效数据"才能应答。g_sensor.raw.err != PT304D_OK 时,
+ * 直接回压力/温度异常状态, 不允许把现场值(可能是残留值或上电默认值)发出去。
+ * 新增取数指令时在 s_sensor_req_ids[] 补一行即可(用的是归一化后的 id, 见 s_cmd_map)。 */
+typedef struct {
+    const char *id;          /* 归一化后的 id */
+    const char *status_id;   /* 无有效数据时回复的状态字段名 */
+    const char *status_val;  /* 无有效数据时回复的状态值 */
+} SensorReqId_t;
+
+static const SensorReqId_t s_sensor_req_ids[] = {
+    { "get_pressure",  "pressure-status",  "pressure-err" },  /* get-pressure / get-pressure1 */
+    { "temp_status",   "temp-status",      "temp-err"     },  /* temp-get1 */
+    { "get_pressure2", "pressure2-status", "pressure-err" },  /* get-pressure2 */
+    { "temp_status2",  "temp2-status",     "temp-err"     },  /* temp-get2 */
+};
+#define SENSOR_REQ_ID_COUNT (sizeof(s_sensor_req_ids) / sizeof(s_sensor_req_ids[0]))
+
+/* 无有效传感器数据时的应答: 只回压力/温度异常, 不发现场值 */
+static void reply_sensor_data_error(const SensorReqId_t *e)
+{
+    printf_debug("[SM] %s: no valid sensor data (err=%d) -> %s=%s\r\n",
+                 e->id, (int)g_sensor.raw.err, e->status_id, e->status_val);
+    if(EC801E_EnsureConnected() == EC_OK)
+    {
+        rtc_get_time_str(ts_buf, sizeof(ts_buf));
+        jb_begin(&jb, json_buf, sizeof(json_buf));
+        jb_add_str(&jb, e->status_id, e->status_val, ts_buf);
+        publish_json_only();
+    }
+}
 
 /* 处理单条下行指令 (表驱动分发) */
 static void process_downlink_cmd(const char *id_val, const char *cmd_val, const char *raw_buf)
 {
     uint8_t i;
+	
+    /* 取数指令门禁: 无有效传感器数据 → 只回异常状态, 不进 handler */
+    if(g_sensor.raw.err != PT304D_OK)
+    {
+        for(i = 0; i < SENSOR_REQ_ID_COUNT; i++)
+        {
+            if(strcmp(id_val, s_sensor_req_ids[i].id) == 0)
+            {
+                reply_sensor_data_error(&s_sensor_req_ids[i]);
+                return;
+            }
+        }
+    }
+
     for(i = 0; i < CMD_HANDLER_COUNT; i++)
     {
         if(strcmp(id_val, s_cmd_handlers[i].id) == 0)
@@ -1362,28 +1461,64 @@ static CmdKind_t parse_cmd(const char *raw, CmdRequest_t *req)
 }
 
 // ==================== 排空处理所有MQTT下行消息 ====================
+/* 处理一条已读取出来的下行 payload (解析 + 分发 + 回执)
+ * 供 drain_pending_downlink() 与静态测漏任务(任务期间轮询到的常规指令)共用 */
+void downlink_handle_raw(const char *raw)
+{
+    CmdRequest_t req;
+
+    if(raw == NULL) return;
+
+    if(parse_cmd(raw, &req) == CMD_KIND_OTA)
+    {
+        printf_debug("[SM] OTA upgrade cmd detected\r\n");
+        ota_app_handle_upgrade_cmd(raw);
+        return;
+    }
+
+    printf_debug("[SM] CMD id=%s value=%s\r\n", req.id, req.value);
+    process_downlink_cmd(req.id, req.value, raw);
+}
+
 uint8_t drain_pending_downlink(void)
 {
     static char dl_buf[1024];
-    CmdRequest_t req;
+    static char dl_topic[MQTT_TOPIC_MAX];
+    uint8_t flags[5];
     uint8_t msg_count = 0;
+    uint8_t round;
 
-    while(msg_count < 5)
+    /* 模块接收缓冲是 5 个固定槽位: 必须"先查槽位标志, 再按槽位读",
+     * 盲读 AT+QMTRECV=0 只能拿到槽位 0, 落在 1..4 的指令会永久滞留。
+     * 单轮最多读 5 条; 读完再查一轮(平台密发时本轮新到达的消息), 上限 20 条/6 轮。 */
+    for(round = 0; round <= 5 && msg_count < 20; round++)
     {
-        if(EC801E_ReadDownlink(dl_buf, sizeof(dl_buf)) != EC_OK)
-            break;
+        uint8_t i, n = 0;
 
-        msg_count++;
+        if(EC801E_QueryRecvSlots(flags) != EC_OK)
+            break;                       /* 查询失败: 缓存保持不动, 下次再读 */
 
-        if(parse_cmd(dl_buf, &req) == CMD_KIND_OTA)
+        for(i = 0; i < 5; i++) if(flags[i]) n++;
+        if(n == 0) break;                /* 缓冲区已空 */
+
+        for(i = 0; i < 5 && msg_count < 20; i++)
         {
-            printf_debug("[SM] OTA upgrade cmd detected\r\n");
-            ota_app_handle_upgrade_cmd(dl_buf);
-            continue;
-        }
+            if(!flags[i]) continue;
 
-        printf_debug("[SM] CMD id=%s value=%s\r\n", req.id, req.value);
-        process_downlink_cmd(req.id, req.value, dl_buf);
+            if(EC801E_ReadDownlinkById(i, dl_topic, sizeof(dl_topic),
+                                       dl_buf, sizeof(dl_buf)) != EC_OK)
+            {
+                printf_debug("[SM] slot %d read fail, re-query\r\n", i);
+                break;
+            }
+            msg_count++;
+
+            /* 静态测漏专用 topic (leak/set): 交给 leak_task, 不进入常规指令表 */
+            if(leak_task_on_msg(dl_topic, dl_buf))
+                continue;
+
+            downlink_handle_raw(dl_buf);   /* 内含 OTA 判据 + 解析 + 分发 */
+        }
     }
 
     return msg_count;

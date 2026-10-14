@@ -11,11 +11,11 @@
 /* 单字段状态上报: [{"id":..,"value":..,"ts":..,"remark":""}] */
 void report_publish_field(const char *id, const char *value);
 
-/* 上报传感器在线状态 (rtu_have/rtu_status 各 2) */
+/* 上报传感器在线状态 (rtu-have/rtu-status 各 2) */
 void report_publish_sensor_status(void);
 
 /* 报警批量上报: 一条消息包含全部通道的温度+压力状态
- * (实测值+状态同消息: temp/pressure/temp_status/pressure_status; 双传感器再加 temp2/pressure2/...) */
+ * (实测值+状态同消息: temp/pressure/temp-status/pressure-status; 双传感器再加 temp2/pressure2/...) */
 void report_publish_alarm_batch(float last_p1, float last_p2);
 
 /* 正常/恢复状态批量上报 (与报警同格式: 实测值 + 状态) */
